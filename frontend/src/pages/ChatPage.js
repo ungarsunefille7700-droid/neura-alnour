@@ -33,8 +33,41 @@ import {
   Zap,
   Star,
   Wand2,
-  Globe
+  Globe,
+  Code2,
+  Copy,
+  Check
 } from 'lucide-react';
+
+// Code block with a copy button (used for developer-mode responses).
+function CodeBlock({ children }) {
+  const ref = useRef(null);
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    const text = ref.current?.innerText || '';
+    navigator.clipboard?.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="relative my-3">
+      <button type="button" onClick={copy}
+        className="absolute right-2 top-2 z-10 inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
+        {copied ? <><Check className="w-3 h-3" /> Copié</> : <><Copy className="w-3 h-3" /> Copier</>}
+      </button>
+      <pre ref={ref} className="overflow-x-auto rounded-lg bg-[#0d1117] text-[#e6edf3] p-4 text-sm border border-border">
+        {children}
+      </pre>
+    </div>
+  );
+}
+
+const mdComponents = {
+  pre: CodeBlock,
+  code: ({ children }) => (
+    <code className="px-1.5 py-0.5 rounded bg-muted text-primary text-[0.85em]">{children}</code>
+  ),
+};
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -102,6 +135,8 @@ const ChatPage = () => {
   const [imageGenRemaining, setImageGenRemaining] = useState(null);
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('neura_model') || 'chatgpt');
   const [webSearch, setWebSearch] = useState(() => localStorage.getItem('neura_websearch') === '1');
+  const [devMode, setDevMode] = useState(() => localStorage.getItem('neura_devmode') === '1');
+  const [devSessionId, setDevSessionId] = useState(null);
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState(null);
   const [streamContent, setStreamContent] = useState('');
@@ -296,6 +331,37 @@ const ChatPage = () => {
     }
   };
 
+  // Developer (Code) mode: dedicated assistant endpoint with per-plan quotas.
+  const sendDevMessage = async (userMessage, tempId) => {
+    setLoading(true);
+    try {
+      const r = await axios.post(`${API}/developer/chat`,
+        { content: userMessage, session_id: devSessionId },
+        { headers: getAuthHeader(), timeout: 120000 });
+      setDevSessionId(r.data.session_id);
+      setMessages(prev => [...prev, {
+        id: `dev-${Date.now()}`, role: 'assistant', content: r.data.response,
+        created_at: new Date().toISOString()
+      }]);
+    } catch (err) {
+      if (err.response?.status === 429) {
+        const d = err.response.data?.detail || {};
+        setMessages(prev => [...prev, {
+          id: `dev-${Date.now()}`, role: 'assistant',
+          content: (d.message || 'Tu as atteint la limite de génération de ton abonnement.') +
+                   '\n\n👉 Passe à **Neura+** ou **Neura Ultra** pour continuer avec plus de puissance.',
+          created_at: new Date().toISOString()
+        }]);
+      } else {
+        toast.error('Service IA développeur temporairement indisponible.');
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+      }
+    } finally {
+      setLoading(false);
+      inputRef.current?.focus();
+    }
+  };
+
   const sendMessage = async (e) => {
     e.preventDefault();
     if ((!inputMessage.trim() && !selectedImage) || loading || streaming) return;
@@ -318,6 +384,12 @@ const ChatPage = () => {
     const imageToSend = selectedImage;
     setSelectedImage(null);
     setImagePreview(null);
+
+    // Developer (Code) mode -> dedicated assistant endpoint with quotas.
+    if (devMode && !imageToSend) {
+      await sendDevMessage(userMessage, tempUserMsg.id);
+      return;
+    }
 
     // Web search uses the SSE streaming endpoint (text only).
     if (webSearch && !imageToSend) {
@@ -680,7 +752,7 @@ const ChatPage = () => {
                     )}
                     {msg.role === 'assistant' ? (
                       <div className="markdown-content text-sm leading-relaxed">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{msg.content}</ReactMarkdown>
                       </div>
                     ) : (
                       <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
@@ -779,6 +851,16 @@ const ChatPage = () => {
               >
                 <Globe className="w-3 h-3" />
                 Web
+              </button>
+              <button
+                type="button"
+                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); if (v) { setWebSearch(false); localStorage.setItem('neura_websearch', '0'); } }}
+                className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${devMode ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+                data-testid="dev-mode-toggle"
+                title="Mode Développeur (génération de code)"
+              >
+                <Code2 className="w-3 h-3" />
+                Code
               </button>
             </div>
 

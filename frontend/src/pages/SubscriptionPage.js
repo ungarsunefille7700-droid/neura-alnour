@@ -197,6 +197,43 @@ const SubscriptionPage = () => {
       ],
       highlight: false,
       current: user?.subscription === 'developer'
+    },
+    {
+      id: 'neura_plus',
+      name: 'Neura+',
+      icon: Zap,
+      price: { monthly: 119.99, yearly: 1199.99 },
+      description: 'Assistant Développeur IA avancé',
+      features: [
+        'Tout l\'islamique reste gratuit',
+        'Assistant Développeur IA dans le chat',
+        '150 générations de code / heure',
+        'Génération multi-fichiers (jusqu\'à 10)',
+        'Analyse approfondie du projet',
+        'Mémoire développeur étendue',
+        'Code avancé & réponses longues',
+        'Priorité de traitement'
+      ],
+      highlight: false,
+      current: user?.subscription === 'neura_plus'
+    },
+    {
+      id: 'neura_ultra',
+      name: 'Neura Ultra',
+      icon: Crown,
+      price: { monthly: 299.99, yearly: 2999.99 },
+      description: 'Niveau ingénieur logiciel IA',
+      features: [
+        'Tout Neura+',
+        'Génération quasi illimitée (1000 / heure)',
+        'Génération massive (jusqu\'à 30 fichiers)',
+        'Mémoire projet maximale',
+        'Code le plus long & détaillé',
+        'Analyse complète du projet',
+        'Priorité serveur maximale'
+      ],
+      highlight: false,
+      current: user?.subscription === 'neura_ultra'
     }
   ];
 
