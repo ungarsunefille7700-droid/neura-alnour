@@ -2212,18 +2212,48 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         "role": "user", "content": message.content, "created_at": now_iso,
     })
 
-    try:
-        chat = LlmChat(
-            api_key=GEMINI_API_KEY,
-            session_id=f"dev_{session_id}",
-            system_message=system_prompt,
-            initial_messages=initial_messages,
-        ).with_model("gemini", "gemini-2.5-flash").with_params(
-            max_tokens=tier["max_tokens"], temperature=0.3
-        )
-        response = await chat.send_message(UserMessage(text=message.content))
-    except Exception as e:
-        logger.error(f"Developer chat error: {e}")
+    response = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            chat = LlmChat(
+                api_key=GEMINI_API_KEY,
+                session_id=f"dev_{session_id}",
+                system_message=system_prompt,
+                initial_messages=initial_messages,
+            ).with_model("gemini", "gemini-2.5-flash").with_params(
+                max_tokens=tier["max_tokens"], temperature=0.3
+            )
+            response = await chat.send_message(UserMessage(text=message.content))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            es = str(e)
+            transient = ("429" in es or "503" in es or "RESOURCE_EXHAUSTED" in es
+                         or "UNAVAILABLE" in es or "rate" in es.lower())
+            if transient and attempt < 2:
+                await asyncio.sleep(2 + attempt * 3)
+                continue
+            break
+
+    if last_err is not None:
+        es = str(last_err)
+        logger.error(f"Developer chat error: {es[:300]}")
+        quota_info = {"tier": tier_name, "limit": tier["requests"], "used": used,
+                      "remaining": (None if unlimited else max(0, tier["requests"] - used)),
+                      "reset_at": reset_at, "window_hours": tier["window_hours"], "unlimited": unlimited}
+        if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
+            # Gemini free-tier limit reached (shared across the whole app, not a per-plan limit)
+            raise HTTPException(status_code=429, detail={
+                "message": (
+                    "Le quota gratuit de l'IA (Gemini) est temporairement atteint — c'est une limite "
+                    "du palier gratuit, partagée par toute l'application (≈ quelques requêtes/minute et "
+                    "un plafond par jour). Réessaie dans quelques minutes, ou plus tard. "
+                    "Astuce : une clé API Gemini standard augmente fortement cette limite, gratuitement."
+                ),
+                "quota": quota_info,
+            })
         raise HTTPException(status_code=503, detail="Service IA développeur temporairement indisponible. Réessaie.")
 
     await db.dev_messages.insert_one({
