@@ -1,0 +1,21 @@
+# --- Secrets / environnement (NE JAMAIS committer) ---
+.env
+backend/.env
+frontend/.env
+*.keystore
+
+# --- Dépendances ---
+node_modules/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Builds ---
+build/
+frontend/build/
+
+# --- OS / éditeur / outils ---
+.DS_Store
+.claude/

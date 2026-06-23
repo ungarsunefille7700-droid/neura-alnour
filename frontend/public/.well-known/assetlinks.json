@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.neuraalnour.app",
+      "sha256_cert_fingerprints": ["6D:B2:62:6F:A8:C9:BF:39:CE:CB:78:CC:42:EF:AA:26:AD:4F:8D:E6:A2:3A:B0:44:C6:C4:21:39:16:9C:46:BF"]
+    }
+  }
+]

@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.neuraalnour.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.neuraalnour.app"
+        minSdk 24
+        targetSdk 35
+        versionCode 5
+        versionName "1.2"
+
+        manifestPlaceholders = [
+            launcherName: "NEURA"
+        ]
+    }
+
+    signingConfigs {
+        release {
+            storeFile file("/app/android-twa/neura-alnour.keystore")
+            storePassword "NeuraAlNour2026!"
+            keyAlias "neura-alnour"
+            keyPassword "NeuraAlNour2026!"
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.browser:browser:1.8.0'
+}
