@@ -603,18 +603,25 @@ Règles importantes:
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
                     "quelle que soit la langue de la question."
                 )
+            # Build the conversation history as initial_messages so the model
+            # receives the full context in a SINGLE request. (Previously the
+            # history was replayed by issuing one blocking LLM call per past
+            # message, which delayed the answer by tens of seconds and blew past
+            # Gemini's free-tier limit of 5 requests/minute, triggering 429
+            # retries that compounded into a 30-60s wait.)
+            initial_messages = [{"role": "system", "content": persona_system}]
+            for msg in history[:-1]:  # Exclude the message we just added
+                if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                    initial_messages.append({"role": msg["role"], "content": msg["content"]})
             # Use emergentintegrations for text-only messages
             chat = LlmChat(
                 api_key=GEMINI_API_KEY,
                 session_id=f"neura_{conversation_id}",
-                system_message=persona_system
+                system_message=persona_system,
+                initial_messages=initial_messages
             ).with_model("gemini", profile["model_id"]).with_params(**profile["params"])
             
-            # Add history to chat (text only for context)
-            for msg in history[:-1]:  # Exclude the message we just added
-                if msg["role"] == "user":
-                    await chat.send_message(UserMessage(text=msg["content"]))
-            
+            # History already provided via initial_messages above -> single LLM call.
             response = await chat.send_message(UserMessage(text=message.content))
     except Exception as e:
         logger.error(f"LLM error: {e}")
