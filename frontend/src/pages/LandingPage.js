@@ -35,55 +35,64 @@ const LandingPage = () => {
       icon: MessageSquare,
       title: "Chat IA Intelligent",
       description: "Conversations naturelles avec GPT-5.2, l'IA la plus avancée.",
-      color: "text-primary"
+      color: "text-primary",
+      path: "/chat"
     },
     {
       icon: BookOpen,
       title: "Coran Complet",
       description: "Lecture et audio des 114 sourates avec traduction française.",
-      color: "text-secondary"
+      color: "text-secondary",
+      path: "/quran"
     },
     {
       icon: Clock,
       title: "Heures de Prière",
       description: "Notifications automatiques et Adhan à l'heure exacte.",
-      color: "text-primary"
+      color: "text-primary",
+      path: "/prayer-times"
     },
     {
       icon: Heart,
       title: "Invocations (Douas)",
       description: "Bibliothèque complète d'invocations avec audio.",
-      color: "text-secondary"
+      color: "text-secondary",
+      path: "/duas"
     },
     {
       icon: Brain,
       title: "Quiz Islamique",
       description: "Testez vos connaissances avec des quiz illimités.",
-      color: "text-primary"
+      color: "text-primary",
+      path: "/quiz"
     },
     {
       icon: Moon,
       title: "Module Ramadan",
       description: "Guide complet pour le mois sacré avec horaires.",
-      color: "text-secondary"
+      color: "text-secondary",
+      path: "/ramadan"
     },
     {
       icon: Compass,
       title: "Boussole Qiblah",
       description: "Trouvez la direction de La Mecque instantanément.",
-      color: "text-primary"
+      color: "text-primary",
+      path: "/qiblah"
     },
     {
       icon: Building,
       title: "Mosquées Proches",
       description: "Localisez les mosquées autour de vous avec itinéraire.",
-      color: "text-secondary"
+      color: "text-secondary",
+      path: "/mosques"
     },
     {
       icon: GraduationCap,
       title: "Apprendre l'Islam",
       description: "Leçons interactives avec suivi de progression.",
-      color: "text-primary"
+      color: "text-primary",
+      path: "/learn"
     }
   ];
 
@@ -138,6 +147,7 @@ const LandingPage = () => {
             <Link to="/duas" className="text-muted-foreground hover:text-foreground transition-colors">Douas</Link>
             <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">Quiz</Link>
             <Link to="/learn" className="text-muted-foreground hover:text-foreground transition-colors">Apprendre</Link>
+            <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">Développeur</Link>
             <Link to="/support" className="text-muted-foreground hover:text-foreground transition-colors">Soutenir</Link>
             <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted transition-colors">
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -171,6 +181,7 @@ const LandingPage = () => {
             <Link to="/duas" className="block py-2 text-muted-foreground hover:text-foreground">Douas</Link>
             <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">Quiz</Link>
             <Link to="/learn" className="block py-2 text-muted-foreground hover:text-foreground">Apprendre</Link>
+            <Link to="/developer" className="block py-2 text-primary font-medium">Développeur</Link>
             <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">Soutenir</Link>
             <div className="flex items-center gap-4 pt-2">
               <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted">
@@ -258,9 +269,10 @@ const LandingPage = () => {
           
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {features.map((feature, index) => (
-              <Card 
+              <Card
                 key={index}
-                className="p-8 hover:shadow-lg transition-all duration-300 hover:-translate-y-1 arch group"
+                onClick={() => navigate(feature.path === '/chat' && !user ? '/auth' : feature.path)}
+                className="p-8 hover:shadow-lg transition-all duration-300 hover:-translate-y-1 arch group cursor-pointer"
                 data-testid={`feature-card-${index}`}
               >
                 <div className={`w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-6 group-hover:scale-110 transition-transform ${feature.color}`}>

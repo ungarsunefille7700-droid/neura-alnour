@@ -144,8 +144,43 @@ SUBSCRIPTION_PLANS = {
     "comme_toi": {"name": "Comme Toi", "price_monthly": 4.99, "price_yearly": 49.99, "features": ["history_50", "image_1_day", "themes", "encrypted"]},
     "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["unlimited_screens", "unlimited_images", "full_history", "detailed_responses", "export"]},
     "pro": {"name": "Pro", "price_monthly": 14.99, "price_yearly": 89.99, "features": ["priority", "fast_responses", "coaching", "premium_themes", "adhan_hd", "offline", "memorization", "stats"]},
-    "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]}
+    "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
+    "neura_plus": {"name": "Neura+", "price_monthly": 119.99, "price_yearly": 1199.99, "features": ["dev_workspace", "code_advanced", "multi_file", "project_analysis", "dev_memory", "audit", "priority"]},
+    "neura_ultra": {"name": "Neura Ultra", "price_monthly": 299.99, "price_yearly": 2999.99, "features": ["dev_workspace", "code_max", "massive_generation", "full_project_analysis", "dev_agent", "security_audit", "max_memory", "experimental", "max_priority"]}
 }
+
+# ============== DEVELOPER AI (Code assistant) ==============
+# Founder / VIP accounts: full free access, treated as the top tier.
+FOUNDER_EMAILS = {
+    "kaddanaminpro@gmail.com",
+    "kaddanwalidpro@gmail.com",
+    "zeroxigamer@gmail.com",
+}
+
+def is_founder(email: Optional[str]) -> bool:
+    return (email or "").strip().lower() in FOUNDER_EMAILS
+
+# Developer tiers. Limits are by request count / response size / files / memory
+# (single AI engine = Gemini; no extra paid provider). window_hours = regeneration delay.
+DEV_TIERS = {
+    "free":  {"label": "Gratuit",     "requests": 5,    "window_hours": 4, "max_tokens": 1024, "max_files": 2,  "memory_turns": 6,  "project_analysis": False},
+    "plus":  {"label": "Neura+",      "requests": 150,  "window_hours": 1, "max_tokens": 4096, "max_files": 10, "memory_turns": 30, "project_analysis": True},
+    "ultra": {"label": "Neura Ultra", "requests": 1000, "window_hours": 1, "max_tokens": 8192, "max_files": 30, "memory_turns": 60, "project_analysis": True},
+}
+
+def get_dev_tier(user: dict) -> str:
+    """Resolve a user's developer tier (founders/VIP -> ultra)."""
+    if user.get("is_vip") or is_founder(user.get("email")):
+        return "ultra"
+    sub = user.get("subscription", "free")
+    if sub == "neura_ultra":
+        return "ultra"
+    if sub == "neura_plus":
+        return "plus"
+    return "free"
+
+def _dev_is_unlimited(user: dict) -> bool:
+    return bool(user.get("is_vip") or is_founder(user.get("email")))
 
 # Security
 security = HTTPBearer(auto_error=False)
@@ -2069,6 +2104,191 @@ async def get_eid_info(eid_type: str = "fitr"):
             ],
             "sacrifice": "Le sacrifice est une Sunnah confirmée pour ceux qui en ont les moyens financiers."
         }
+
+# ============== DEVELOPER AI ENDPOINTS ==============
+
+class DevMessageCreate(BaseModel):
+    content: str
+    session_id: Optional[str] = None
+
+
+def _build_dev_system_prompt(tier_name: str) -> str:
+    tier = DEV_TIERS[tier_name]
+    base = (
+        "Tu es NEURA DEV, un assistant développeur senior intégré à l'application "
+        "NEURA AL-NOUR. Tu te comportes comme un vrai développeur professionnel "
+        "(esprit Claude Code / Cursor), pas comme un simple générateur de snippets.\n\n"
+        "MÉTHODE :\n"
+        "1. Si la demande est ambiguë ou que c'est un projet conséquent (serveur FiveM, "
+        "SaaS, app mobile, API...), commence par poser 2 à 4 questions clés AVANT de coder "
+        "(framework, version, périmètre, contraintes).\n"
+        "2. Sinon, donne directement : un court plan, la liste des fichiers concernés (chemin "
+        "EXACT), puis le code.\n"
+        "3. Pour CHAQUE fichier, écris une ligne 'Fichier: <chemin/exact>' puis un bloc de code "
+        "balisé avec le langage. Exemple :\nFichier: frontend/src/pages/Example.jsx\n"
+        "```jsx\n// code complet ici\n```\n"
+        "4. Code RÉEL, fonctionnel, prêt à coller. Pas de pseudo-code inutile, pas de fichiers "
+        "inventés : si un fichier n'existe pas encore, dis-le explicitement "
+        "(\"Ce fichier n'existe pas encore, je propose de le créer\").\n"
+        "5. Sécurité : ne mets jamais en dur ni n'affiche de secrets (clés API, tokens, mots de "
+        "passe, .env). Masque-les. Préviens avant toute action risquée (suppression, migration "
+        "DB, changement d'auth/Stripe/permissions).\n"
+        "6. Ne casse pas l'existant : explique l'impact et les risques de chaque modification.\n"
+    )
+    if not tier["project_analysis"]:
+        limits = (
+            f"\nABONNEMENT : {tier['label']} (limité). Garde un périmètre PETIT : au maximum "
+            f"{tier['max_files']} fichier(s) par réponse, réponses concises. Pour un gros projet, "
+            "génère SEULEMENT une première partie fonctionnelle puis indique clairement la suite à "
+            "demander (l'utilisateur pourra continuer ou passer à Neura+ / Neura Ultra)."
+        )
+    else:
+        limits = (
+            f"\nABONNEMENT : {tier['label']} (avancé). Analyse approfondie autorisée, génération "
+            f"multi-fichiers jusqu'à {tier['max_files']} fichiers par réponse, plans détaillés, "
+            "architecture frontend + backend + base de données."
+        )
+    return base + limits
+
+
+async def _dev_quota_state(user: dict):
+    """Return (tier_name, tier, used, reset_at_iso, window_start) with window reset applied."""
+    tier_name = get_dev_tier(user)
+    tier = DEV_TIERS[tier_name]
+    now = datetime.now(timezone.utc)
+    window = timedelta(hours=tier["window_hours"])
+    doc = await db.dev_quota.find_one({"user_id": user["id"]}, {"_id": 0})
+    if doc:
+        window_start = datetime.fromisoformat(doc["window_start"])
+        if now - window_start >= window:
+            used, window_start = 0, now
+        else:
+            used = int(doc.get("used", 0))
+    else:
+        used, window_start = 0, now
+    reset_at = (window_start + window).isoformat()
+    return tier_name, tier, used, reset_at, window_start
+
+
+@api_router.post("/developer/chat")
+async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_current_user)):
+    """Developer AI assistant. Real Gemini-backed code generation with per-tier
+    quota (requests / response size / files / memory) and project memory."""
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    tier_name, tier, used, reset_at, window_start = await _dev_quota_state(user)
+    unlimited = _dev_is_unlimited(user)
+
+    # Enforce quota (founders/VIP are never blocked)
+    if not unlimited and used >= tier["requests"]:
+        raise HTTPException(status_code=429, detail={
+            "message": (
+                "Tu as atteint la limite de génération de code de ton abonnement actuel. "
+                "Tu peux attendre la prochaine régénération de crédits ou passer à "
+                "Neura+ / Neura Ultra pour continuer sans attendre avec plus de puissance, "
+                "plus de mémoire et plus de génération."
+            ),
+            "quota": {"tier": tier_name, "limit": tier["requests"], "used": used,
+                      "remaining": 0, "reset_at": reset_at, "window_hours": tier["window_hours"]},
+        })
+
+    session_id = message.session_id or str(uuid.uuid4())
+
+    # Project memory: recent turns of this developer session (bounded by tier)
+    history = await db.dev_messages.find(
+        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(tier["memory_turns"])
+
+    system_prompt = _build_dev_system_prompt(tier_name)
+    initial_messages = [{"role": "system", "content": system_prompt}]
+    for m in history:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            initial_messages.append({"role": m["role"], "content": m["content"]})
+
+    # Save the user request first (so memory persists even across the regeneration delay)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.dev_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "user", "content": message.content, "created_at": now_iso,
+    })
+
+    try:
+        chat = LlmChat(
+            api_key=GEMINI_API_KEY,
+            session_id=f"dev_{session_id}",
+            system_message=system_prompt,
+            initial_messages=initial_messages,
+        ).with_model("gemini", "gemini-2.5-flash").with_params(
+            max_tokens=tier["max_tokens"], temperature=0.3
+        )
+        response = await chat.send_message(UserMessage(text=message.content))
+    except Exception as e:
+        logger.error(f"Developer chat error: {e}")
+        raise HTTPException(status_code=503, detail="Service IA développeur temporairement indisponible. Réessaie.")
+
+    await db.dev_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.dev_sessions.update_one(
+        {"session_id": session_id, "user_id": user["id"]},
+        {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
+         "$setOnInsert": {"session_id": session_id, "user_id": user["id"],
+                          "title": message.content[:60], "created_at": now_iso}},
+        upsert=True,
+    )
+
+    # Consume one unit of quota (track usage for everyone; only block non-unlimited)
+    await db.dev_quota.update_one(
+        {"user_id": user["id"]},
+        {"$set": {"user_id": user["id"], "used": used + 1, "window_start": window_start.isoformat()}},
+        upsert=True,
+    )
+
+    return {
+        "response": response,
+        "session_id": session_id,
+        "quota": {"tier": tier_name, "limit": tier["requests"], "used": used + 1,
+                  "remaining": (None if unlimited else max(0, tier["requests"] - used - 1)),
+                  "reset_at": reset_at, "window_hours": tier["window_hours"], "unlimited": unlimited},
+    }
+
+
+@api_router.get("/developer/status")
+async def developer_status(user: dict = Depends(get_current_user)):
+    tier_name, tier, used, reset_at, _ = await _dev_quota_state(user)
+    unlimited = _dev_is_unlimited(user)
+    return {
+        "tier": tier_name,
+        "label": tier["label"],
+        "is_founder": bool(user.get("is_vip") or is_founder(user.get("email"))),
+        "limit": tier["requests"],
+        "used": used,
+        "remaining": (None if unlimited else max(0, tier["requests"] - used)),
+        "unlimited": unlimited,
+        "window_hours": tier["window_hours"],
+        "reset_at": reset_at,
+        "max_files": tier["max_files"],
+        "max_tokens": tier["max_tokens"],
+        "project_analysis": tier["project_analysis"],
+    }
+
+
+@api_router.get("/developer/history")
+async def developer_history(user: dict = Depends(get_current_user)):
+    sessions = await db.dev_sessions.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(50)
+    return sessions
+
+
+@api_router.get("/developer/session/{session_id}")
+async def developer_session_messages(session_id: str, user: dict = Depends(get_current_user)):
+    msgs = await db.dev_messages.find(
+        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(400)
+    return msgs
+
 
 # ============== SUBSCRIPTIONS ==============
 
