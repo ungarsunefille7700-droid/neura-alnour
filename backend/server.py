@@ -2373,6 +2373,13 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     else:
         user_msg_obj = UserMessage(text=user_text)
 
+    # Code model by tier: premium (Neura+/Ultra) -> Claude Sonnet (best for code);
+    # free stays on Gemini for cost. Images stay on Gemini (vision proven).
+    if tier_name in ("plus", "ultra") and not message.image_base64:
+        dev_provider, dev_model = "anthropic", "claude-sonnet-4-5"
+    else:
+        dev_provider, dev_model = "gemini", "gemini-2.5-flash"
+
     response = None
     last_err = None
     for attempt in range(3):
@@ -2382,7 +2389,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
                 session_id=f"dev_{session_id}",
                 system_message=system_prompt,
                 initial_messages=initial_messages,
-            ).with_model("gemini", "gemini-2.5-flash").with_params(
+            ).with_model(dev_provider, dev_model).with_params(
                 max_tokens=tier["max_tokens"], temperature=0.3
             )
             response = await chat.send_message(user_msg_obj)
