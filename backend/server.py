@@ -101,6 +101,21 @@ MODERATION_GUARD = (
     "==============================================================\n"
 )
 
+# Identity guard — appended to every system prompt. The assistant must present itself as
+# NEURA AL-NOUR and NEVER reveal the underlying provider/model (Google/Gemini today,
+# OpenAI/Anthropic/xAI later). Universal, model-independent.
+IDENTITY_GUARD = (
+    "\n\nIDENTITÉ (RÈGLE STRICTE) : Tu es l'intelligence artificielle de l'application "
+    "NEURA AL-NOUR (نور). Présente-toi TOUJOURS comme « NEURA AL-NOUR » (ou « NEURA »). "
+    "Ne révèle JAMAIS, ne mentionne JAMAIS et ne laisse JAMAIS deviner le modèle ou l'entreprise "
+    "qui te fait fonctionner (Google, Gemini, Bard, OpenAI, ChatGPT, Anthropic, Claude, xAI, Grok, "
+    "Meta, etc.). Si on te demande qui t'a créé, qui t'a entraîné, quel modèle tu es, ta version, "
+    "ou quelle société est derrière toi, réponds uniquement que tu es l'intelligence artificielle "
+    "de l'application NEURA AL-NOUR, développée pour accompagner les musulmans, SANS jamais nommer "
+    "ni un fournisseur ni un modèle sous-jacent, et sans dire que tu as été entraîné par une "
+    "société tierce.\n"
+)
+
 # Base chat system prompt (used by the streaming endpoint). Mirrors the prompt of /chat/message
 # so the existing endpoint stays untouched.
 BASE_CHAT_SYSTEM = """Tu es NEURA AL-NOUR (نور), un assistant IA intelligent et bienveillant avec une expertise en Islam.
@@ -643,7 +658,7 @@ Règles importantes:
                 image_data = parts[1] if len(parts) > 1 else image_data
             
             # Apply the active language instruction to the vision system prompt as well.
-            vision_system = system_message + MODERATION_GUARD
+            vision_system = system_message + MODERATION_GUARD + IDENTITY_GUARD
             if message.lang:
                 vision_system += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -668,7 +683,7 @@ Règles importantes:
         else:
             # Resolve the selected model profile (Claude model + persona overlay).
             profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD
+            persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             if message.lang:
                 persona_system += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -695,7 +710,10 @@ Règles importantes:
             # History already provided via initial_messages above -> single LLM call.
             response = await chat.send_message(UserMessage(text=message.content))
     except Exception as e:
-        logger.error(f"LLM error: {e}")
+        es = str(e)
+        logger.error(f"LLM error: {es[:300]}")
+        if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
+            raise HTTPException(status_code=429, detail="Quota IA gratuit atteint pour le moment (limite du palier gratuit, partagée par l'app). Réessaie dans une minute.")
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
     
     # Save AI response
@@ -781,7 +799,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             # Build the system prompt (model persona + precedence + active language)
             profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD
+            system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             if message.lang:
                 system_prompt += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -2201,7 +2219,7 @@ def _build_dev_system_prompt(tier_name: str) -> str:
             f"multi-fichiers jusqu'à {tier['max_files']} fichiers par réponse, plans détaillés, "
             "architecture frontend + backend + base de données."
         )
-    return base + limits + MODERATION_GUARD
+    return base + limits + MODERATION_GUARD + IDENTITY_GUARD
 
 
 async def _dev_quota_state(user: dict):
