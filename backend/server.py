@@ -51,6 +51,10 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
 # Google Gemini API Key (used by the 4 text chat routers)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+# Centralized AI model key: prefer the Emergent universal key (the library auto-routes it
+# through the Emergent proxy via the 'sk-emergent-' prefix, giving managed multi-model
+# access without the Gemini free-tier limits). Falls back to Gemini if not set.
+AI_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY') or GEMINI_API_KEY
 
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
@@ -671,7 +675,7 @@ Règles importantes:
                     )
                 # Use Gemini for vision support (native, free image analysis)
                 chat = LlmChat(
-                    api_key=GEMINI_API_KEY,
+                    api_key=AI_LLM_KEY,
                     session_id=f"neura_{conversation_id}_vision",
                     system_message=vision_system
                 ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=1024)
@@ -706,7 +710,7 @@ Règles importantes:
                         initial_messages.append({"role": msg["role"], "content": msg["content"]})
                 # Use emergentintegrations for text-only messages
                 chat = LlmChat(
-                    api_key=GEMINI_API_KEY,
+                    api_key=AI_LLM_KEY,
                     session_id=f"neura_{conversation_id}",
                     system_message=persona_system,
                     initial_messages=initial_messages
@@ -854,7 +858,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             # Writing phase + real token streaming
             yield sse({"type": "phase", "phase": "writing"})
             chat = LlmChat(
-                api_key=GEMINI_API_KEY,
+                api_key=AI_LLM_KEY,
                 session_id=f"neura_stream_{conversation_id}",
                 system_message=system_prompt,
                 initial_messages=initial_messages,
@@ -1920,7 +1924,7 @@ Règles:
     
     try:
         chat = LlmChat(
-            api_key=GEMINI_API_KEY,
+            api_key=AI_LLM_KEY,
             session_id=f"quiz_gen_{uuid.uuid4()}",
             system_message="Tu es un générateur de quiz islamique. Tu retournes uniquement du JSON valide, sans markdown, sans commentaire."
         ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=4096, temperature=1.0)
@@ -2356,7 +2360,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     for attempt in range(3):
         try:
             chat = LlmChat(
-                api_key=GEMINI_API_KEY,
+                api_key=AI_LLM_KEY,
                 session_id=f"dev_{session_id}",
                 system_message=system_prompt,
                 initial_messages=initial_messages,
