@@ -137,6 +137,8 @@ const ChatPage = () => {
   const [webSearch, setWebSearch] = useState(() => localStorage.getItem('neura_websearch') === '1');
   const [devMode, setDevMode] = useState(() => localStorage.getItem('neura_devmode') === '1');
   const [devSessionId, setDevSessionId] = useState(null);
+  const [devStatus, setDevStatus] = useState(null);
+  const [devRole, setDevRole] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState(null);
   const [streamContent, setStreamContent] = useState('');
@@ -336,9 +338,10 @@ const ChatPage = () => {
     setLoading(true);
     try {
       const r = await axios.post(`${API}/developer/chat`,
-        { content: userMessage, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch },
+        { content: userMessage, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch, role: devRole || null },
         { headers: getAuthHeader(), timeout: 120000 });
       setDevSessionId(r.data.session_id);
+      if (r.data.quota) setDevStatus(s => s ? { ...s, remaining: r.data.quota.remaining, used: r.data.quota.used, reset_at: r.data.quota.reset_at } : s);
       setMessages(prev => [...prev, {
         id: `dev-${Date.now()}`, role: 'assistant', content: r.data.response,
         sources: r.data.sources || [],
@@ -855,7 +858,7 @@ const ChatPage = () => {
               </button>
               <button
                 type="button"
-                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); }}
+                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); if (v) { axios.get(`${API}/developer/status`, { headers: getAuthHeader() }).then(r => setDevStatus(r.data)).catch(() => {}); } }}
                 className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${devMode ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
                 data-testid="dev-mode-toggle"
                 title="Mode Développeur (génération de code)"
@@ -864,6 +867,49 @@ const ChatPage = () => {
                 Code
               </button>
             </div>
+
+            {devMode && (
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs" data-testid="dev-panel">
+                {devStatus && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-3 py-1 font-medium">
+                    <Code2 className="w-3 h-3" />
+                    {devStatus.label}{devStatus.is_founder ? ' · Fondateur' : ''} ·{' '}
+                    {devStatus.unlimited ? 'illimité' : `${devStatus.remaining ?? '—'}/${devStatus.limit} crédits`}
+                  </span>
+                )}
+                {devStatus && (devStatus.tier === 'plus' || devStatus.tier === 'ultra') && (
+                  <select
+                    value={devRole}
+                    onChange={(e) => setDevRole(e.target.value)}
+                    className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
+                    title="Rôle expert (Neura+/Ultra)"
+                    data-testid="dev-role-selector"
+                  >
+                    <option value="">Rôle…</option>
+                    <option value="frontend">Frontend senior</option>
+                    <option value="backend">Backend senior</option>
+                    <option value="fullstack">Fullstack senior</option>
+                    <option value="architect">Architecte</option>
+                    <option value="security">Sécurité</option>
+                    <option value="database">Base de données</option>
+                    <option value="mobile">Mobile senior</option>
+                  </select>
+                )}
+                {[
+                  { label: 'Page React', text: 'Crée une page React ' },
+                  { label: 'Corriger un bug', text: 'Corrige ce bug : ' },
+                  { label: 'API Express', text: 'Crée une API Express pour ' },
+                  { label: 'Auditer du code', text: 'Audite ce code (forces, faiblesses, risques, note /10) :\n' },
+                  { label: 'Script FiveM', text: 'Crée un script FiveM ESX pour ' },
+                ].map((t, i) => (
+                  <button key={i} type="button" onClick={() => { setInputMessage(t.text); inputRef.current?.focus(); }}
+                    className="rounded-full bg-muted px-3 py-1 text-muted-foreground hover:text-foreground transition-colors"
+                    data-testid={`dev-template-${i}`}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="relative flex items-center gap-2">
               {/* Hidden file input */}

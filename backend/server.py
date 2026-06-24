@@ -2166,6 +2166,19 @@ class DevMessageCreate(BaseModel):
     session_id: Optional[str] = None
     image_base64: Optional[str] = None
     web_search: Optional[bool] = False
+    role: Optional[str] = None
+
+
+# Expert roles the AI can take (Neura+/Ultra). Lets the user pick a "senior" specialist.
+DEV_ROLES = {
+    "frontend": "Développeur Frontend senior",
+    "backend": "Développeur Backend senior",
+    "fullstack": "Développeur Fullstack senior",
+    "architect": "Architecte logiciel",
+    "security": "Expert en sécurité applicative",
+    "database": "Expert base de données",
+    "mobile": "Développeur mobile senior",
+}
 
 
 def _build_dev_system_prompt(tier_name: str) -> str:
@@ -2271,6 +2284,12 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     ).sort("created_at", 1).to_list(tier["memory_turns"])
 
     system_prompt = _build_dev_system_prompt(tier_name)
+    # Expert role (Neura+/Ultra only) — adopt a senior specialist persona.
+    if message.role in DEV_ROLES and tier_name in ("plus", "ultra"):
+        system_prompt += (
+            f"\n\nRÔLE ACTIF : Tu interviens en tant que {DEV_ROLES[message.role]}. "
+            "Adopte l'expertise, le vocabulaire, les priorités et les bonnes pratiques de ce rôle."
+        )
     initial_messages = [{"role": "system", "content": system_prompt}]
     for m in history:
         if m.get("role") in ("user", "assistant") and m.get("content"):
