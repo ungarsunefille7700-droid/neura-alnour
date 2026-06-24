@@ -241,6 +241,13 @@ def get_dev_tier(user: dict) -> str:
 def _dev_is_unlimited(user: dict) -> bool:
     return bool(user.get("is_vip") or is_founder(user.get("email")))
 
+def _is_premium_ai(user: dict) -> bool:
+    """True if the user may use the real paid models (GPT-4o / Claude).
+    Free / standard plans stay on Gemini for cost control."""
+    if user.get("is_vip") or is_founder(user.get("email")):
+        return True
+    return user.get("subscription") in ("neura_plus", "neura_ultra")
+
 # Security
 security = HTTPBearer(auto_error=False)
 
@@ -696,6 +703,10 @@ Règles importantes:
             else:
                 # Resolve the selected model profile (Claude model + persona overlay).
                 profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
+                # Cost control: only Neura+/Ultra (and founders/VIP) get the real paid
+                # models (GPT-4o / Claude). Everyone else keeps the STYLE but runs on Gemini.
+                if not _is_premium_ai(user):
+                    profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
                 if message.lang:
                     persona_system += (
@@ -823,6 +834,9 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             # Build the system prompt (model persona + precedence + active language)
             profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
+            # Cost control: real paid models (GPT-4o / Claude) only for Neura+/Ultra/founders.
+            if not _is_premium_ai(user):
+                profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
             system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             if message.lang:
                 system_prompt += (
