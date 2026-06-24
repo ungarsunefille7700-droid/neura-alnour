@@ -644,73 +644,89 @@ Règles importantes:
 
 بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"""
     
-    # Send current message with or without image
-    try:
-        if message.image_base64:
-            # Use FileContent with content_type="image" for vision
-            from emergentintegrations.llm.chat import FileContent
+    # Send current message with or without image. Retry transient Gemini blips
+    # (429 rate spike / 503 high-demand) with backoff; the chat is rebuilt each
+    # attempt so no message is ever duplicated.
+    response = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            if message.image_base64:
+                # Use FileContent with content_type="image" for vision
+                from emergentintegrations.llm.chat import FileContent
             
-            # Prepare image data - ensure proper format
-            image_data = message.image_base64
-            # Remove data URL prefix if present
-            if image_data.startswith('data:'):
-                parts = image_data.split(',', 1)
-                image_data = parts[1] if len(parts) > 1 else image_data
+                # Prepare image data - ensure proper format
+                image_data = message.image_base64
+                # Remove data URL prefix if present
+                if image_data.startswith('data:'):
+                    parts = image_data.split(',', 1)
+                    image_data = parts[1] if len(parts) > 1 else image_data
             
-            # Apply the active language instruction to the vision system prompt as well.
-            vision_system = system_message + MODERATION_GUARD + IDENTITY_GUARD
-            if message.lang:
-                vision_system += (
-                    f"\n\nLANGUE : réponds toujours en {message.lang}, "
-                    "quelle que soit la langue de la question."
+                # Apply the active language instruction to the vision system prompt as well.
+                vision_system = system_message + MODERATION_GUARD + IDENTITY_GUARD
+                if message.lang:
+                    vision_system += (
+                        f"\n\nLANGUE : réponds toujours en {message.lang}, "
+                        "quelle que soit la langue de la question."
+                    )
+                # Use Gemini for vision support (native, free image analysis)
+                chat = LlmChat(
+                    api_key=GEMINI_API_KEY,
+                    session_id=f"neura_{conversation_id}_vision",
+                    system_message=vision_system
+                ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=1024)
+            
+                # Add text message first, then image
+                text_content = message.content if message.content else "Analyse cette image s'il te plaît."
+            
+                # Create FileContent with content_type="image" for image analysis
+                user_msg = UserMessage(
+                    text=text_content,
+                    file_contents=[FileContent(content_type="image", file_content_base64=image_data)]
                 )
-            # Use Gemini for vision support (native, free image analysis)
-            chat = LlmChat(
-                api_key=GEMINI_API_KEY,
-                session_id=f"neura_{conversation_id}_vision",
-                system_message=vision_system
-            ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=1024)
+                response = await chat.send_message(user_msg)
+            else:
+                # Resolve the selected model profile (Claude model + persona overlay).
+                profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
+                persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+                if message.lang:
+                    persona_system += (
+                        f"\n\nLANGUE : réponds toujours en {message.lang}, "
+                        "quelle que soit la langue de la question."
+                    )
+                # Build the conversation history as initial_messages so the model
+                # receives the full context in a SINGLE request. (Previously the
+                # history was replayed by issuing one blocking LLM call per past
+                # message, which delayed the answer by tens of seconds and blew past
+                # Gemini's free-tier limit of 5 requests/minute, triggering 429
+                # retries that compounded into a 30-60s wait.)
+                initial_messages = [{"role": "system", "content": persona_system}]
+                for msg in history[:-1]:  # Exclude the message we just added
+                    if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                        initial_messages.append({"role": msg["role"], "content": msg["content"]})
+                # Use emergentintegrations for text-only messages
+                chat = LlmChat(
+                    api_key=GEMINI_API_KEY,
+                    session_id=f"neura_{conversation_id}",
+                    system_message=persona_system,
+                    initial_messages=initial_messages
+                ).with_model("gemini", profile["model_id"]).with_params(**profile["params"])
             
-            # Add text message first, then image
-            text_content = message.content if message.content else "Analyse cette image s'il te plaît."
-            
-            # Create FileContent with content_type="image" for image analysis
-            user_msg = UserMessage(
-                text=text_content,
-                file_contents=[FileContent(content_type="image", file_content_base64=image_data)]
-            )
-            response = await chat.send_message(user_msg)
-        else:
-            # Resolve the selected model profile (Claude model + persona overlay).
-            profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
-            if message.lang:
-                persona_system += (
-                    f"\n\nLANGUE : réponds toujours en {message.lang}, "
-                    "quelle que soit la langue de la question."
-                )
-            # Build the conversation history as initial_messages so the model
-            # receives the full context in a SINGLE request. (Previously the
-            # history was replayed by issuing one blocking LLM call per past
-            # message, which delayed the answer by tens of seconds and blew past
-            # Gemini's free-tier limit of 5 requests/minute, triggering 429
-            # retries that compounded into a 30-60s wait.)
-            initial_messages = [{"role": "system", "content": persona_system}]
-            for msg in history[:-1]:  # Exclude the message we just added
-                if msg.get("role") in ("user", "assistant") and msg.get("content"):
-                    initial_messages.append({"role": msg["role"], "content": msg["content"]})
-            # Use emergentintegrations for text-only messages
-            chat = LlmChat(
-                api_key=GEMINI_API_KEY,
-                session_id=f"neura_{conversation_id}",
-                system_message=persona_system,
-                initial_messages=initial_messages
-            ).with_model("gemini", profile["model_id"]).with_params(**profile["params"])
-            
-            # History already provided via initial_messages above -> single LLM call.
-            response = await chat.send_message(UserMessage(text=message.content))
-    except Exception as e:
-        es = str(e)
+                # History already provided via initial_messages above -> single LLM call.
+                response = await chat.send_message(UserMessage(text=message.content))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            es = str(e)
+            transient = ("429" in es or "503" in es or "RESOURCE_EXHAUSTED" in es or "UNAVAILABLE" in es or "rate" in es.lower())
+            if transient and attempt < 2:
+                await asyncio.sleep(2 + attempt * 3)
+                continue
+            break
+
+    if last_err is not None:
+        es = str(last_err)
         logger.error(f"LLM error: {es[:300]}")
         if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
             raise HTTPException(status_code=429, detail="Quota IA gratuit atteint pour le moment (limite du palier gratuit, partagée par l'app). Réessaie dans une minute.")
