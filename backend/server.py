@@ -2328,6 +2328,17 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             f"\n\nRÔLE ACTIF : Tu interviens en tant que {DEV_ROLES[message.role]}. "
             "Adopte l'expertise, le vocabulaire, les priorités et les bonnes pratiques de ce rôle."
         )
+    # Project analysis: give premium users' workspace files to the model as context.
+    if _is_premium_ai(user):
+        wf = await db.dev_files.find({"user_id": user["id"]}, {"_id": 0}).sort("path", 1).to_list(40)
+        if wf:
+            ctx = "\n\n=== PROJET ACTUEL DE L'UTILISATEUR (analyse ces fichiers, tiens-en compte) ===\n"
+            for f in wf:
+                c = f.get("content", "")
+                if len(c) > 4000:
+                    c = c[:4000] + "\n... (tronqué)"
+                ctx += f"\nFichier: {f['path']}\n```\n{c}\n```\n"
+            system_prompt += ctx
     initial_messages = [{"role": "system", "content": system_prompt}]
     for m in history:
         if m.get("role") in ("user", "assistant") and m.get("content"):
@@ -2487,6 +2498,156 @@ async def developer_session_messages(session_id: str, user: dict = Depends(get_c
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
     ).sort("created_at", 1).to_list(400)
     return msgs
+
+
+# ============== DEVELOPER WORKSPACE (premium: files, versions, rollback, diff, syntax) ==============
+# Safe "agent" features on a web app: files live in the DB per-user (never the server FS),
+# and nothing is ever executed (syntax check is a static parse only).
+
+class DevFile(BaseModel):
+    path: str
+    content: str
+
+class DevRollbackReq(BaseModel):
+    path: str
+    version_id: str
+
+class DevDiffReq(BaseModel):
+    path: str
+    new_content: str
+
+class DevSyntaxReq(BaseModel):
+    path: str
+    content: str
+
+
+def _require_dev_workspace(user: dict):
+    """The workspace (apply / rollback / files) is a Neura+ / Ultra feature."""
+    if not _is_premium_ai(user):
+        raise HTTPException(status_code=403, detail={
+            "message": "L'espace de travail développeur (fichiers, application du code, "
+                       "rollback, diff) est réservé à Neura+ / Neura Ultra.",
+            "upgrade": True,
+        })
+
+
+@api_router.get("/developer/files")
+async def dev_files_list(user: dict = Depends(get_current_user)):
+    _require_dev_workspace(user)
+    return await db.dev_files.find(
+        {"user_id": user["id"]}, {"_id": 0, "content": 0}
+    ).sort("path", 1).to_list(500)
+
+
+@api_router.get("/developer/files/content")
+async def dev_file_get(path: str, user: dict = Depends(get_current_user)):
+    _require_dev_workspace(user)
+    f = await db.dev_files.find_one({"user_id": user["id"], "path": path}, {"_id": 0})
+    if not f:
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+    return f
+
+
+@api_router.post("/developer/files")
+async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
+    """Create/overwrite a file. The previous content is auto-saved to history (rollback)."""
+    _require_dev_workspace(user)
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await db.dev_files.find_one({"user_id": user["id"], "path": file.path}, {"_id": 0})
+    if existing and existing.get("content") != file.content:
+        await db.dev_file_history.insert_one({
+            "id": str(uuid.uuid4()), "user_id": user["id"], "path": file.path,
+            "content": existing["content"], "saved_at": now,
+        })
+    await db.dev_files.update_one(
+        {"user_id": user["id"], "path": file.path},
+        {"$set": {"user_id": user["id"], "path": file.path, "content": file.content, "updated_at": now}},
+        upsert=True,
+    )
+    return {"ok": True, "path": file.path, "updated_at": now}
+
+
+@api_router.delete("/developer/files")
+async def dev_file_delete(path: str, user: dict = Depends(get_current_user)):
+    _require_dev_workspace(user)
+    existing = await db.dev_files.find_one({"user_id": user["id"], "path": path}, {"_id": 0})
+    if existing:
+        await db.dev_file_history.insert_one({
+            "id": str(uuid.uuid4()), "user_id": user["id"], "path": path,
+            "content": existing["content"], "saved_at": datetime.now(timezone.utc).isoformat(),
+        })
+    await db.dev_files.delete_one({"user_id": user["id"], "path": path})
+    return {"ok": True}
+
+
+@api_router.get("/developer/files/history")
+async def dev_file_history(path: str, user: dict = Depends(get_current_user)):
+    _require_dev_workspace(user)
+    return await db.dev_file_history.find(
+        {"user_id": user["id"], "path": path}, {"_id": 0}
+    ).sort("saved_at", -1).to_list(50)
+
+
+@api_router.post("/developer/files/rollback")
+async def dev_file_rollback(req: DevRollbackReq, user: dict = Depends(get_current_user)):
+    """Restore a previous version (the current content is first saved to history)."""
+    _require_dev_workspace(user)
+    ver = await db.dev_file_history.find_one(
+        {"user_id": user["id"], "path": req.path, "id": req.version_id}, {"_id": 0})
+    if not ver:
+        raise HTTPException(status_code=404, detail="Version introuvable")
+    now = datetime.now(timezone.utc).isoformat()
+    cur = await db.dev_files.find_one({"user_id": user["id"], "path": req.path}, {"_id": 0})
+    if cur:
+        await db.dev_file_history.insert_one({
+            "id": str(uuid.uuid4()), "user_id": user["id"], "path": req.path,
+            "content": cur["content"], "saved_at": now,
+        })
+    await db.dev_files.update_one(
+        {"user_id": user["id"], "path": req.path},
+        {"$set": {"content": ver["content"], "updated_at": now}}, upsert=True,
+    )
+    return {"ok": True, "restored_from": ver["saved_at"]}
+
+
+@api_router.post("/developer/files/diff")
+async def dev_file_diff(req: DevDiffReq, user: dict = Depends(get_current_user)):
+    """Unified diff between the stored file and a proposed new content (before applying)."""
+    _require_dev_workspace(user)
+    import difflib
+    cur = await db.dev_files.find_one({"user_id": user["id"], "path": req.path}, {"_id": 0})
+    old = cur["content"] if cur else ""
+    diff_lines = list(difflib.unified_diff(
+        old.splitlines(), req.new_content.splitlines(),
+        fromfile=f"a/{req.path}", tofile=f"b/{req.path}", lineterm=""))
+    added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    return {"path": req.path, "diff": "\n".join(diff_lines),
+            "added": added, "removed": removed, "is_new": cur is None}
+
+
+@api_router.post("/developer/syntax-check")
+async def dev_syntax_check(req: DevSyntaxReq, user: dict = Depends(get_current_user)):
+    """Static syntax validation only (NEVER executes code)."""
+    _require_dev_workspace(user)
+    p = req.path.lower()
+    if p.endswith(".py"):
+        import ast
+        try:
+            ast.parse(req.content)
+            return {"ok": True, "language": "python", "message": "Syntaxe Python valide ✅"}
+        except SyntaxError as e:
+            return {"ok": False, "language": "python",
+                    "message": f"Erreur de syntaxe ligne {e.lineno}: {e.msg}"}
+    if p.endswith(".json"):
+        import json as _json
+        try:
+            _json.loads(req.content)
+            return {"ok": True, "language": "json", "message": "JSON valide ✅"}
+        except Exception as e:
+            return {"ok": False, "language": "json", "message": f"JSON invalide: {str(e)[:100]}"}
+    return {"ok": True, "language": "n/a",
+            "message": "Vérif syntaxique automatique dispo pour .py et .json (sans exécution)."}
 
 
 # ============== SUBSCRIPTIONS ==============
