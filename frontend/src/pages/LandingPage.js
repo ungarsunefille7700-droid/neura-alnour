@@ -34,7 +34,7 @@ const LandingPage = () => {
     {
       icon: MessageSquare,
       title: "Chat IA Intelligent",
-      description: "Conversations naturelles avec GPT-5.2, l'IA la plus avancée.",
+      description: "Conversations naturelles avec NEURA, une IA islamique intelligente et bienveillante.",
       color: "text-primary",
       path: "/chat"
     },
@@ -211,7 +211,7 @@ const LandingPage = () => {
         <div className="max-w-7xl mx-auto text-center relative z-10">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 text-primary mb-8">
             <Sparkles className="w-4 h-4" />
-            <span className="text-sm font-medium">Propulsé par GPT-5.2</span>
+            <span className="text-sm font-medium">Propulsé par l'IA NEURA</span>
           </div>
           
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-6">
