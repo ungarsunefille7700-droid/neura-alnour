@@ -332,15 +332,16 @@ const ChatPage = () => {
   };
 
   // Developer (Code) mode: dedicated assistant endpoint with per-plan quotas.
-  const sendDevMessage = async (userMessage, tempId) => {
+  const sendDevMessage = async (userMessage, tempId, imageToSend) => {
     setLoading(true);
     try {
       const r = await axios.post(`${API}/developer/chat`,
-        { content: userMessage, session_id: devSessionId },
+        { content: userMessage, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch },
         { headers: getAuthHeader(), timeout: 120000 });
       setDevSessionId(r.data.session_id);
       setMessages(prev => [...prev, {
         id: `dev-${Date.now()}`, role: 'assistant', content: r.data.response,
+        sources: r.data.sources || [],
         created_at: new Date().toISOString()
       }]);
     } catch (err) {
@@ -385,9 +386,9 @@ const ChatPage = () => {
     setSelectedImage(null);
     setImagePreview(null);
 
-    // Developer (Code) mode -> dedicated assistant endpoint with quotas.
-    if (devMode && !imageToSend) {
-      await sendDevMessage(userMessage, tempUserMsg.id);
+    // Developer (Code) mode -> dedicated assistant endpoint (supports image + web).
+    if (devMode) {
+      await sendDevMessage(userMessage, tempUserMsg.id, imageToSend);
       return;
     }
 
@@ -854,7 +855,7 @@ const ChatPage = () => {
               </button>
               <button
                 type="button"
-                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); if (v) { setWebSearch(false); localStorage.setItem('neura_websearch', '0'); } }}
+                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); }}
                 className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${devMode ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
                 data-testid="dev-mode-toggle"
                 title="Mode Développeur (génération de code)"

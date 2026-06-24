@@ -2110,6 +2110,8 @@ async def get_eid_info(eid_type: str = "fitr"):
 class DevMessageCreate(BaseModel):
     content: str
     session_id: Optional[str] = None
+    image_base64: Optional[str] = None
+    web_search: Optional[bool] = False
 
 
 def _build_dev_system_prompt(tier_name: str) -> str:
@@ -2227,6 +2229,39 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         "role": "user", "content": message.content, "created_at": now_iso,
     })
 
+    # Optional web search (Tavily) -> prepend results as context for the code task.
+    sources = []
+    user_text = message.content
+    if message.web_search:
+        try:
+            sources = await tavily_search(message.content, max_results=5)
+        except Exception as e:
+            logger.error(f"Tavily (dev) error: {e}")
+            sources = []
+        if sources:
+            block = "\n\n".join(
+                f"[{i}] {s['title']}\n{s['url']}\n{s['snippet']}"
+                for i, s in enumerate(sources, 1)
+            )
+            user_text = (
+                "Résultats de recherche web (utilise-les et cite les sources pertinentes "
+                f"avec [1], [2]...) :\n{block}\n\nDemande : {message.content}"
+            )
+
+    # Build the user message (with optional image for screenshot / code analysis).
+    if message.image_base64:
+        from emergentintegrations.llm.chat import FileContent
+        image_data = message.image_base64
+        if image_data.startswith("data:"):
+            parts = image_data.split(",", 1)
+            image_data = parts[1] if len(parts) > 1 else image_data
+        user_msg_obj = UserMessage(
+            text=user_text or "Analyse cette image (capture d'écran / code).",
+            file_contents=[FileContent(content_type="image", file_content_base64=image_data)],
+        )
+    else:
+        user_msg_obj = UserMessage(text=user_text)
+
     response = None
     last_err = None
     for attempt in range(3):
@@ -2239,7 +2274,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             ).with_model("gemini", "gemini-2.5-flash").with_params(
                 max_tokens=tier["max_tokens"], temperature=0.3
             )
-            response = await chat.send_message(UserMessage(text=message.content))
+            response = await chat.send_message(user_msg_obj)
             last_err = None
             break
         except Exception as e:
@@ -2293,6 +2328,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     return {
         "response": response,
         "session_id": session_id,
+        "sources": sources,
         "quota": {"tier": tier_name, "limit": tier["requests"], "used": used + 1,
                   "remaining": (None if unlimited else max(0, tier["requests"] - used - 1)),
                   "reset_at": reset_at, "window_hours": tier["window_hours"], "unlimited": unlimited},
