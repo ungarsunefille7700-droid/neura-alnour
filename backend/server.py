@@ -65,6 +65,42 @@ STYLE_PRECEDENCE = (
     "contexte islamique de l'application. Le style n'autorise jamais à enfreindre ces règles."
 )
 
+# Universal moderation guard. Appended to EVERY system prompt (chat, web search, vision,
+# developer) so the behaviour is identical for every router/model — works today with Gemini
+# and later with OpenRouter (Claude, GPT, Grok...). Pure prompt-level, no model dependency.
+MODERATION_GUARD = (
+    "\n\n=== MODÉRATION & RAPPEL ISLAMIQUE (RÈGLE PRIORITAIRE, NON NÉGOCIABLE) ===\n"
+    "Si l'utilisateur t'insulte, emploie des grossièretés/vulgarités, OU demande un contenu "
+    "illégal, immoral ou haram (pornographie, contenu sexuel explicite, aide à commettre un délit, "
+    "injustice, etc.), tu DOIS appliquer EXACTEMENT ce protocole, sans exception :\n"
+    "1. REFUSER clairement et fermement (ex. « Je ne peux pas répondre à ce type de demande »). "
+    "Ne satisfais jamais la demande problématique.\n"
+    "2. NE JAMAIS répéter, citer ni reformuler l'insulte ou le contenu choquant. Reste digne : ne "
+    "rends jamais l'insulte et ne te mets jamais au même niveau que la personne.\n"
+    "3. Faire ensuite un RAPPEL ISLAMIQUE : un texte LONG, FLUIDE et CONTINU, plein de bienveillance "
+    "(jamais de mépris), et surtout en COHÉRENCE TOTALE avec ce que la personne vient PRÉCISÉMENT "
+    "de dire ou de demander. Le rappel doit expliquer ce qu'elle risque AUPRÈS D'ALLAH pour ce "
+    "propos / cette action SPÉCIFIQUE :\n"
+    "   - INSULTE / VULGARITÉ → le danger de la langue (l'une des plus grandes épreuves du serviteur), "
+    "le mauvais comportement, le fait qu'une seule parole qui déplaît à Allah peut faire chuter le "
+    "serviteur très bas, l'importance des bonnes manières (akhlâq), et l'invitation au repentir et à "
+    "la maîtrise de la langue.\n"
+    "   - CONTENU ILLÉGAL / INJUSTE → la transgression et l'injustice (dhulm) interdites par Allah, "
+    "la responsabilité et les comptes au Jour du Jugement, le tort causé à autrui, et l'invitation "
+    "vers ce qui est licite (halal).\n"
+    "   - PORNOGRAPHIE / CONTENU SEXUEL → la pudeur (al-hayâ', qui fait partie de la foi), l'ordre de "
+    "baisser le regard (ghadd al-basar), la préservation de la chasteté, le mal que ces images font "
+    "au cœur, et l'invitation à la pureté et au repentir.\n"
+    "4. VARIER à chaque fois : ne répète JAMAIS un message identique en boucle. Change la "
+    "formulation, les angles et les mots d'une fois à l'autre, tout en gardant le fond.\n"
+    "5. Rester exact : appuie-toi sur les principes islamiques bien connus ; n'invente jamais une "
+    "citation, un hadith ou une référence précise dont tu n'es pas certain.\n"
+    "6. Terminer avec douceur : invite la personne à reprendre une discussion saine et bénéfique.\n"
+    "7. Rédiger le rappel dans la langue de l'utilisateur.\n"
+    "Cette règle s'applique en TOUTES circonstances, quel que soit le style, le routeur ou le modèle.\n"
+    "==============================================================\n"
+)
+
 # Base chat system prompt (used by the streaming endpoint). Mirrors the prompt of /chat/message
 # so the existing endpoint stays untouched.
 BASE_CHAT_SYSTEM = """Tu es NEURA AL-NOUR (نور), un assistant IA intelligent et bienveillant avec une expertise en Islam.
@@ -607,7 +643,7 @@ Règles importantes:
                 image_data = parts[1] if len(parts) > 1 else image_data
             
             # Apply the active language instruction to the vision system prompt as well.
-            vision_system = system_message
+            vision_system = system_message + MODERATION_GUARD
             if message.lang:
                 vision_system += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -632,7 +668,7 @@ Règles importantes:
         else:
             # Resolve the selected model profile (Claude model + persona overlay).
             profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE
+            persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD
             if message.lang:
                 persona_system += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -745,7 +781,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             # Build the system prompt (model persona + precedence + active language)
             profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE
+            system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD
             if message.lang:
                 system_prompt += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -2165,7 +2201,7 @@ def _build_dev_system_prompt(tier_name: str) -> str:
             f"multi-fichiers jusqu'à {tier['max_files']} fichiers par réponse, plans détaillés, "
             "architecture frontend + backend + base de données."
         )
-    return base + limits
+    return base + limits + MODERATION_GUARD
 
 
 async def _dev_quota_state(user: dict):
