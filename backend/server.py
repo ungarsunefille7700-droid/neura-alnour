@@ -141,7 +141,8 @@ Règles importantes:
 MODEL_PROFILES = {
     "chatgpt": {
         "label": "ChatGPT",
-        "model_id": "gemini-2.5-flash",
+        "provider": "openai",
+        "model_id": "gpt-4o",
         "persona": (
             "STYLE DE RÉPONSE — Direct et structuré :\n"
             "- Va droit au but, oriente vers la solution.\n"
@@ -152,7 +153,8 @@ MODEL_PROFILES = {
     },
     "claude": {
         "label": "Claude",
-        "model_id": "gemini-2.5-flash",
+        "provider": "anthropic",
+        "model_id": "claude-sonnet-4-5",
         "persona": (
             "STYLE DE RÉPONSE — Réfléchi et nuancé :\n"
             "- Explique ton raisonnement, montre les nuances et les différents angles.\n"
@@ -163,6 +165,7 @@ MODEL_PROFILES = {
     },
     "gemini": {
         "label": "Gemini",
+        "provider": "gemini",
         "model_id": "gemini-2.5-flash",
         "persona": (
             "STYLE DE RÉPONSE — Synthétique et factuel :\n"
@@ -174,6 +177,7 @@ MODEL_PROFILES = {
     },
     "grok": {
         "label": "Grok",
+        "provider": "gemini",
         "model_id": "gemini-2.5-flash",
         "persona": (
             "STYLE DE RÉPONSE — Cash et direct :\n"
@@ -714,7 +718,7 @@ Règles importantes:
                     session_id=f"neura_{conversation_id}",
                     system_message=persona_system,
                     initial_messages=initial_messages
-                ).with_model("gemini", profile["model_id"]).with_params(**profile["params"])
+                ).with_model(profile.get("provider", "gemini"), profile["model_id"]).with_params(**profile["params"])
             
                 # History already provided via initial_messages above -> single LLM call.
                 response = await chat.send_message(UserMessage(text=message.content))
@@ -862,7 +866,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 session_id=f"neura_stream_{conversation_id}",
                 system_message=system_prompt,
                 initial_messages=initial_messages,
-            ).with_model("gemini", profile["model_id"]).with_params(**profile["params"])
+            ).with_model(profile.get("provider", "gemini"), profile["model_id"]).with_params(**profile["params"])
 
             full_text = []
             async for event in chat.stream_message(UserMessage(text=user_text)):
