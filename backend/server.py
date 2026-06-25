@@ -219,6 +219,13 @@ FOUNDER_EMAILS = {
 def is_founder(email: Optional[str]) -> bool:
     return (email or "").strip().lower() in FOUNDER_EMAILS
 
+def is_vip_email(email: Optional[str]) -> bool:
+    """VIP/founder emails (founders list + env VIP admins) -> always top tier (Neura Ultra)."""
+    e = (email or "").strip().lower()
+    if e in FOUNDER_EMAILS:
+        return True
+    return any(((a.get("email") or "").strip().lower() == e) for a in VIP_ADMINS if a.get("email"))
+
 # Developer tiers. Limits are by request count / response size / files / memory
 # (single AI engine = Gemini; no extra paid provider). window_hours = regeneration delay.
 DEV_TIERS = {
@@ -229,7 +236,7 @@ DEV_TIERS = {
 
 def get_dev_tier(user: dict) -> str:
     """Resolve a user's developer tier (founders/VIP -> ultra)."""
-    if user.get("is_vip") or is_founder(user.get("email")):
+    if user.get("is_vip") or is_vip_email(user.get("email")):
         return "ultra"
     sub = user.get("subscription", "free")
     if sub == "neura_ultra":
@@ -239,12 +246,12 @@ def get_dev_tier(user: dict) -> str:
     return "free"
 
 def _dev_is_unlimited(user: dict) -> bool:
-    return bool(user.get("is_vip") or is_founder(user.get("email")))
+    return bool(user.get("is_vip") or is_vip_email(user.get("email")))
 
 def _is_premium_ai(user: dict) -> bool:
     """True if the user may use the real paid models (GPT-4o / Claude).
     Free / standard plans stay on Gemini for cost control."""
-    if user.get("is_vip") or is_founder(user.get("email")):
+    if user.get("is_vip") or is_vip_email(user.get("email")):
         return True
     return user.get("subscription") in ("neura_plus", "neura_ultra")
 
@@ -359,7 +366,7 @@ async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(
 
 def check_subscription_feature(user: dict, feature: str) -> bool:
     """Check if user's subscription includes a feature"""
-    if user.get("is_vip"):
+    if user.get("is_vip") or is_vip_email(user.get("email")):
         return True
     subscription = user.get("subscription", "free")
     plan = SUBSCRIPTION_PLANS.get(subscription, SUBSCRIPTION_PLANS["free"])
@@ -476,8 +483,8 @@ async def register(user_data: UserCreate):
     if existing:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
     
-    # Check if VIP admin
-    is_vip = any(admin["email"] == user_data.email for admin in VIP_ADMINS)
+    # Check if VIP admin / founder -> top tier (Neura Ultra)
+    is_vip = is_vip_email(user_data.email)
     
     user_id = str(uuid.uuid4())
     user = {
@@ -485,7 +492,7 @@ async def register(user_data: UserCreate):
         "email": user_data.email,
         "name": user_data.name,
         "password": hash_password(user_data.password),
-        "subscription": "developer" if is_vip else "free",  # VIP gets all features
+        "subscription": "neura_ultra" if is_vip else "free",  # VIP/founders = Neura Ultra (tout débloqué)
         "is_vip": is_vip,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "screens_today": 0,
@@ -2471,7 +2478,7 @@ async def developer_status(user: dict = Depends(get_current_user)):
     return {
         "tier": tier_name,
         "label": tier["label"],
-        "is_founder": bool(user.get("is_vip") or is_founder(user.get("email"))),
+        "is_founder": bool(user.get("is_vip") or is_vip_email(user.get("email"))),
         "limit": tier["requests"],
         "used": used,
         "remaining": (None if unlimited else max(0, tier["requests"] - used)),
