@@ -25,6 +25,7 @@ import MosquesPage from "@/pages/MosquesPage";
 import LearnPage from "@/pages/LearnPage";
 import SupportPage from "@/pages/SupportPage";
 import DeveloperPage from "@/pages/DeveloperPage";
+import LanguageTutorPage from "@/pages/LanguageTutorPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -82,6 +83,7 @@ function AppRouter() {
       <Route path="/learn" element={<LearnPage />} />
       <Route path="/support" element={<SupportPage />} />
       <Route path="/developer" element={<ProtectedRoute><DeveloperPage /></ProtectedRoute>} />
+      <Route path="/language-tutor" element={<ProtectedRoute><LanguageTutorPage /></ProtectedRoute>} />
     </Routes>
   );
 }

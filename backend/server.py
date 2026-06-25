@@ -2657,6 +2657,99 @@ async def dev_syntax_check(req: DevSyntaxReq, user: dict = Depends(get_current_u
             "message": "Vérif syntaxique automatique dispo pour .py et .json (sans exécution)."}
 
 
+# ============== LANGUAGE TUTOR (AI private teacher, all languages) ==============
+
+class LangTutorMessage(BaseModel):
+    content: str
+    language: str = "English"   # language NAME to learn (drives the AI)
+    level: Optional[str] = "débutant"
+    session_id: Optional[str] = None
+    voice: Optional[bool] = False  # true if the message came from speech
+
+
+@api_router.post("/language-tutor/chat")
+async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_current_user)):
+    """AI private language tutor. Teaches in the chosen language, adapts to level,
+    corrects grammar/vocab/phrasing, gives exercises/quizzes, keeps a real conversation."""
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    session_id = message.session_id or str(uuid.uuid4())
+    level = message.level or "débutant"
+    lang = message.language or "English"
+
+    system = (
+        f"Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
+        f"qui enseigne le **{lang}** à un élève de niveau **{level}**.\n"
+        f"- Parle PRINCIPALEMENT en {lang} (immersion), mais explique/aide en français quand l'élève bloque "
+        "ou ne comprend pas (surtout pour les débutants).\n"
+        "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de formulation. "
+        "Montre la version correcte, puis explique brièvement pourquoi.\n"
+        "- Si le message vient de la VOIX de l'élève (transcription), commente sa formulation/prononciation "
+        "d'après ce que tu lis, et donne la bonne manière de le dire (écris la prononciation simplement).\n"
+        "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
+        "- Adapte la difficulté au niveau (débutant = phrases simples + plus de français ; avancé = "
+        f"presque tout en {lang}).\n"
+        "- Réponds aux demandes : « corrige-moi », « donne-moi des exercices », « fais-moi un quiz », "
+        "« explique cette phrase », « fais-moi parler davantage ».\n"
+        "- Garde la conversation VIVANTE : termine souvent par une petite question pour faire parler l'élève. "
+        "Sois encourageant et concret. Reste respectueux (application à vocation islamique)."
+    )
+
+    history = await db.lang_messages.find(
+        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(40)
+    initial = [{"role": "system", "content": system}]
+    for m in history:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            initial.append({"role": m["role"], "content": m["content"]})
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.lang_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "user", "content": message.content, "language": lang, "created_at": now,
+    })
+
+    provider, model = ("openai", "gpt-4o") if _is_premium_ai(user) else ("gemini", "gemini-2.5-flash")
+    response, last_err = None, None
+    for attempt in range(3):
+        try:
+            chat = LlmChat(api_key=AI_LLM_KEY, session_id=f"lang_{session_id}",
+                           system_message=system, initial_messages=initial
+                           ).with_model(provider, model).with_params(max_tokens=1024, temperature=0.6)
+            response = await chat.send_message(UserMessage(text=message.content))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            es = str(e)
+            if any(x in es for x in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")) and attempt < 2:
+                await asyncio.sleep(2 + attempt * 3)
+                continue
+            break
+    if last_err is not None:
+        logger.error(f"Language tutor error: {str(last_err)[:200]}")
+        raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Réessaie.")
+
+    await db.lang_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.lang_progress.update_one(
+        {"user_id": user["id"], "language": lang},
+        {"$set": {"level": level, "updated_at": now},
+         "$setOnInsert": {"user_id": user["id"], "language": lang, "created_at": now}},
+        upsert=True,
+    )
+    return {"response": response, "session_id": session_id}
+
+
+@api_router.get("/language-tutor/progress")
+async def language_tutor_progress(user: dict = Depends(get_current_user)):
+    return await db.lang_progress.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(50)
+
+
 # ============== SUBSCRIPTIONS ==============
 
 @api_router.get("/subscriptions/plans")

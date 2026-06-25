@@ -96,6 +96,7 @@ const LandingPage = () => {
             <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quiz')}</Link>
             <Link to="/learn" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.learn')}</Link>
             <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">{t('nav.developer')}</Link>
+            <Link to="/language-tutor" className="text-primary font-medium hover:opacity-80 transition-opacity">Langues</Link>
             <Link to="/support" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.support')}</Link>
             <select
               value={language}
@@ -141,6 +142,7 @@ const LandingPage = () => {
             <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quiz')}</Link>
             <Link to="/learn" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.learn')}</Link>
             <Link to="/developer" className="block py-2 text-primary font-medium">{t('nav.developer')}</Link>
+            <Link to="/language-tutor" className="block py-2 text-primary font-medium">Langues</Link>
             <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.support')}</Link>
             <div className="flex items-center gap-4 pt-2">
               <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted">
