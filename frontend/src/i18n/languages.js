@@ -110,4 +110,25 @@ export const LANGUAGES = [
   { code: 'dv', name: 'Dhivehi', native: 'ދިވެހި' },
   { code: 'ti', name: 'Tigrinya', native: 'ትግርኛ' },
   { code: 'om', name: 'Oromo', native: 'Afaan Oromoo' },
+
+  // ===== Maghreb : variantes régionales (darijas arabes + langues amazighes) =====
+  // Maroc
+  { code: 'ar-MA', name: 'Moroccan Standard Arabic', native: 'العربية (المغرب)' },
+  { code: 'ary', name: 'Moroccan Arabic (Darija)', native: 'الدارجة المغربية' },
+  { code: 'zgh', name: 'Standard Moroccan Tamazight', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ ⵜⴰⵏⴰⵡⴰⵢⵜ' },
+  { code: 'tzm', name: 'Central Atlas Tamazight', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ ⵏ ⵡⴰⵟⵍⴰⵚ' },
+  { code: 'rif', name: 'Tarifit (Rif Berber)', native: 'ⵜⴰⵔⵉⴼⵉⵜ' },
+  { code: 'shi', name: 'Tachelhit (Shilha)', native: 'ⵜⴰⵛⵍⵃⵉⵜ' },
+  // Algérie
+  { code: 'arq', name: 'Algerian Arabic (Darija)', native: 'الدارجة الجزائرية' },
+  { code: 'ber-DZ', name: 'Tamazight (Algeria)', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ (ⴷⵣⴰⵢⴻⵔ)' },
+  { code: 'kab', name: 'Kabyle', native: 'Taqbaylit' },
+  { code: 'shy', name: 'Chaoui (Shawiya)', native: 'Tacawit' },
+  { code: 'cnu', name: 'Chenoua (Chenoui)', native: 'Tachenwit' },
+  { code: 'mzb', name: 'Mozabite (Mzab)', native: 'Tumẓabt' },
+  { code: 'thv', name: 'Tuareg (Tamahaq)', native: 'ⵜⴰⵎⴰⵀⴰⵇ' },
+  // Tunisie
+  { code: 'aeb', name: 'Tunisian Arabic (Derja)', native: 'الدارجة التونسية' },
+  { code: 'ar-TN', name: 'Tunisian Standard Arabic', native: 'العربية (تونس)' },
+  { code: 'jbn', name: 'Tunisian Tamazight (Djerbi)', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ (ⵜⵓⵏⴻⵙ)' },
 ];

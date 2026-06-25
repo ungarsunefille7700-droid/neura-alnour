@@ -7,7 +7,8 @@ const STORAGE_KEY = 'neura_language';
 const FALLBACK = 'fr'; // base language (the source strings are in French)
 
 // Right-to-left languages.
-const RTL = new Set(['ar', 'ur', 'fa', 'he', 'ps', 'sd', 'ug', 'yi', 'dv', 'ku']);
+const RTL = new Set(['ar', 'ur', 'fa', 'he', 'ps', 'sd', 'ug', 'yi', 'dv', 'ku',
+  'ary', 'arq', 'aeb', 'ar-MA', 'ar-TN']);
 
 // Auto-detect the phone/browser language (e.g. "es-ES" -> "es").
 function detectLanguage() {
