@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { 
   MessageSquare, 
   BookOpen, 
@@ -27,73 +28,20 @@ import {
 const LandingPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { user } = useAuth();
+  const { t, language, setLanguage, languages } = useLanguage();
   const navigate = useNavigate();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const features = [
-    {
-      icon: MessageSquare,
-      title: "Chat IA Intelligent",
-      description: "Conversations naturelles avec NEURA, une IA islamique intelligente et bienveillante.",
-      color: "text-primary",
-      path: "/chat"
-    },
-    {
-      icon: BookOpen,
-      title: "Coran Complet",
-      description: "Lecture et audio des 114 sourates avec traduction française.",
-      color: "text-secondary",
-      path: "/quran"
-    },
-    {
-      icon: Clock,
-      title: "Heures de Prière",
-      description: "Notifications automatiques et Adhan à l'heure exacte.",
-      color: "text-primary",
-      path: "/prayer-times"
-    },
-    {
-      icon: Heart,
-      title: "Invocations (Douas)",
-      description: "Bibliothèque complète d'invocations avec audio.",
-      color: "text-secondary",
-      path: "/duas"
-    },
-    {
-      icon: Brain,
-      title: "Quiz Islamique",
-      description: "Testez vos connaissances avec des quiz illimités.",
-      color: "text-primary",
-      path: "/quiz"
-    },
-    {
-      icon: Moon,
-      title: "Module Ramadan",
-      description: "Guide complet pour le mois sacré avec horaires.",
-      color: "text-secondary",
-      path: "/ramadan"
-    },
-    {
-      icon: Compass,
-      title: "Boussole Qiblah",
-      description: "Trouvez la direction de La Mecque instantanément.",
-      color: "text-primary",
-      path: "/qiblah"
-    },
-    {
-      icon: Building,
-      title: "Mosquées Proches",
-      description: "Localisez les mosquées autour de vous avec itinéraire.",
-      color: "text-secondary",
-      path: "/mosques"
-    },
-    {
-      icon: GraduationCap,
-      title: "Apprendre l'Islam",
-      description: "Leçons interactives avec suivi de progression.",
-      color: "text-primary",
-      path: "/learn"
-    }
+    { icon: MessageSquare, title: t('feat.chat.title'), description: t('feat.chat.desc'), color: "text-primary", path: "/chat" },
+    { icon: BookOpen, title: t('feat.quran.title'), description: t('feat.quran.desc'), color: "text-secondary", path: "/quran" },
+    { icon: Clock, title: t('feat.prayers.title'), description: t('feat.prayers.desc'), color: "text-primary", path: "/prayer-times" },
+    { icon: Heart, title: t('feat.duas.title'), description: t('feat.duas.desc'), color: "text-secondary", path: "/duas" },
+    { icon: Brain, title: t('feat.quiz.title'), description: t('feat.quiz.desc'), color: "text-primary", path: "/quiz" },
+    { icon: Moon, title: t('feat.ramadan.title'), description: t('feat.ramadan.desc'), color: "text-secondary", path: "/ramadan" },
+    { icon: Compass, title: t('feat.qiblah.title'), description: t('feat.qiblah.desc'), color: "text-primary", path: "/qiblah" },
+    { icon: Building, title: t('feat.mosques.title'), description: t('feat.mosques.desc'), color: "text-secondary", path: "/mosques" },
+    { icon: GraduationCap, title: t('feat.islam.title'), description: t('feat.islam.desc'), color: "text-primary", path: "/learn" }
   ];
 
   const plans = [
@@ -142,23 +90,34 @@ const LandingPage = () => {
           
           {/* Desktop Navigation */}
           <div className="hidden md:flex items-center gap-6">
-            <Link to="/quran" className="text-muted-foreground hover:text-foreground transition-colors">Coran</Link>
-            <Link to="/prayer-times" className="text-muted-foreground hover:text-foreground transition-colors">Prières</Link>
-            <Link to="/duas" className="text-muted-foreground hover:text-foreground transition-colors">Douas</Link>
-            <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">Quiz</Link>
-            <Link to="/learn" className="text-muted-foreground hover:text-foreground transition-colors">Apprendre</Link>
-            <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">Développeur</Link>
-            <Link to="/support" className="text-muted-foreground hover:text-foreground transition-colors">Soutenir</Link>
+            <Link to="/quran" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quran')}</Link>
+            <Link to="/prayer-times" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
+            <Link to="/duas" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.duas')}</Link>
+            <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quiz')}</Link>
+            <Link to="/learn" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.learn')}</Link>
+            <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">{t('nav.developer')}</Link>
+            <Link to="/support" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.support')}</Link>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="text-sm rounded-full bg-muted px-2 py-1 border-0 outline-none cursor-pointer max-w-[130px]"
+              title="Langue / Language"
+              data-testid="lang-selector"
+            >
+              {languages.map((l) => (
+                <option key={l.code} value={l.code}>{l.native}</option>
+              ))}
+            </select>
             <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted transition-colors">
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
             {user ? (
               <Button onClick={() => navigate('/chat')} data-testid="nav-chat-btn" className="rounded-full px-6">
-                Accéder au Chat
+                {t('common.openChat')}
               </Button>
             ) : (
               <Button onClick={() => navigate('/auth')} data-testid="nav-login-btn" className="rounded-full px-6">
-                Connexion
+                {t('common.login')}
               </Button>
             )}
           </div>
@@ -176,13 +135,13 @@ const LandingPage = () => {
         {/* Mobile Menu */}
         {mobileMenuOpen && (
           <div className="md:hidden absolute top-full left-0 right-0 glass border-t border-border p-4 space-y-4">
-            <Link to="/quran" className="block py-2 text-muted-foreground hover:text-foreground">Coran</Link>
-            <Link to="/prayer-times" className="block py-2 text-muted-foreground hover:text-foreground">Prières</Link>
-            <Link to="/duas" className="block py-2 text-muted-foreground hover:text-foreground">Douas</Link>
-            <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">Quiz</Link>
-            <Link to="/learn" className="block py-2 text-muted-foreground hover:text-foreground">Apprendre</Link>
-            <Link to="/developer" className="block py-2 text-primary font-medium">Développeur</Link>
-            <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">Soutenir</Link>
+            <Link to="/quran" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quran')}</Link>
+            <Link to="/prayer-times" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.prayers')}</Link>
+            <Link to="/duas" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.duas')}</Link>
+            <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quiz')}</Link>
+            <Link to="/learn" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.learn')}</Link>
+            <Link to="/developer" className="block py-2 text-primary font-medium">{t('nav.developer')}</Link>
+            <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.support')}</Link>
             <div className="flex items-center gap-4 pt-2">
               <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted">
                 {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -211,7 +170,7 @@ const LandingPage = () => {
         <div className="max-w-7xl mx-auto text-center relative z-10">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 text-primary mb-8">
             <Sparkles className="w-4 h-4" />
-            <span className="text-sm font-medium">Propulsé par l'IA NEURA</span>
+            <span className="text-sm font-medium">{t('landing.poweredBy')}</span>
           </div>
           
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-6">
@@ -224,7 +183,7 @@ const LandingPage = () => {
           </p>
           
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10">
-            L'assistant IA intelligent qui combine intelligence artificielle moderne et spiritualité islamique.
+            {t('landing.subtitle')}
           </p>
           
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -234,7 +193,7 @@ const LandingPage = () => {
               data-testid="hero-cta-btn"
               className="rounded-full px-8 h-14 text-lg shadow-lg shadow-primary/20 hover:scale-105 transition-transform"
             >
-              Commencer Gratuitement
+              {t('landing.heroCta')}
               <ChevronRight className="w-5 h-5 ml-2" />
             </Button>
             <Button 
@@ -245,12 +204,12 @@ const LandingPage = () => {
               className="rounded-full px-8 h-14 text-lg border-2"
             >
               <BookOpen className="w-5 h-5 mr-2" />
-              Explorer le Coran
+              {t('landing.exploreQuran')}
             </Button>
           </div>
           
           <p className="mt-6 text-sm text-muted-foreground">
-            Module islamique 100% gratuit • Aucune carte bancaire requise
+            {t('landing.freeNoCard')}
           </p>
         </div>
       </section>
@@ -381,12 +340,12 @@ const LandingPage = () => {
               <span className="font-arabic text-muted-foreground">نور</span>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <Link to="/quran" className="hover:text-foreground transition-colors">Coran</Link>
-              <Link to="/prayer-times" className="hover:text-foreground transition-colors">Prières</Link>
-              <Link to="/duas" className="hover:text-foreground transition-colors">Douas</Link>
-              <Link to="/quiz" className="hover:text-foreground transition-colors">Quiz</Link>
-              <Link to="/learn" className="hover:text-foreground transition-colors">Apprendre</Link>
-              <Link to="/support" className="hover:text-foreground transition-colors">Soutenir</Link>
+              <Link to="/quran" className="hover:text-foreground transition-colors">{t('nav.quran')}</Link>
+              <Link to="/prayer-times" className="hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
+              <Link to="/duas" className="hover:text-foreground transition-colors">{t('nav.duas')}</Link>
+              <Link to="/quiz" className="hover:text-foreground transition-colors">{t('nav.quiz')}</Link>
+              <Link to="/learn" className="hover:text-foreground transition-colors">{t('nav.learn')}</Link>
+              <Link to="/support" className="hover:text-foreground transition-colors">{t('nav.support')}</Link>
               <Link to="/subscription" className="hover:text-foreground transition-colors">Abonnements</Link>
             </div>
             <p className="text-sm text-muted-foreground">
