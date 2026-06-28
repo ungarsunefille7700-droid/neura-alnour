@@ -2750,6 +2750,138 @@ async def language_tutor_progress(user: dict = Depends(get_current_user)):
     ).sort("updated_at", -1).to_list(50)
 
 
+# ============== ISLAM LEARNING (cautious AI teacher) ==============
+
+class IslamLearnMessage(BaseModel):
+    content: str
+    level: Optional[str] = "débutant"
+    topic: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+@api_router.post("/islam-learning/chat")
+async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_current_user)):
+    """Cautious AI Islam teacher: step-by-step lessons, cites sources, never invents
+    verses/hadiths, and refers fatwas/serious matters to a qualified scholar."""
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    session_id = message.session_id or str(uuid.uuid4())
+    level = message.level or "débutant"
+    topic = (message.topic or "").strip()
+
+    system = (
+        "Tu es un PROFESSEUR D'ISLAM bienveillant, pédagogue et surtout PRUDENT, pour "
+        "l'application NEURA AL-NOUR. Tu enseignes l'Islam pas à pas, du niveau "
+        f"**{level}**, de manière claire et simple.\n"
+        "SUJETS : croyance (aqida), prière (salat), ablutions (wudu), jeûne (sawm), zakat, "
+        "hajj, comportement (akhlaq), invocations (adhkar/duas), histoire des prophètes, "
+        "lecture et compréhension du Coran.\n"
+        "RÈGLES STRICTES :\n"
+        "1. Cite tes sources quand c'est possible : Coran sous la forme (sourate:verset), "
+        "hadith avec le recueil (Bukhari, Muslim...).\n"
+        "2. N'INVENTE JAMAIS un verset ni un hadith. Ne modifie jamais le texte du Coran. "
+        "Si tu n'es pas certain d'une référence exacte, dis-le honnêtement et reste général "
+        "plutôt que d'inventer.\n"
+        "3. Tu n'es PAS une autorité religieuse. Pour toute FATWA, question juridique précise "
+        "(licite/illicite d'un cas particulier), ou sujet grave (mariage, divorce, héritage, "
+        "situations personnelles délicates, santé, finances), tu NE donnes PAS de verdict : tu "
+        "expliques les principes généraux puis tu invites clairement l'utilisateur à consulter "
+        "une PERSONNE DE SCIENCE QUALIFIÉE (imam, savant reconnu).\n"
+        "4. Reste humble, respectueux, encourageant. Va du simple au complexe selon le niveau.\n"
+        "5. Réponds dans la langue de l'utilisateur.\n"
+        "Quand on te demande une leçon sur un thème, structure ta réponse (définition, "
+        "preuves/sources, étapes pratiques, exemple, puis une question pour réviser)."
+    )
+    if topic:
+        system += f"\n\nThème demandé pour cette session : {topic}."
+    system += MODERATION_GUARD + IDENTITY_GUARD
+
+    history = await db.islam_messages.find(
+        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(40)
+    initial = [{"role": "system", "content": system}]
+    for m in history:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            initial.append({"role": m["role"], "content": m["content"]})
+
+    now = datetime.now(timezone.utc).isoformat()
+    await db.islam_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "user", "content": message.content, "created_at": now,
+    })
+
+    provider, model = ("openai", "gpt-4o") if _is_premium_ai(user) else ("gemini", "gemini-2.5-flash")
+    response, last_err = None, None
+    for attempt in range(3):
+        try:
+            chat = LlmChat(api_key=AI_LLM_KEY, session_id=f"islam_{session_id}",
+                           system_message=system, initial_messages=initial
+                           ).with_model(provider, model).with_params(max_tokens=1200, temperature=0.3)
+            response = await chat.send_message(UserMessage(text=message.content))
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            es = str(e)
+            if any(x in es for x in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")) and attempt < 2:
+                await asyncio.sleep(2 + attempt * 3)
+                continue
+            break
+    if last_err is not None:
+        logger.error(f"Islam learning error: {str(last_err)[:200]}")
+        raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Réessaie.")
+
+    await db.islam_messages.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+        "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"response": response, "session_id": session_id}
+
+
+class IslamProgressUpdate(BaseModel):
+    topic: str
+    completed: bool = True
+    level: Optional[str] = "débutant"
+
+
+@api_router.get("/islam-learning/progress")
+async def get_islam_learning_progress(user: dict = Depends(get_current_user)):
+    progress = await db.islam_learning_progress.find_one(
+        {"user_id": user["id"]}, {"_id": 0}
+    )
+    return progress or {
+        "user_id": user["id"],
+        "completed_topics": [],
+        "current_topic": None,
+        "level": "débutant",
+    }
+
+
+@api_router.post("/islam-learning/progress")
+async def set_islam_learning_progress(
+    data: IslamProgressUpdate, user: dict = Depends(get_current_user)
+):
+    topic = data.topic.strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Thème requis")
+
+    topic_update = (
+        {"$addToSet": {"completed_topics": topic}}
+        if data.completed
+        else {"$pull": {"completed_topics": topic}}
+    )
+    topic_update["$set"] = {
+        "user_id": user["id"],
+        "current_topic": topic,
+        "level": data.level or "débutant",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.islam_learning_progress.update_one(
+        {"user_id": user["id"]}, topic_update, upsert=True
+    )
+    return await get_islam_learning_progress(user)
+
+
 # ============== SUBSCRIPTIONS ==============
 
 @api_router.get("/subscriptions/plans")
