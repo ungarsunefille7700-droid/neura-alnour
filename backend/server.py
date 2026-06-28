@@ -2676,6 +2676,12 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     session_id = message.session_id or str(uuid.uuid4())
     level = message.level or "débutant"
     lang = message.language or "English"
+    voice_instruction = (
+        "Le message vient d'une transcription vocale. Corrige la formulation entendue et "
+        "donne une prononciation simple et utile, sans prétendre avoir analysé directement "
+        "le son ou l'accent.\n"
+        if message.voice else "Le message a été écrit par l'élève.\n"
+    )
 
     system = (
         f"Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
@@ -2684,8 +2690,7 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
         "ou ne comprend pas (surtout pour les débutants).\n"
         "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de formulation. "
         "Montre la version correcte, puis explique brièvement pourquoi.\n"
-        "- Si le message vient de la VOIX de l'élève (transcription), commente sa formulation/prononciation "
-        "d'après ce que tu lis, et donne la bonne manière de le dire (écris la prononciation simplement).\n"
+        f"- {voice_instruction}"
         "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
         "- Adapte la difficulté au niveau (débutant = phrases simples + plus de français ; avancé = "
         f"presque tout en {lang}).\n"
@@ -2706,7 +2711,8 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     now = datetime.now(timezone.utc).isoformat()
     await db.lang_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
-        "role": "user", "content": message.content, "language": lang, "created_at": now,
+        "role": "user", "content": message.content, "language": lang,
+        "voice": bool(message.voice), "created_at": now,
     })
 
     provider, model = ("openai", "gpt-4o") if _is_premium_ai(user) else ("gemini", "gemini-2.5-flash")
@@ -2747,7 +2753,7 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
 async def language_tutor_progress(user: dict = Depends(get_current_user)):
     return await db.lang_progress.find(
         {"user_id": user["id"]}, {"_id": 0}
-    ).sort("updated_at", -1).to_list(50)
+    ).sort("updated_at", -1).to_list(200)
 
 
 # ============== ISLAM LEARNING (cautious AI teacher) ==============

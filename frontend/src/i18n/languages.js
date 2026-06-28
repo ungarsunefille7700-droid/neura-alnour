@@ -4,7 +4,7 @@
 export const LANGUAGES = [
   { code: 'fr', name: 'French', native: 'Français' },
   { code: 'en', name: 'English', native: 'English' },
-  { code: 'ar', name: 'Arabic', native: 'العربية' },
+  { code: 'ar', name: 'Modern Standard Arabic (Fusha)', native: 'العربية الفصحى' },
   { code: 'es', name: 'Spanish', native: 'Español' },
   { code: 'pt', name: 'Portuguese', native: 'Português' },
   { code: 'de', name: 'German', native: 'Deutsch' },
@@ -95,7 +95,7 @@ export const LANGUAGES = [
   { code: 'lg', name: 'Luganda', native: 'Luganda' },
   { code: 'wo', name: 'Wolof', native: 'Wolof' },
   { code: 'ff', name: 'Fulah', native: 'Fulfulde' },
-  { code: 'tzm', name: 'Tamazight', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ' },
+  { code: 'ber', name: 'Tamazight (general)', native: 'ⵜⴰⵎⴰⵣⵉⵖⵜ' },
   { code: 'gd', name: 'Scottish Gaelic', native: 'Gàidhlig' },
   { code: 'fy', name: 'Frisian', native: 'Frysk' },
   { code: 'oc', name: 'Occitan', native: 'Occitan' },

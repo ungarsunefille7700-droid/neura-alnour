@@ -17,7 +17,7 @@ function speechLang(code) {
   const map = {
     'ary': 'ar-MA', 'arq': 'ar-DZ', 'aeb': 'ar-TN', 'ar-MA': 'ar-MA', 'ar-TN': 'ar-TN',
     'kab': 'ar-DZ', 'shy': 'ar-DZ', 'cnu': 'ar-DZ', 'mzb': 'ar-DZ', 'thv': 'ar-DZ', 'ber-DZ': 'ar-DZ',
-    'rif': 'ar-MA', 'shi': 'ar-MA', 'zgh': 'ar-MA', 'tzm': 'ar-MA', 'jbn': 'ar-TN',
+    'rif': 'ar-MA', 'shi': 'ar-MA', 'zgh': 'ar-MA', 'tzm': 'ar-MA', 'ber': 'ar-MA', 'jbn': 'ar-TN',
     'ar': 'ar-SA', 'en': 'en-US', 'fr': 'fr-FR', 'zh': 'zh-CN', 'pt': 'pt-PT',
   };
   return map[code] || code.split('-')[0];
@@ -39,7 +39,7 @@ const QUICK = [
 ];
 
 export default function LanguageTutorPage() {
-  const { getAuthHeader } = useAuth();
+  const { token, getAuthHeader } = useAuth();
   const navigate = useNavigate();
 
   const [language, setLanguage] = useState(() => localStorage.getItem('neura_tutor_lang') || 'en');
@@ -51,18 +51,40 @@ export default function LanguageTutorPage() {
   const [listening, setListening] = useState(false);
   const [callMode, setCallMode] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [voices, setVoices] = useState([]);
+  const [voiceNotice, setVoiceNotice] = useState('');
+  const [progress, setProgress] = useState([]);
 
   const recognitionRef = useRef(null);
   const bottomRef = useRef(null);
   const callModeRef = useRef(false);
   useEffect(() => { callModeRef.current = callMode; }, [callMode]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, busy]);
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return undefined;
+    const loadVoices = () => setVoices(window.speechSynthesis.getVoices());
+    loadVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+  }, []);
+  useEffect(() => {
+    if (!token) return;
+    axios.get(`${API}/language-tutor/progress`, { headers: getAuthHeader() })
+      .then((response) => setProgress(response.data || []))
+      .catch(() => setProgress([]));
+  }, [token]);
 
   const langName = (LANGUAGES.find((l) => l.code === language) || {}).name || 'English';
   const langNative = (LANGUAGES.find((l) => l.code === language) || {}).native || 'English';
 
   const sttSupported = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+  const speechLocale = speechLang(language);
+  const matchingVoice = voices.find((voice) => voice.lang && (
+    voice.lang.toLowerCase() === speechLocale.toLowerCase() ||
+    voice.lang.toLowerCase().startsWith(speechLocale.toLowerCase().split('-')[0])
+  ));
+  const savedProgress = progress.find((item) => item.language === langName);
 
   // --- Text to speech ---
   const speak = useCallback((text, onEnd) => {
@@ -70,21 +92,19 @@ export default function LanguageTutorPage() {
     try {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text.replace(/[*_#`>]/g, ''));
-      u.lang = speechLang(language);
-      const voices = window.speechSynthesis.getVoices();
-      const v = voices.find((vo) => vo.lang && vo.lang.toLowerCase().startsWith(u.lang.toLowerCase().split('-')[0]));
-      if (v) u.voice = v;
+      u.lang = speechLocale;
+      if (matchingVoice) u.voice = matchingVoice;
       u.onstart = () => setSpeaking(true);
       u.onend = () => { setSpeaking(false); onEnd && onEnd(); };
       u.onerror = () => { setSpeaking(false); onEnd && onEnd(); };
       window.speechSynthesis.speak(u);
     } catch (e) { onEnd && onEnd(); }
-  }, [language, ttsSupported]);
+  }, [matchingVoice, speechLocale, ttsSupported]);
 
   const stopSpeaking = () => { if (ttsSupported) window.speechSynthesis.cancel(); setSpeaking(false); };
 
   // --- Send a message ---
-  const send = useCallback(async (text) => {
+  const send = useCallback(async (text, fromVoice = false) => {
     const msg = (text != null ? text : input).trim();
     if (!msg || busy) return;
     setInput('');
@@ -92,11 +112,15 @@ export default function LanguageTutorPage() {
     setBusy(true);
     try {
       const r = await axios.post(`${API}/language-tutor/chat`,
-        { content: msg, language: langName, level, session_id: sessionId },
+        { content: msg, language: langName, level, session_id: sessionId, voice: fromVoice },
         { headers: getAuthHeader(), timeout: 120000 });
       setSessionId(r.data.session_id);
       const reply = r.data.response;
       setMessages((p) => [...p, { role: 'assistant', content: reply }]);
+      setProgress((current) => [
+        { language: langName, level, updated_at: new Date().toISOString() },
+        ...current.filter((item) => item.language !== langName),
+      ]);
       // In call mode: speak the reply, then listen again.
       if (callModeRef.current) {
         speak(reply, () => { if (callModeRef.current) startListening(true); });
@@ -119,17 +143,27 @@ export default function LanguageTutorPage() {
       rec.maxAlternatives = 1;
       rec.continuous = false;
       rec.onstart = () => setListening(true);
-      rec.onerror = () => setListening(false);
+      rec.onerror = (event) => {
+        setListening(false);
+        setVoiceNotice(
+          event.error === 'language-not-supported'
+            ? `La reconnaissance vocale ${langNative} n'est pas disponible dans ce navigateur. Le chat écrit reste pleinement fonctionnel.`
+            : "La reconnaissance vocale n'a pas compris. Réessaie ou utilise le chat écrit."
+        );
+      };
       rec.onend = () => setListening(false);
       rec.onresult = (ev) => {
         const said = ev.results[0][0].transcript;
         setListening(false);
-        if (said && said.trim()) send(said);
+        if (said && said.trim()) {
+          setVoiceNotice('');
+          send(said, true);
+        }
       };
       recognitionRef.current = rec;
       rec.start();
     } catch (e) { setListening(false); }
-  }, [language, sttSupported, send]);
+  }, [language, langNative, sttSupported, send]);
 
   const stopListening = () => { try { recognitionRef.current && recognitionRef.current.stop(); } catch (e) {} setListening(false); };
 
@@ -143,7 +177,7 @@ export default function LanguageTutorPage() {
     }
   };
 
-  const changeLang = (code) => { setLanguage(code); localStorage.setItem('neura_tutor_lang', code); setMessages([]); setSessionId(null); };
+  const changeLang = (code) => { setLanguage(code); localStorage.setItem('neura_tutor_lang', code); setMessages([]); setSessionId(null); setVoiceNotice(''); };
   const changeLevel = (lv) => { setLevel(lv); localStorage.setItem('neura_tutor_level', lv); };
 
   return (
@@ -162,6 +196,7 @@ export default function LanguageTutorPage() {
             className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer" data-testid="tutor-level">
             {LEVELS.map((lv) => <option key={lv.key} value={lv.key}>{lv.label}</option>)}
           </select>
+          {savedProgress && <span className="hidden lg:inline text-xs text-muted-foreground">Progression enregistrée</span>}
         </div>
       </div>
 
@@ -172,6 +207,7 @@ export default function LanguageTutorPage() {
             <GraduationCap className="w-12 h-12 text-primary mx-auto mb-4" />
             <h2 className="text-2xl font-bold mb-2">Ton prof particulier 24h/24</h2>
             <p className="text-muted-foreground mb-4">Apprends le <b>{langNative}</b> par écrit ou en <b>conversation vocale</b>. Le prof corrige tes fautes, t'explique, te fait des exercices et te fait parler.</p>
+            {savedProgress && <p className="text-sm text-primary mb-3">Reprise disponible · niveau {savedProgress.level}</p>}
             <p className="text-sm text-muted-foreground">Choisis ta langue + ton niveau en haut, puis écris ou clique sur <b>📞 Appeler le prof</b>.</p>
           </div>
         )}
@@ -194,6 +230,7 @@ export default function LanguageTutorPage() {
         {busy && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-muted/50 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Le prof réfléchit…</div></div>}
         {listening && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Mic className="w-4 h-4 animate-pulse" /> Je t'écoute… parle !</div></div>}
         {speaking && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Volume2 className="w-4 h-4 animate-pulse" /> Le prof parle… <button onClick={stopSpeaking} className="underline">stop</button></div></div>}
+        {voiceNotice && <div className="max-w-3xl mx-auto text-sm text-amber-700 dark:text-amber-400">{voiceNotice}</div>}
         <div ref={bottomRef} />
       </div>
 
@@ -230,6 +267,7 @@ export default function LanguageTutorPage() {
           </Button>
         </div>
         {!sttSupported && <p className="text-center text-xs text-muted-foreground mt-2">🎤 La voix nécessite Chrome/Edge. Le chat écrit fonctionne partout.</p>}
+        {ttsSupported && voices.length > 0 && !matchingVoice && <p className="text-center text-xs text-muted-foreground mt-2">Aucune voix native {langNative} n’est installée sur cet appareil. Le chat écrit fonctionne normalement.</p>}
       </form>
     </div>
   );
