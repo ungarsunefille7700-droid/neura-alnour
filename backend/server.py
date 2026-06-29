@@ -2715,7 +2715,7 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
         "voice": bool(message.voice), "created_at": now,
     })
 
-    provider, model = ("openai", "gpt-4o") if _is_premium_ai(user) else ("gemini", "gemini-2.5-flash")
+    provider, model = ("openai", "gpt-4o") if _is_premium_ai(user) else ("gemini", "gemini-3.5-flash")
     response, last_err = None, None
     for attempt in range(3):
         try:
@@ -2801,7 +2801,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
 
             provider, model = (
                 ("openai", "gpt-4o") if _is_premium_ai(user)
-                else ("gemini", "gemini-2.5-flash")
+                else ("gemini", "gemini-3.5-flash")
             )
             answer = ""
             last_error = None
