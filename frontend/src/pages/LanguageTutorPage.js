@@ -48,6 +48,7 @@ export default function LanguageTutorPage() {
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [streamStarted, setStreamStarted] = useState(false);
   const [listening, setListening] = useState(false);
   const [callMode, setCallMode] = useState(false);
   const [speaking, setSpeaking] = useState(false);
@@ -110,25 +111,70 @@ export default function LanguageTutorPage() {
     setInput('');
     setMessages((p) => [...p, { role: 'user', content: msg }]);
     setBusy(true);
+    setStreamStarted(false);
+    const assistantId = `tutor-${Date.now()}`;
+    let accumulated = '';
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
     try {
-      const r = await axios.post(`${API}/language-tutor/chat`,
-        { content: msg, language: langName, level, session_id: sessionId, voice: fromVoice },
-        { headers: getAuthHeader(), timeout: 120000 });
-      setSessionId(r.data.session_id);
-      const reply = r.data.response;
-      setMessages((p) => [...p, { role: 'assistant', content: reply }]);
+      const response = await fetch(`${API}/language-tutor/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        body: JSON.stringify({
+          content: msg, language: langName, level, session_id: sessionId, voice: fromVoice,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) throw new Error('stream unavailable');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const rawEvent of events) {
+          const line = rawEvent.trim();
+          if (!line.startsWith('data:')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(5).trim()); } catch (error) { continue; }
+          if (event.type === 'session' && event.session_id) {
+            setSessionId(event.session_id);
+          } else if (event.type === 'delta' && event.content) {
+            accumulated += event.content;
+            setStreamStarted(true);
+            setMessages((current) => {
+              const exists = current.some((item) => item.id === assistantId);
+              if (!exists) return [...current, { id: assistantId, role: 'assistant', content: accumulated }];
+              return current.map((item) => (
+                item.id === assistantId ? { ...item, content: accumulated } : item
+              ));
+            });
+          } else if (event.type === 'error') {
+            throw new Error(event.detail || 'stream failed');
+          }
+        }
+      }
+      if (!accumulated.trim()) throw new Error('empty stream');
       setProgress((current) => [
         { language: langName, level, updated_at: new Date().toISOString() },
         ...current.filter((item) => item.language !== langName),
       ]);
       // In call mode: speak the reply, then listen again.
       if (callModeRef.current) {
-        speak(reply, () => { if (callModeRef.current) startListening(true); });
+        speak(accumulated, () => { if (callModeRef.current) startListening(true); });
       }
     } catch (e) {
-      setMessages((p) => [...p, { role: 'assistant', content: '⚠️ Service IA temporairement indisponible. Réessaie.' }]);
+      if (!accumulated) {
+        setMessages((p) => [...p, { role: 'assistant', content: '⚠️ Service IA temporairement indisponible. Réessaie.' }]);
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setBusy(false);
+      setStreamStarted(false);
     }
   }, [input, busy, langName, level, sessionId, getAuthHeader, speak]);
 
@@ -227,7 +273,7 @@ export default function LanguageTutorPage() {
             </div>
           </div>
         ))}
-        {busy && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-muted/50 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Le prof réfléchit…</div></div>}
+        {busy && !streamStarted && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-muted/50 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Le prof réfléchit…</div></div>}
         {listening && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Mic className="w-4 h-4 animate-pulse" /> Je t'écoute… parle !</div></div>}
         {speaking && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Volume2 className="w-4 h-4 animate-pulse" /> Le prof parle… <button onClick={stopSpeaking} className="underline">stop</button></div></div>}
         {voiceNotice && <div className="max-w-3xl mx-auto text-sm text-amber-700 dark:text-amber-400">{voiceNotice}</div>}

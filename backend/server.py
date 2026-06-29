@@ -2749,6 +2749,123 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     return {"response": response, "session_id": session_id}
 
 
+@api_router.post("/language-tutor/stream")
+async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(get_current_user)):
+    """Stream the language tutor response so the first words reach the UI immediately."""
+
+    def sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def event_generator():
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+        session_id = message.session_id or str(uuid.uuid4())
+        level = message.level or "débutant"
+        lang = message.language or "English"
+        voice_instruction = (
+            "Le message vient d'une transcription vocale. Corrige la formulation entendue et "
+            "donne une prononciation simple et utile, sans prétendre avoir analysé directement "
+            "le son ou l'accent.\n"
+            if message.voice else "Le message a été écrit par l'élève.\n"
+        )
+        system = (
+            "Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
+            f"qui enseigne le **{lang}** à un élève de niveau **{level}**.\n"
+            f"- Parle PRINCIPALEMENT en {lang} (immersion), mais explique/aide en français quand "
+            "l'élève bloque ou ne comprend pas (surtout pour les débutants).\n"
+            "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de "
+            "formulation. Montre la version correcte, puis explique brièvement pourquoi.\n"
+            f"- {voice_instruction}"
+            "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
+            "- Adapte la difficulté au niveau et garde la conversation vivante.\n"
+            "- Réponds aux demandes de correction, exercices, quiz et explications.\n"
+            "- Termine souvent par une petite question. Reste respectueux et concret."
+        )
+
+        try:
+            history = await db.lang_messages.find(
+                {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+            ).sort("created_at", 1).to_list(40)
+            initial = [{"role": "system", "content": system}]
+            for item in history:
+                if item.get("role") in ("user", "assistant") and item.get("content"):
+                    initial.append({"role": item["role"], "content": item["content"]})
+
+            now = datetime.now(timezone.utc).isoformat()
+            await db.lang_messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+                "role": "user", "content": message.content, "language": lang,
+                "voice": bool(message.voice), "created_at": now,
+            })
+            yield sse({"type": "session", "session_id": session_id})
+
+            provider, model = (
+                ("openai", "gpt-4o") if _is_premium_ai(user)
+                else ("gemini", "gemini-2.5-flash")
+            )
+            answer = ""
+            last_error = None
+            for attempt in range(3):
+                try:
+                    chat = LlmChat(
+                        api_key=AI_LLM_KEY,
+                        session_id=f"lang_stream_{session_id}",
+                        system_message=system,
+                        initial_messages=initial,
+                    ).with_model(provider, model).with_params(max_tokens=1024, temperature=0.6)
+                    async for event in chat.stream_message(UserMessage(text=message.content)):
+                        incoming = getattr(event, "content", None)
+                        if incoming:
+                            # Providers may emit token deltas, cumulative text, or a final
+                            # duplicate of the complete answer. Normalize all three forms.
+                            if incoming.startswith(answer):
+                                delta = incoming[len(answer):]
+                                answer = incoming
+                            elif answer.endswith(incoming):
+                                delta = ""
+                            else:
+                                delta = incoming
+                                answer += incoming
+                            if delta:
+                                yield sse({"type": "delta", "content": delta})
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    transient = any(token in str(exc) for token in (
+                        "429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"
+                    ))
+                    if transient and not answer and attempt < 2:
+                        await asyncio.sleep(2 + attempt * 3)
+                        continue
+                    break
+
+            if last_error is not None:
+                raise last_error
+
+            await db.lang_messages.insert_one({
+                "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
+                "role": "assistant", "content": answer,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await db.lang_progress.update_one(
+                {"user_id": user["id"], "language": lang},
+                {"$set": {"level": level, "updated_at": now},
+                 "$setOnInsert": {"user_id": user["id"], "language": lang, "created_at": now}},
+                upsert=True,
+            )
+            yield sse({"type": "done", "session_id": session_id})
+        except Exception as exc:
+            logger.error("Language tutor stream error: %s", str(exc)[:200])
+            yield sse({"type": "error", "detail": "Service IA temporairement indisponible. Réessaie."})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @api_router.get("/language-tutor/progress")
 async def language_tutor_progress(user: dict = Depends(get_current_user)):
     return await db.lang_progress.find(
