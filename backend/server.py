@@ -2940,9 +2940,11 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     level = message.level or "débutant"
     lang = message.language or "English"
     voice_instruction = (
-        "Le message vient d'une transcription vocale. Corrige la formulation entendue et "
-        "donne une prononciation simple et utile, sans prétendre avoir analysé directement "
-        "le son ou l'accent.\n"
+        "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
+        "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
+        "clarification au lieu de corriger une erreur probablement créée par la transcription. "
+        "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
+        "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
         if message.voice else "Le message a été écrit par l'élève.\n"
     )
 
@@ -3026,9 +3028,11 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         level = message.level or "débutant"
         lang = message.language or "English"
         voice_instruction = (
-            "Le message vient d'une transcription vocale. Corrige la formulation entendue et "
-            "donne une prononciation simple et utile, sans prétendre avoir analysé directement "
-            "le son ou l'accent.\n"
+            "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
+            "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
+            "clarification au lieu de corriger une erreur probablement créée par la transcription. "
+            "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
+            "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
             if message.voice else "Le message a été écrit par l'élève.\n"
         )
         system = (

@@ -23,6 +23,47 @@ function speechLang(code) {
   return map[code] || code.split('-')[0];
 }
 
+function selectBestVoice(voices, locale) {
+  const target = locale.toLowerCase();
+  const language = target.split('-')[0];
+  const qualityPattern = /natural|neural|enhanced|premium|online|google|microsoft|siri/i;
+  return voices
+    .filter((voice) => voice.lang && voice.lang.toLowerCase().split('-')[0] === language)
+    .sort((a, b) => {
+      const score = (voice) => {
+        const voiceLang = voice.lang.toLowerCase();
+        return (voiceLang === target ? 100 : 0)
+          + (qualityPattern.test(voice.name) ? 25 : 0)
+          + (!voice.localService ? 10 : 0)
+          + (voice.default ? 5 : 0);
+      };
+      return score(b) - score(a);
+    })[0];
+}
+
+function speechChunks(text, maxLength = 220) {
+  const clean = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/[*_#`>\[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return [];
+  const sentences = clean.match(/[^.!?。！？]+[.!?。！？]?/g) || [clean];
+  const chunks = [];
+  let current = '';
+  sentences.forEach((sentence) => {
+    const next = `${current} ${sentence.trim()}`.trim();
+    if (current && next.length > maxLength) {
+      chunks.push(current);
+      current = sentence.trim();
+    } else {
+      current = next;
+    }
+  });
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 const LEVELS = [
   { key: 'débutant', label: 'Débutant' },
   { key: 'intermédiaire', label: 'Intermédiaire' },
@@ -57,6 +98,8 @@ export default function LanguageTutorPage() {
   const [progress, setProgress] = useState([]);
 
   const recognitionRef = useRef(null);
+  const recognitionTextRef = useRef('');
+  const recognitionSentRef = useRef(false);
   const bottomRef = useRef(null);
   const callModeRef = useRef(false);
   useEffect(() => { callModeRef.current = callMode; }, [callMode]);
@@ -81,10 +124,7 @@ export default function LanguageTutorPage() {
   const sttSupported = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
   const speechLocale = speechLang(language);
-  const matchingVoice = voices.find((voice) => voice.lang && (
-    voice.lang.toLowerCase() === speechLocale.toLowerCase() ||
-    voice.lang.toLowerCase().startsWith(speechLocale.toLowerCase().split('-')[0])
-  ));
+  const matchingVoice = selectBestVoice(voices, speechLocale);
   const savedProgress = progress.find((item) => item.language === langName);
 
   // --- Text to speech ---
@@ -92,13 +132,24 @@ export default function LanguageTutorPage() {
     if (!ttsSupported || !text) { onEnd && onEnd(); return; }
     try {
       window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text.replace(/[*_#`>]/g, ''));
-      u.lang = speechLocale;
-      if (matchingVoice) u.voice = matchingVoice;
-      u.onstart = () => setSpeaking(true);
-      u.onend = () => { setSpeaking(false); onEnd && onEnd(); };
-      u.onerror = () => { setSpeaking(false); onEnd && onEnd(); };
-      window.speechSynthesis.speak(u);
+      const chunks = speechChunks(text);
+      if (!chunks.length) { onEnd && onEnd(); return; }
+      let index = 0;
+      const finish = () => { setSpeaking(false); onEnd && onEnd(); };
+      const playNext = () => {
+        if (index >= chunks.length) { finish(); return; }
+        const utterance = new SpeechSynthesisUtterance(chunks[index]);
+        utterance.lang = speechLocale;
+        utterance.rate = 0.95;
+        utterance.pitch = 1;
+        utterance.volume = 1;
+        if (matchingVoice) utterance.voice = matchingVoice;
+        utterance.onstart = () => setSpeaking(true);
+        utterance.onend = () => { index += 1; playNext(); };
+        utterance.onerror = finish;
+        window.speechSynthesis.speak(utterance);
+      };
+      playNext();
     } catch (e) { onEnd && onEnd(); }
   }, [matchingVoice, speechLocale, ttsSupported]);
 
@@ -179,36 +230,64 @@ export default function LanguageTutorPage() {
   }, [input, busy, langName, level, sessionId, getAuthHeader, speak]);
 
   // --- Speech to text ---
-  const startListening = useCallback((auto) => {
+  const startListening = useCallback(() => {
     if (!sttSupported) return;
     try {
+      try { recognitionRef.current?.abort(); } catch (error) {}
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       const rec = new SR();
       rec.lang = speechLang(language);
-      rec.interimResults = false;
-      rec.maxAlternatives = 1;
+      rec.interimResults = true;
+      rec.maxAlternatives = 5;
       rec.continuous = false;
-      rec.onstart = () => setListening(true);
+      recognitionTextRef.current = '';
+      recognitionSentRef.current = false;
+      rec.onstart = () => { setListening(true); setVoiceNotice(''); };
       rec.onerror = (event) => {
         setListening(false);
-        setVoiceNotice(
-          event.error === 'language-not-supported'
-            ? `La reconnaissance vocale ${langNative} n'est pas disponible dans ce navigateur. Le chat écrit reste pleinement fonctionnel.`
-            : "La reconnaissance vocale n'a pas compris. Réessaie ou utilise le chat écrit."
-        );
+        const notices = {
+          'language-not-supported': `La reconnaissance vocale ${langNative} n'est pas disponible dans ce navigateur. Le chat écrit reste pleinement fonctionnel.`,
+          'not-allowed': "L'accès au microphone est refusé. Autorise le microphone dans le navigateur puis réessaie.",
+          'service-not-allowed': "Le service vocal du navigateur est désactivé. Vérifie les autorisations du navigateur.",
+          'network': "La reconnaissance vocale est momentanément indisponible. Vérifie la connexion puis réessaie.",
+          'no-speech': "Je n'ai pas entendu de phrase. Rapproche-toi du microphone et parle clairement.",
+        };
+        if (event.error !== 'aborted') {
+          setVoiceNotice(notices[event.error] || "Je n'ai pas bien compris. Réessaie en parlant un peu plus lentement.");
+        }
       };
-      rec.onend = () => setListening(false);
-      rec.onresult = (ev) => {
-        const said = ev.results[0][0].transcript;
+      rec.onspeechend = () => { try { rec.stop(); } catch (error) {} };
+      rec.onend = () => {
         setListening(false);
-        if (said && said.trim()) {
+        const said = recognitionTextRef.current.trim();
+        if (said && !recognitionSentRef.current) {
+          recognitionSentRef.current = true;
           setVoiceNotice('');
           send(said, true);
         }
       };
+      rec.onresult = (ev) => {
+        let finalText = recognitionTextRef.current;
+        let interimText = '';
+        for (let i = ev.resultIndex; i < ev.results.length; i += 1) {
+          const result = ev.results[i];
+          let best = result[0];
+          for (let alt = 1; alt < result.length; alt += 1) {
+            if ((result[alt].confidence || 0) > (best.confidence || 0)) best = result[alt];
+          }
+          if (result.isFinal) finalText = `${finalText} ${best.transcript}`.trim();
+          else interimText = `${interimText} ${best.transcript}`.trim();
+        }
+        recognitionTextRef.current = finalText;
+        const heard = `${finalText} ${interimText}`.trim();
+        if (heard) setVoiceNotice(`Entendu : « ${heard} »`);
+      };
       recognitionRef.current = rec;
       rec.start();
-    } catch (e) { setListening(false); }
+    } catch (e) {
+      setListening(false);
+      setVoiceNotice("Impossible de démarrer le microphone. Vérifie son autorisation puis réessaie.");
+    }
   }, [language, langNative, sttSupported, send]);
 
   const stopListening = () => { try { recognitionRef.current && recognitionRef.current.stop(); } catch (e) {} setListening(false); };
