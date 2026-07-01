@@ -11,6 +11,8 @@ import { toast } from 'sonner';
 import { Sparkles, Mail, Lock, User, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 const AuthPage = () => {
   const [tab, setTab] = useState('login');
   const [loading, setLoading] = useState(false);
@@ -31,6 +33,8 @@ const AuthPage = () => {
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   const handleGoogleLogin = () => {
     const redirectUrl = window.location.origin + '/auth/callback';
+    // Keep the free Render instance warm while the user completes Google OAuth.
+    fetch(`${API}/health`, { cache: 'no-store', keepalive: true }).catch(() => {});
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
 

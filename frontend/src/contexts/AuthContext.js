@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 
 const AuthContext = createContext(null);
@@ -9,8 +9,11 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(localStorage.getItem('neura_token'));
   const [loading, setLoading] = useState(true);
+  const fetchingTokenRef = useRef(null);
 
   const fetchUser = useCallback(async () => {
+    if (!token || fetchingTokenRef.current === token) return;
+    fetchingTokenRef.current = token;
     try {
       const response = await axios.get(`${API}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -22,6 +25,7 @@ export const AuthProvider = ({ children }) => {
       setToken(null);
       setUser(null);
     } finally {
+      if (fetchingTokenRef.current === token) fetchingTokenRef.current = null;
       setLoading(false);
     }
   }, [token]);
@@ -34,12 +38,12 @@ export const AuthProvider = ({ children }) => {
       return;
     }
     
-    if (token) {
+    if (token && !user) {
       fetchUser();
     } else {
       setLoading(false);
     }
-  }, [token, fetchUser]);
+  }, [token, user, fetchUser]);
 
   const login = async (email, password) => {
     const response = await axios.post(`${API}/auth/login`, { email, password });
@@ -64,6 +68,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('neura_token', newToken);
     setToken(newToken);
     setUser(userData);
+    setLoading(false);
   };
 
   const logout = () => {

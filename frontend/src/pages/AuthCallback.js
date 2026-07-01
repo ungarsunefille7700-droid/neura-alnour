@@ -37,8 +37,7 @@ const AuthCallback = () => {
 
         const { token, user } = response.data;
 
-        // Store token and user
-        localStorage.setItem('neura_token', token);
+        // Store token and user once through the auth context.
         setUserFromGoogle(user, token);
 
         toast.success(`Bienvenue ${user.name}!`);

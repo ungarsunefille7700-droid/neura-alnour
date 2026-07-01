@@ -19,6 +19,7 @@ import resend
 import base64
 import httpx
 from urllib.parse import quote
+import time
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -379,6 +380,7 @@ def check_subscription_feature(user: dict, feature: str) -> bool:
 @api_router.post("/auth/google/session")
 async def google_auth_session(request: Request):
     """Exchange Google OAuth session_id for user session"""
+    started_at = time.perf_counter()
     try:
         body = await request.json()
         session_id = body.get("session_id")
@@ -387,7 +389,8 @@ async def google_auth_session(request: Request):
             raise HTTPException(status_code=400, detail="session_id requis")
         
         # Call Emergent Auth to get user data
-        async with httpx.AsyncClient() as client:
+        external_started_at = time.perf_counter()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
             response = await client.get(
                 "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
                 headers={"X-Session-ID": session_id}
@@ -397,6 +400,7 @@ async def google_auth_session(request: Request):
                 raise HTTPException(status_code=401, detail="Session invalide")
             
             google_data = response.json()
+        external_ms = round((time.perf_counter() - external_started_at) * 1000)
         
         email = google_data.get("email")
         name = google_data.get("name")
@@ -411,14 +415,14 @@ async def google_auth_session(request: Request):
         
         if existing_user:
             user_id = existing_user["id"]
-            # Update user info if needed
-            await db.users.update_one(
+            subscription = "developer" if is_vip else existing_user.get("subscription", "free")
+            user_write = db.users.update_one(
                 {"email": email},
                 {"$set": {
                     "name": name,
                     "picture": picture,
                     "is_vip": is_vip,
-                    "subscription": "developer" if is_vip else existing_user.get("subscription", "free")
+                    "subscription": subscription
                 }}
             )
         else:
@@ -437,11 +441,12 @@ async def google_auth_session(request: Request):
                 "images_today": 0,
                 "last_reset": datetime.now(timezone.utc).date().isoformat()
             }
-            await db.users.insert_one(user)
+            subscription = user["subscription"]
+            user_write = db.users.insert_one(user)
         
         # Store session in database
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-        await db.user_sessions.update_one(
+        session_write = db.user_sessions.update_one(
             {"user_id": user_id},
             {"$set": {
                 "user_id": user_id,
@@ -451,12 +456,20 @@ async def google_auth_session(request: Request):
             }},
             upsert=True
         )
+        database_started_at = time.perf_counter()
+        await asyncio.gather(user_write, session_write)
+        database_ms = round((time.perf_counter() - database_started_at) * 1000)
         
         # Create JWT token
         token = create_token(user_id, email, is_vip)
         
-        # Get updated user
-        user = await db.users.find_one({"id": user_id}, {"_id": 0})
+        total_ms = round((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            "Google auth timing external_ms=%s database_ms=%s total_ms=%s",
+            external_ms,
+            database_ms,
+            total_ms,
+        )
         
         return {
             "token": token,
@@ -466,7 +479,7 @@ async def google_auth_session(request: Request):
                 "email": email,
                 "name": name,
                 "picture": picture,
-                "subscription": user.get("subscription", "free"),
+                "subscription": subscription,
                 "is_vip": is_vip
             }
         }
