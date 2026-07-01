@@ -50,6 +50,7 @@ const MushafPage = () => {
   const [coverSide, setCoverSide] = useState(() => readStoredReader().lastPage === LAST_PAGE ? 'back' : 'front');
   const [pageNumber, setPageNumber] = useState(() => readStoredReader().lastPage);
   const [pageData, setPageData] = useState(null);
+  const [facingPageData, setFacingPageData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [turnDirection, setTurnDirection] = useState('');
@@ -84,14 +85,23 @@ const MushafPage = () => {
       setLoading(true);
       setError('');
       try {
-        const response = await axios.get(`${API}/mushaf/page/${pageNumber}`, {
+        const requests = [axios.get(`${API}/mushaf/page/${pageNumber}`, {
           params: { translation: 'fr' },
           signal: controller.signal,
-        });
-        setPageData(response.data);
+        })];
+        if (pageNumber < LAST_PAGE) {
+          requests.push(axios.get(`${API}/mushaf/page/${pageNumber + 1}`, {
+            params: { translation: 'fr' },
+            signal: controller.signal,
+          }));
+        }
+        const responses = await Promise.all(requests);
+        setPageData(responses[0].data);
+        setFacingPageData(responses[1]?.data || null);
       } catch (requestError) {
         if (requestError.code !== 'ERR_CANCELED') {
           setPageData(null);
+          setFacingPageData(null);
           setError(
             requestError.response?.data?.detail
               || "Le contenu authentifié n'a pas pu être chargé. Aucun texte de remplacement n'est affiché."
@@ -141,7 +151,7 @@ const MushafPage = () => {
     }));
   };
 
-  const toggleFavorite = (ayah) => {
+  const toggleFavorite = (ayah, favoritePage = pageNumber) => {
     setReaderData((current) => {
       const exists = current.favorites.some((favorite) => favorite.ayah === ayah.number);
       return {
@@ -151,7 +161,7 @@ const MushafPage = () => {
           : [...current.favorites, {
               ayah: ayah.number,
               numberInSurah: ayah.numberInSurah,
-              page: pageNumber,
+              page: favoritePage,
               surahNumber: ayah.surah?.number,
               surahName: ayah.surah?.englishName,
             }],
@@ -451,10 +461,59 @@ const MushafPage = () => {
               </aside>
             )}
 
-            <div className="relative mx-auto flex max-w-5xl min-h-[68vh] rounded-md bg-[#6f5326] p-1.5 shadow-2xl shadow-black/70">
+            <div className="relative mx-auto flex max-w-6xl min-h-[68vh] rounded-md bg-[#6f5326] p-1.5 shadow-2xl shadow-black/70">
               <div className="absolute left-1/2 top-2 bottom-2 hidden md:block w-3 -translate-x-1/2 bg-gradient-to-r from-black/30 via-[#d8c492]/30 to-black/30 z-20 pointer-events-none" />
+              {facingPageData && !loading && !error && (
+                <article
+                  className={`hidden md:block md:w-1/2 order-1 rounded-l-sm px-8 py-10 overflow-y-auto ${darkPaper ? 'bg-[#161915] text-[#eee7d1]' : 'bg-[#fbf5df] text-[#252015]'}`}
+                  data-testid="mushaf-facing-page"
+                >
+                  <div className="mb-6 text-center border-b border-[#b7a77f]/45 pb-4">
+                    <p className="text-xs uppercase tracking-wider text-[#766b52]">
+                      Page {facingPageData.page} · Édition arabe {facingPageData.arabicEdition}
+                    </p>
+                    <p className="mt-1 text-xs text-[#766b52]">
+                      Traduction : {facingPageData.translation.translator} ({facingPageData.translation.edition})
+                    </p>
+                  </div>
+                  <div className="space-y-7">
+                    {facingPageData.ayahs.map((ayah) => (
+                      <section key={ayah.number} className="border-b border-[#b7a77f]/30 pb-6 last:border-0">
+                        <div className="flex justify-end mb-1">
+                          <button
+                            type="button"
+                            onClick={() => toggleFavorite(ayah, facingPageData.page)}
+                            className="w-8 h-8 grid place-items-center rounded-md text-[#967b3d] hover:bg-[#967b3d]/10"
+                            aria-label={readerData.favorites.some((favorite) => favorite.ayah === ayah.number) ? `Retirer le verset ${ayah.numberInSurah} des favoris` : `Ajouter le verset ${ayah.numberInSurah} aux favoris`}
+                            title="Favori"
+                          >
+                            <Star className="w-4 h-4" fill={readerData.favorites.some((favorite) => favorite.ayah === ayah.number) ? 'currentColor' : 'none'} />
+                          </button>
+                        </div>
+                        {preferences.display !== 'translation' && <p
+                          className={`font-arabic text-right ${darkPaper ? 'text-[#f4eddc]' : 'text-[#17130d]'}`}
+                          lang="ar"
+                          dir="rtl"
+                          style={{ fontSize: `${preferences.textSize}px`, lineHeight: preferences.lineHeight }}
+                        >
+                          {ayah.arabic}
+                          <span className="inline-grid place-items-center min-w-8 h-8 mx-2 rounded-full border border-[#967b3d] text-sm font-sans align-middle">
+                            {ayah.numberInSurah}
+                          </span>
+                        </p>}
+                        {preferences.display !== 'arabic' && <p className={`mt-4 text-base leading-8 ${darkPaper ? 'text-[#d4cdbb]' : 'text-[#514936]'}`}>
+                          {ayah.translation}
+                        </p>}
+                      </section>
+                    ))}
+                  </div>
+                  <footer className="mt-8 pt-4 border-t border-[#b7a77f]/45 text-center text-xs text-[#766b52]">
+                    Source : {facingPageData.source}
+                  </footer>
+                </article>
+              )}
               <article
-                className={`relative w-full rounded-sm px-5 py-7 md:px-12 md:py-10 overflow-y-auto transition-colors ${darkPaper ? 'bg-[#161915] text-[#eee7d1]' : 'bg-[#fbf5df] text-[#252015]'} ${turnDirection}`}
+                className={`relative w-full md:w-1/2 order-2 rounded-sm md:rounded-r-sm px-5 py-7 md:px-8 md:py-10 overflow-y-auto transition-colors ${darkPaper ? 'bg-[#161915] text-[#eee7d1]' : 'bg-[#fbf5df] text-[#252015]'} ${turnDirection}`}
                 data-testid="mushaf-page"
                 onPointerDown={(event) => { pointerStartX.current = event.clientX; }}
                 onPointerUp={(event) => finishPageGesture(event.clientX)}
