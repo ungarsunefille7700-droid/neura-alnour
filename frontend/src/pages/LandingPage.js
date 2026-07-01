@@ -35,6 +35,7 @@ const LandingPage = () => {
   const features = [
     { icon: MessageSquare, title: t('feat.chat.title'), description: t('feat.chat.desc'), color: "text-primary", path: "/chat" },
     { icon: BookOpen, title: t('feat.quran.title'), description: t('feat.quran.desc'), color: "text-secondary", path: "/quran" },
+    { icon: BookOpen, title: "Moushaf authentique", description: "Lire le Saint Coran page par page dans un livre numérique, avec la traduction de Muhammad Hamidullah.", color: "text-primary", path: "/mushaf" },
     { icon: Clock, title: t('feat.prayers.title'), description: t('feat.prayers.desc'), color: "text-primary", path: "/prayer-times" },
     { icon: Heart, title: t('feat.duas.title'), description: t('feat.duas.desc'), color: "text-secondary", path: "/duas" },
     { icon: Brain, title: t('feat.quiz.title'), description: t('feat.quiz.desc'), color: "text-primary", path: "/quiz" },
@@ -91,6 +92,7 @@ const LandingPage = () => {
           {/* Desktop Navigation */}
           <div className="hidden md:flex items-center gap-6">
             <Link to="/quran" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quran')}</Link>
+            <Link to="/mushaf" className="text-muted-foreground hover:text-foreground transition-colors">Moushaf</Link>
             <Link to="/prayer-times" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
             <Link to="/duas" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.duas')}</Link>
             <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quiz')}</Link>
@@ -138,6 +140,7 @@ const LandingPage = () => {
         {mobileMenuOpen && (
           <div className="md:hidden absolute top-full left-0 right-0 glass border-t border-border p-4 space-y-4">
             <Link to="/quran" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quran')}</Link>
+            <Link to="/mushaf" className="block py-2 text-muted-foreground hover:text-foreground">Moushaf</Link>
             <Link to="/prayer-times" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.prayers')}</Link>
             <Link to="/duas" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.duas')}</Link>
             <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quiz')}</Link>
@@ -345,6 +348,7 @@ const LandingPage = () => {
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
               <Link to="/quran" className="hover:text-foreground transition-colors">{t('nav.quran')}</Link>
+              <Link to="/mushaf" className="hover:text-foreground transition-colors">Moushaf</Link>
               <Link to="/prayer-times" className="hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
               <Link to="/duas" className="hover:text-foreground transition-colors">{t('nav.duas')}</Link>
               <Link to="/quiz" className="hover:text-foreground transition-colors">{t('nav.quiz')}</Link>

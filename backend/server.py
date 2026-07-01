@@ -18,6 +18,7 @@ import asyncio
 import resend
 import base64
 import httpx
+from urllib.parse import quote
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1703,6 +1704,255 @@ async def get_surah_audio(surah_number: int, reciter: str = "mishary_rashid_alaf
         "format": f"{base_url}/{surah_str}XXX.mp3",
         "note": "Replace XXX with ayah number (e.g., 001001.mp3 for Surah 1, Ayah 1)"
     }
+
+
+# ============== AUTHENTIC MUSHAF READER (text only, no AI) ==============
+
+MUSHAF_SOURCE = "AlQuran Cloud / Islamic Network"
+MUSHAF_ARABIC_EDITION = "quran-uthmani"
+MUSHAF_TRANSLATIONS = {
+    "fr": {
+        "edition": "fr.hamidullah",
+        "name": "Le Saint Coran",
+        "translator": "Muhammad Hamidullah",
+        "language": "Français",
+    }
+}
+
+
+async def _fetch_mushaf_source(http_client: httpx.AsyncClient, path: str) -> dict:
+    """Fetch immutable source text. Never repairs, rewrites or substitutes content."""
+    response = await http_client.get(f"https://api.alquran.cloud/v1/{path}")
+    if response.status_code != 200 or not response.content:
+        raise RuntimeError(f"Mushaf source unavailable ({response.status_code})")
+    try:
+        payload = json.loads(response.content.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Mushaf source returned invalid UTF-8 JSON") from exc
+    if payload.get("code") != 200 or not isinstance(payload.get("data"), dict):
+        raise RuntimeError("Mushaf source returned an invalid payload")
+    return payload["data"]
+
+
+@api_router.get("/mushaf/config")
+async def get_mushaf_config():
+    return {
+        "source": MUSHAF_SOURCE,
+        "arabicEdition": MUSHAF_ARABIC_EDITION,
+        "translations": MUSHAF_TRANSLATIONS,
+        "pages": 604,
+        "aiGenerated": False,
+        "audioModified": False,
+    }
+
+
+@api_router.get("/mushaf/page/{page_number}")
+async def get_mushaf_page(page_number: int, translation: str = "fr"):
+    if page_number < 1 or page_number > 604:
+        raise HTTPException(status_code=400, detail="La page doit être comprise entre 1 et 604")
+    translation_info = MUSHAF_TRANSLATIONS.get(translation)
+    if not translation_info:
+        raise HTTPException(status_code=400, detail="Traduction authentifiée non disponible")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            arabic_data, translated_data = await asyncio.gather(
+                _fetch_mushaf_source(
+                    http_client, f"page/{page_number}/{MUSHAF_ARABIC_EDITION}"
+                ),
+                _fetch_mushaf_source(
+                    http_client, f"page/{page_number}/{translation_info['edition']}"
+                ),
+            )
+
+        if arabic_data.get("edition", {}).get("identifier") != MUSHAF_ARABIC_EDITION:
+            raise RuntimeError("Unexpected Arabic edition")
+        if translated_data.get("edition", {}).get("identifier") != translation_info["edition"]:
+            raise RuntimeError("Unexpected translation edition")
+
+        arabic_ayahs = arabic_data.get("ayahs") or []
+        translated_ayahs = translated_data.get("ayahs") or []
+        arabic_numbers = [ayah.get("number") for ayah in arabic_ayahs]
+        translated_numbers = [ayah.get("number") for ayah in translated_ayahs]
+        if not arabic_ayahs or arabic_numbers != translated_numbers:
+            raise RuntimeError("Arabic and translation ayahs are not aligned")
+
+        ayahs = []
+        for arabic, translated in zip(arabic_ayahs, translated_ayahs):
+            arabic_text = arabic.get("text")
+            translated_text = translated.get("text")
+            if not isinstance(arabic_text, str) or not arabic_text:
+                raise RuntimeError("Missing Arabic source text")
+            if not isinstance(translated_text, str) or not translated_text:
+                raise RuntimeError("Missing authenticated translation text")
+            ayahs.append({
+                "number": arabic.get("number"),
+                "numberInSurah": arabic.get("numberInSurah"),
+                "surah": arabic.get("surah"),
+                "juz": arabic.get("juz"),
+                "manzil": arabic.get("manzil"),
+                "page": arabic.get("page"),
+                "ruku": arabic.get("ruku"),
+                "hizbQuarter": arabic.get("hizbQuarter"),
+                "sajda": arabic.get("sajda"),
+                "arabic": arabic_text,
+                "translation": translated_text,
+            })
+
+        return {
+            "page": page_number,
+            "totalPages": 604,
+            "source": MUSHAF_SOURCE,
+            "arabicEdition": MUSHAF_ARABIC_EDITION,
+            "translation": translation_info,
+            "ayahs": ayahs,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Mushaf page source error: %s", str(exc)[:200])
+        raise HTTPException(
+            status_code=503,
+            detail="Le contenu authentifié n'a pas pu être chargé. Aucun texte de remplacement n'est affiché.",
+        )
+
+
+@api_router.get("/mushaf/surahs")
+async def get_mushaf_surahs():
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            response = await http_client.get("https://api.alquran.cloud/v1/surah")
+        payload = json.loads(response.content.decode("utf-8-sig"))
+        surahs = payload.get("data") if response.status_code == 200 else None
+        if payload.get("code") != 200 or not isinstance(surahs, list) or len(surahs) != 114:
+            raise RuntimeError("Invalid surah index")
+        required = {"number", "name", "englishName", "englishNameTranslation", "numberOfAyahs", "revelationType"}
+        if any(not required.issubset(surah) for surah in surahs):
+            raise RuntimeError("Incomplete surah index")
+        return {"source": MUSHAF_SOURCE, "surahs": surahs}
+    except Exception as exc:
+        logger.error("Mushaf surah index error: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="L'index authentifié des sourates est indisponible.")
+
+
+@api_router.get("/mushaf/locate/{reference_type}/{reference}")
+async def locate_mushaf_reference(reference_type: str, reference: str):
+    try:
+        if reference_type == "page":
+            page = int(reference)
+            if page < 1 or page > 604:
+                raise ValueError("Invalid page")
+            return {"page": page}
+
+        if reference_type == "surah":
+            number = int(reference)
+            if number < 1 or number > 114:
+                raise ValueError("Invalid surah")
+            source_path = f"surah/{number}/{MUSHAF_ARABIC_EDITION}"
+        elif reference_type == "juz":
+            number = int(reference)
+            if number < 1 or number > 30:
+                raise ValueError("Invalid juz")
+            source_path = f"juz/{number}/{MUSHAF_ARABIC_EDITION}"
+        elif reference_type == "hizb":
+            number = int(reference)
+            if number < 1 or number > 60:
+                raise ValueError("Invalid hizb")
+            first_quarter = ((number - 1) * 4) + 1
+            source_path = f"hizbQuarter/{first_quarter}/{MUSHAF_ARABIC_EDITION}"
+        elif reference_type == "ayah":
+            parts = reference.split(":")
+            if len(parts) != 2:
+                raise ValueError("Invalid ayah reference")
+            surah_number, ayah_number = (int(part) for part in parts)
+            if surah_number < 1 or surah_number > 114 or ayah_number < 1:
+                raise ValueError("Invalid ayah reference")
+            source_path = f"ayah/{surah_number}:{ayah_number}/{MUSHAF_ARABIC_EDITION}"
+        else:
+            raise ValueError("Invalid reference type")
+
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            data = await _fetch_mushaf_source(http_client, source_path)
+        if data.get("edition", {}).get("identifier") != MUSHAF_ARABIC_EDITION:
+            raise RuntimeError("Unexpected Arabic edition")
+        ayahs = data.get("ayahs") if isinstance(data.get("ayahs"), list) else [data]
+        page = ayahs[0].get("page") if ayahs else None
+        if not isinstance(page, int) or page < 1 or page > 604:
+            raise RuntimeError("Missing page reference")
+        return {"page": page}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Référence coranique invalide")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Mushaf locate error: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="La référence authentifiée n'a pas pu être chargée.")
+
+
+@api_router.get("/mushaf/search")
+async def search_mushaf(q: str, edition: str = "fr"):
+    query = q.strip()
+    if len(query) < 2 or len(query) > 80:
+        raise HTTPException(status_code=400, detail="La recherche doit contenir entre 2 et 80 caractères")
+    edition_id = MUSHAF_ARABIC_EDITION if edition == "ar" else MUSHAF_TRANSLATIONS.get(edition, {}).get("edition")
+    if not edition_id:
+        raise HTTPException(status_code=400, detail="Édition authentifiée non disponible")
+
+    try:
+        encoded_query = quote(query, safe="")
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            search_response, meta_response = await asyncio.gather(
+                http_client.get(f"https://api.alquran.cloud/v1/search/{encoded_query}/all/{edition_id}"),
+                http_client.get("https://api.alquran.cloud/v1/meta"),
+            )
+        search_payload = json.loads(search_response.content.decode("utf-8-sig"))
+        meta_payload = json.loads(meta_response.content.decode("utf-8-sig"))
+        if search_response.status_code == 404 and search_payload.get("code") == 404:
+            matches = []
+        else:
+            matches = search_payload.get("data", {}).get("matches") if search_response.status_code == 200 else None
+        page_references = meta_payload.get("data", {}).get("pages", {}).get("references") if meta_response.status_code == 200 else None
+        if search_response.status_code not in (200, 404) or not isinstance(matches, list):
+            raise RuntimeError("Invalid search payload")
+        if meta_payload.get("code") != 200 or not isinstance(page_references, list) or len(page_references) != 604:
+            raise RuntimeError("Invalid page metadata")
+
+        results = []
+        for match in matches[:50]:
+            surah = match.get("surah") or {}
+            target = (surah.get("number"), match.get("numberInSurah"))
+            if not all(isinstance(value, int) for value in target):
+                raise RuntimeError("Invalid search match reference")
+            page = 1
+            for index, page_reference in enumerate(page_references):
+                start = (page_reference.get("surah"), page_reference.get("ayah"))
+                if not all(isinstance(value, int) for value in start):
+                    raise RuntimeError("Invalid page reference")
+                if start > target:
+                    break
+                page = index + 1
+            text = match.get("text")
+            if not isinstance(text, str) or not text:
+                raise RuntimeError("Missing source search text")
+            results.append({
+                "number": match.get("number"),
+                "numberInSurah": match.get("numberInSurah"),
+                "surah": surah,
+                "page": page,
+                "text": text,
+            })
+        return {
+            "source": MUSHAF_SOURCE,
+            "edition": edition_id,
+            "query": query,
+            "total": search_payload.get("data", {}).get("count", len(matches)) if isinstance(search_payload.get("data"), dict) else 0,
+            "results": results,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Mushaf search error: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="La recherche authentifiée est temporairement indisponible.")
 
 # ============== DUAS ==============
 

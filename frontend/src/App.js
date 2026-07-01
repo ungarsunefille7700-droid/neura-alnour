@@ -27,6 +27,7 @@ import SupportPage from "@/pages/SupportPage";
 import DeveloperPage from "@/pages/DeveloperPage";
 import LanguageTutorPage from "@/pages/LanguageTutorPage";
 import IslamLearningPage from "@/pages/IslamLearningPage";
+import MushafPage from "@/pages/MushafPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -72,6 +73,7 @@ function AppRouter() {
       <Route path="/chat/:conversationId" element={<ProtectedRoute><ChatPage /></ProtectedRoute>} />
       <Route path="/quran" element={<QuranPage />} />
       <Route path="/quran/:surahNumber" element={<QuranPage />} />
+      <Route path="/mushaf" element={<MushafPage />} />
       <Route path="/prayer-times" element={<PrayerTimesPage />} />
       <Route path="/duas" element={<DuasPage />} />
       <Route path="/quiz" element={<QuizPage />} />
