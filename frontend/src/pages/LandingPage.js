@@ -80,8 +80,8 @@ const LandingPage = () => {
     <div className="min-h-screen bg-background overflow-hidden">
       {/* Navigation */}
       <nav className="fixed top-0 w-full z-50 glass">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <Link to="/" className="flex items-center gap-3">
+        <div className="max-w-[1800px] mx-auto px-4 lg:px-6 py-4 flex items-center justify-between">
+          <Link to="/" className="flex items-center gap-3 shrink-0 whitespace-nowrap">
             <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-primary-foreground" />
             </div>
@@ -90,7 +90,7 @@ const LandingPage = () => {
           </Link>
           
           {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center gap-6">
+          <div className="hidden min-[1700px]:flex items-center gap-4">
             <Link to="/quran" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quran')}</Link>
             <Link to="/mushaf" className="text-muted-foreground hover:text-foreground transition-colors">Moushaf</Link>
             <Link to="/prayer-times" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
@@ -128,7 +128,7 @@ const LandingPage = () => {
 
           {/* Mobile Menu Button */}
           <button 
-            className="md:hidden p-2"
+            className="min-[1700px]:hidden p-2"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             data-testid="mobile-menu-btn"
           >
@@ -138,7 +138,7 @@ const LandingPage = () => {
 
         {/* Mobile Menu */}
         {mobileMenuOpen && (
-          <div className="md:hidden absolute top-full left-0 right-0 glass border-t border-border p-4 space-y-4">
+          <div className="min-[1700px]:hidden absolute top-full left-0 right-0 max-h-[calc(100vh-5rem)] overflow-y-auto glass border-t border-border p-4 space-y-4">
             <Link to="/quran" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quran')}</Link>
             <Link to="/mushaf" className="block py-2 text-muted-foreground hover:text-foreground">Moushaf</Link>
             <Link to="/prayer-times" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.prayers')}</Link>
@@ -168,7 +168,7 @@ const LandingPage = () => {
       </nav>
 
       {/* Hero Section */}
-      <section className="pt-32 pb-20 px-6 relative">
+      <section className="pt-28 pb-14 md:pt-32 md:pb-20 px-4 sm:px-6 relative">
         {/* Background decoration */}
         <div className="absolute inset-0 islamic-pattern pointer-events-none" />
         <div className="absolute top-20 right-10 w-72 h-72 bg-primary/10 rounded-full blur-3xl" />
@@ -180,9 +180,9 @@ const LandingPage = () => {
             <span className="text-sm font-medium">{t('landing.poweredBy')}</span>
           </div>
           
-          <h1 className="text-5xl md:text-7xl font-bold tracking-tight mb-6">
+          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
             <span className="text-primary">NEURA</span> AL-NOUR
-            <span className="font-arabic text-4xl md:text-6xl ml-4 text-secondary">نور</span>
+            <span className="font-arabic text-3xl sm:text-4xl lg:text-5xl ml-3 sm:ml-4 text-secondary">نور</span>
           </h1>
           
           <p className="text-xl md:text-2xl text-muted-foreground max-w-3xl mx-auto mb-4">
@@ -225,7 +225,7 @@ const LandingPage = () => {
       <section className="py-24 px-6 relative">
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-16">
-            <h2 className="text-4xl md:text-5xl font-semibold mb-4">
+            <h2 className="text-3xl md:text-4xl font-semibold mb-4">
               Tout ce dont vous avez besoin
             </h2>
             <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
@@ -256,7 +256,7 @@ const LandingPage = () => {
       <section className="py-24 px-6 bg-muted/30">
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-16">
-            <h2 className="text-4xl md:text-5xl font-semibold mb-4">
+            <h2 className="text-3xl md:text-4xl font-semibold mb-4">
               Choisissez votre plan
             </h2>
             <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
@@ -311,7 +311,7 @@ const LandingPage = () => {
       {/* CTA Section */}
       <section className="py-24 px-6">
         <div className="max-w-4xl mx-auto text-center">
-          <div className="glass rounded-3xl p-12 relative overflow-hidden">
+          <div className="glass rounded-3xl p-6 sm:p-8 md:p-12 relative overflow-hidden">
             <div className="absolute inset-0 islamic-pattern opacity-30" />
             <div className="relative z-10">
               <Zap className="w-16 h-16 text-secondary mx-auto mb-6" />
@@ -338,7 +338,7 @@ const LandingPage = () => {
       {/* Footer */}
       <footer className="py-12 px-6 border-t border-border">
         <div className="max-w-7xl mx-auto">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex flex-col xl:flex-row items-center justify-between gap-6">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
                 <Sparkles className="w-4 h-4 text-primary-foreground" />
@@ -346,7 +346,7 @@ const LandingPage = () => {
               <span className="font-semibold">NEURA AL-NOUR</span>
               <span className="font-arabic text-muted-foreground">نور</span>
             </div>
-            <div className="flex items-center gap-6 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-3 text-sm text-muted-foreground">
               <Link to="/quran" className="hover:text-foreground transition-colors">{t('nav.quran')}</Link>
               <Link to="/mushaf" className="hover:text-foreground transition-colors">Moushaf</Link>
               <Link to="/prayer-times" className="hover:text-foreground transition-colors">{t('nav.prayers')}</Link>
