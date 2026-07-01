@@ -22,7 +22,8 @@ import {
   X,
   Compass,
   Building,
-  GraduationCap
+  GraduationCap,
+  Video
 } from 'lucide-react';
 
 const LandingPage = () => {
@@ -42,7 +43,8 @@ const LandingPage = () => {
     { icon: Moon, title: t('feat.ramadan.title'), description: t('feat.ramadan.desc'), color: "text-secondary", path: "/ramadan" },
     { icon: Compass, title: t('feat.qiblah.title'), description: t('feat.qiblah.desc'), color: "text-primary", path: "/qiblah" },
     { icon: Building, title: t('feat.mosques.title'), description: t('feat.mosques.desc'), color: "text-secondary", path: "/mosques" },
-    { icon: GraduationCap, title: t('feat.islam.title'), description: t('feat.islam.desc'), color: "text-primary", path: "/islam-learning" }
+    { icon: GraduationCap, title: t('feat.islam.title'), description: t('feat.islam.desc'), color: "text-primary", path: "/islam-learning" },
+    { icon: Video, title: "Rappels", description: "Regarder des rappels et enseignements directement dans l’application.", color: "text-secondary", path: "/reminders" }
   ];
 
   const plans = [
@@ -100,6 +102,7 @@ const LandingPage = () => {
             <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">{t('nav.developer')}</Link>
             <Link to="/language-tutor" className="text-primary font-medium hover:opacity-80 transition-opacity">Langues</Link>
             <Link to="/islam-learning" className="text-primary font-medium hover:opacity-80 transition-opacity">Islam</Link>
+            <Link to="/reminders" className="text-muted-foreground hover:text-foreground transition-colors">Rappels</Link>
             <Link to="/support" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.support')}</Link>
             <select
               value={language}
@@ -148,6 +151,7 @@ const LandingPage = () => {
             <Link to="/developer" className="block py-2 text-primary font-medium">{t('nav.developer')}</Link>
             <Link to="/language-tutor" className="block py-2 text-primary font-medium">Langues</Link>
             <Link to="/islam-learning" className="block py-2 text-primary font-medium">Islam</Link>
+            <Link to="/reminders" className="block py-2 text-muted-foreground hover:text-foreground">Rappels</Link>
             <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.support')}</Link>
             <div className="flex items-center gap-4 pt-2">
               <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted">

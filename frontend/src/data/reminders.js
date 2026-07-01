@@ -1,0 +1,38 @@
+export const REMINDERS = [
+  {
+    id: 'rappel-1',
+    title: 'Le rappel bénéfique',
+    description: 'Un rappel à écouter calmement pour nourrir la foi et la réflexion.',
+    videoUrl: '/videos/rappels/rappel-1.mp4',
+    poster: '/images/rappels/rappel-1.png',
+    duration: '22:43',
+    category: 'Rappel',
+  },
+  {
+    id: 'rappel-2',
+    title: 'Rappel à la mosquée',
+    description: 'Une exhortation enregistrée à la mosquée, accessible directement dans l’application.',
+    videoUrl: '/videos/rappels/rappel-2.mp4',
+    poster: '/images/rappels/rappel-2.png',
+    duration: '32:11',
+    category: 'Khutba',
+  },
+  {
+    id: 'rappel-3',
+    title: 'Conseils et foi',
+    description: 'Un enseignement pour prendre du recul et renforcer sa pratique au quotidien.',
+    videoUrl: '/videos/rappels/rappel-3.mp4',
+    poster: '/images/rappels/rappel-3.png',
+    duration: '54:48',
+    category: 'Enseignement',
+  },
+  {
+    id: 'rappel-4',
+    title: 'Le rappel du vendredi',
+    description: 'Un rappel prononcé à la mosquée, à regarder dans un moment de calme.',
+    videoUrl: '/videos/rappels/rappel-4.mp4',
+    poster: '/images/rappels/rappel-4.png',
+    duration: '16:39',
+    category: 'Khutba',
+  },
+];
