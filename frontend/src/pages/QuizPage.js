@@ -21,7 +21,8 @@ import {
   Target,
   ArrowRight,
   Award,
-  RotateCcw
+  RotateCcw,
+  Users
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -172,6 +173,19 @@ const QuizPage = () => {
                 Commencer le Quiz
               </Button>
             </Card>
+
+            <Link to="/quiz/multiplayer" className="block mb-6">
+              <div className="border border-primary/40 bg-primary/5 rounded-lg p-5 flex items-center gap-4 hover:bg-primary/10 transition-colors">
+                <div className="w-11 h-11 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="font-semibold">Quiz multijoueur</h2>
+                  <p className="text-sm text-muted-foreground">Créer ou rejoindre une salle en temps réel.</p>
+                </div>
+                <ArrowRight className="w-5 h-5 ml-auto text-primary" />
+              </div>
+            </Link>
 
             <div className="mb-6">
               <p className="text-sm text-muted-foreground text-center mb-3">Ou choisir une catégorie :</p>

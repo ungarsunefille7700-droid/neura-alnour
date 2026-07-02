@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 import json
@@ -21,6 +21,8 @@ import base64
 import httpx
 from urllib.parse import quote
 import time
+import secrets
+import hashlib
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -2461,6 +2463,471 @@ async def get_quiz_stats(user: dict = Depends(get_current_user)):
         "correct_answers": correct,
         "accuracy": round((correct / total * 100) if total > 0 else 0, 1)
     }
+
+
+# ============== MULTIPLAYER QUIZ: LOBBIES + REAL-TIME READY STATE ==============
+
+MULTIPLAYER_CAPACITIES = {2, 4, 6, 8, 10}
+MULTIPLAYER_REACTIONS = {
+    "well_played": "Bien joué !",
+    "bravo": "Bravo !",
+    "congrats": "Félicitations !",
+    "good_luck": "Bonne chance !",
+    "nice_answer": "Belle réponse !",
+}
+multiplayer_countdown_tasks: Dict[str, asyncio.Task] = {}
+
+
+class MultiplayerRoomCreate(BaseModel):
+    max_players: int = 2
+    visibility: str = "public"
+
+
+class MultiplayerJoin(BaseModel):
+    code: str
+
+
+class MultiplayerReady(BaseModel):
+    ready: bool
+
+
+class MultiplayerReaction(BaseModel):
+    reaction: str
+
+
+class MultiplayerConnectionManager:
+    def __init__(self):
+        self.connections: Dict[str, Dict[str, set]] = {}
+        self.lock = asyncio.Lock()
+
+    async def connect(self, room_code: str, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        async with self.lock:
+            room_connections = self.connections.setdefault(room_code, {})
+            room_connections.setdefault(user_id, set()).add(websocket)
+
+    async def disconnect(self, room_code: str, user_id: str, websocket: WebSocket) -> bool:
+        """Return True only when this was the user's last socket in the room."""
+        async with self.lock:
+            room_connections = self.connections.get(room_code, {})
+            user_connections = room_connections.get(user_id, set())
+            user_connections.discard(websocket)
+            if user_connections:
+                return False
+            room_connections.pop(user_id, None)
+            if not room_connections:
+                self.connections.pop(room_code, None)
+            return True
+
+    async def broadcast(self, room_code: str, payload: dict):
+        async with self.lock:
+            sockets = [
+                socket
+                for user_sockets in self.connections.get(room_code, {}).values()
+                for socket in user_sockets
+            ]
+        stale = []
+        for socket in sockets:
+            try:
+                await socket.send_json(payload)
+            except Exception:
+                stale.append(socket)
+        if stale:
+            async with self.lock:
+                for user_id, user_sockets in list(self.connections.get(room_code, {}).items()):
+                    user_sockets.difference_update(stale)
+                    if not user_sockets:
+                        self.connections.get(room_code, {}).pop(user_id, None)
+
+
+multiplayer_connections = MultiplayerConnectionManager()
+
+
+def _public_room(room: dict) -> dict:
+    if not room:
+        return {}
+    players = sorted(room.get("players", []), key=lambda player: player.get("joined_at", ""))
+    return {
+        "room_id": room["room_id"],
+        "code": room["code"],
+        "visibility": room["visibility"],
+        "max_players": room["max_players"],
+        "status": room.get("status", "waiting"),
+        "creator_id": room.get("creator_id"),
+        "player_count": len(players),
+        "players": [
+            {
+                "user_id": player["user_id"],
+                "name": player.get("name", "Joueur"),
+                "level": int(player.get("level", 1)),
+                "xp": int(player.get("xp", 0)),
+                "ready": bool(player.get("ready", False)),
+                "connected": bool(player.get("connected", False)),
+                "joined_at": player.get("joined_at"),
+            }
+            for player in players
+        ],
+        "created_at": room.get("created_at"),
+        "updated_at": room.get("updated_at"),
+    }
+
+
+async def _room_by_code(code: str) -> dict:
+    return await db.multiplayer_rooms.find_one({"code": code.strip().upper()}, {"_id": 0})
+
+
+def _new_multiplayer_player(user: dict) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "user_id": user["id"],
+        "name": user.get("name") or "Joueur",
+        "level": int(user.get("quiz_level", 1)),
+        "xp": int(user.get("quiz_xp", 0)),
+        "ready": False,
+        "connected": False,
+        "joined_at": now,
+        "last_seen": now,
+    }
+
+
+async def _unique_room_code() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    for _ in range(20):
+        code = "".join(secrets.choice(alphabet) for _ in range(6))
+        if not await db.multiplayer_rooms.find_one({"code": code}, {"_id": 1}):
+            return code
+    raise HTTPException(status_code=503, detail="Impossible de créer un code de salle. Réessayez.")
+
+
+async def _broadcast_room(code: str, event: str = "room_state", **extra):
+    room = await _room_by_code(code)
+    if room:
+        await multiplayer_connections.broadcast(
+            code,
+            {"type": event, "room": _public_room(room), **extra},
+        )
+
+
+def _room_can_countdown(room: dict) -> bool:
+    players = room.get("players", [])
+    return (
+        room.get("status") in ("waiting", "countdown")
+        and len(players) >= 2
+        and len(players) <= int(room.get("max_players", 0))
+        and all(player.get("connected") and player.get("ready") for player in players)
+    )
+
+
+async def _cancel_multiplayer_countdown(code: str):
+    task = multiplayer_countdown_tasks.pop(code, None)
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+    await db.multiplayer_rooms.update_one(
+        {"code": code, "status": "countdown"},
+        {"$set": {"status": "waiting", "updated_at": datetime.now(timezone.utc).isoformat()},
+         "$unset": {"countdown_id": ""}},
+    )
+
+
+async def _multiplayer_countdown(code: str, countdown_id: str):
+    try:
+        for value in (3, 2, 1):
+            room = await _room_by_code(code)
+            if not room or room.get("countdown_id") != countdown_id or not _room_can_countdown(room):
+                await _cancel_multiplayer_countdown(code)
+                await _broadcast_room(code, "countdown_cancelled")
+                return
+            await multiplayer_connections.broadcast(
+                code,
+                {"type": "countdown", "value": value, "room": _public_room(room)},
+            )
+            await asyncio.sleep(1)
+
+        room = await _room_by_code(code)
+        if not room or room.get("countdown_id") != countdown_id or not _room_can_countdown(room):
+            await _cancel_multiplayer_countdown(code)
+            await _broadcast_room(code, "countdown_cancelled")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        await db.multiplayer_rooms.update_one(
+            {"code": code, "countdown_id": countdown_id, "status": "countdown"},
+            {"$set": {"status": "ready", "ready_at": now, "updated_at": now},
+             "$unset": {"countdown_id": ""}},
+        )
+        await _broadcast_room(code, "game_start")
+    except asyncio.CancelledError:
+        return
+    finally:
+        if multiplayer_countdown_tasks.get(code) is asyncio.current_task():
+            multiplayer_countdown_tasks.pop(code, None)
+
+
+async def _evaluate_multiplayer_countdown(code: str):
+    room = await _room_by_code(code)
+    if not room:
+        return
+    if _room_can_countdown(room):
+        existing = multiplayer_countdown_tasks.get(code)
+        if existing and not existing.done():
+            return
+        countdown_id = str(uuid.uuid4())
+        updated = await db.multiplayer_rooms.update_one(
+            {"code": code, "status": "waiting"},
+            {"$set": {
+                "status": "countdown",
+                "countdown_id": countdown_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        if updated.modified_count:
+            task = asyncio.create_task(_multiplayer_countdown(code, countdown_id))
+            multiplayer_countdown_tasks[code] = task
+    elif room.get("status") == "countdown":
+        await _cancel_multiplayer_countdown(code)
+        await _broadcast_room(code, "countdown_cancelled")
+
+
+async def _join_multiplayer_room(room: dict, user: dict) -> dict:
+    if any(player.get("user_id") == user["id"] for player in room.get("players", [])):
+        return room
+    now = datetime.now(timezone.utc).isoformat()
+    result = await db.multiplayer_rooms.update_one(
+        {
+            "code": room["code"],
+            "status": "waiting",
+            "players.user_id": {"$ne": user["id"]},
+            "$expr": {"$lt": [{"$size": "$players"}, "$max_players"]},
+        },
+        {"$push": {"players": _new_multiplayer_player(user)}, "$set": {"updated_at": now}},
+    )
+    if not result.modified_count:
+        current = await _room_by_code(room["code"])
+        if current and any(player.get("user_id") == user["id"] for player in current.get("players", [])):
+            return current
+        raise HTTPException(status_code=409, detail="Cette salle est pleine ou a déjà démarré.")
+    joined = await _room_by_code(room["code"])
+    await _broadcast_room(room["code"], "player_joined", user_id=user["id"])
+    return joined
+
+
+@api_router.post("/multiplayer/rooms")
+async def create_multiplayer_room(data: MultiplayerRoomCreate, user: dict = Depends(get_current_user)):
+    if data.max_players not in MULTIPLAYER_CAPACITIES:
+        raise HTTPException(status_code=400, detail="Capacité autorisée : 2, 4, 6, 8 ou 10 joueurs.")
+    visibility = data.visibility.strip().lower()
+    if visibility not in ("public", "private"):
+        raise HTTPException(status_code=400, detail="La salle doit être publique ou privée.")
+    code = await _unique_room_code()
+    now = datetime.now(timezone.utc).isoformat()
+    room = {
+        "room_id": str(uuid.uuid4()),
+        "code": code,
+        "visibility": visibility,
+        "max_players": data.max_players,
+        "status": "waiting",
+        "creator_id": user["id"],
+        "players": [_new_multiplayer_player(user)],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.multiplayer_rooms.insert_one(room)
+    room.pop("_id", None)
+    return _public_room(room)
+
+
+@api_router.get("/multiplayer/rooms/public")
+async def list_public_multiplayer_rooms(user: dict = Depends(get_current_user)):
+    rooms = await db.multiplayer_rooms.find(
+        {"visibility": "public", "status": "waiting"}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(50)
+    return [
+        _public_room(room)
+        for room in rooms
+        if len(room.get("players", [])) < int(room.get("max_players", 0))
+    ]
+
+
+@api_router.post("/multiplayer/quick-match")
+async def quick_multiplayer_match(user: dict = Depends(get_current_user)):
+    existing = await db.multiplayer_rooms.find_one(
+        {"status": "waiting", "players.user_id": user["id"]}, {"_id": 0}
+    )
+    if existing:
+        return _public_room(existing)
+    rooms = await db.multiplayer_rooms.find(
+        {"visibility": "public", "status": "waiting"}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    for room in rooms:
+        if len(room.get("players", [])) < int(room.get("max_players", 0)):
+            return _public_room(await _join_multiplayer_room(room, user))
+    return await create_multiplayer_room(
+        MultiplayerRoomCreate(max_players=10, visibility="public"), user
+    )
+
+
+@api_router.post("/multiplayer/rooms/join")
+async def join_multiplayer_room(data: MultiplayerJoin, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(data.code)
+    if not room:
+        raise HTTPException(status_code=404, detail="Salle introuvable. Vérifiez le code.")
+    return _public_room(await _join_multiplayer_room(room, user))
+
+
+@api_router.get("/multiplayer/rooms/{code}")
+async def get_multiplayer_room(code: str, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room:
+        raise HTTPException(status_code=404, detail="Salle introuvable.")
+    if not any(player.get("user_id") == user["id"] for player in room.get("players", [])):
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    return _public_room(room)
+
+
+@api_router.post("/multiplayer/rooms/{code}/ready")
+async def set_multiplayer_ready(code: str, data: MultiplayerReady, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room:
+        raise HTTPException(status_code=404, detail="Salle introuvable.")
+    if room.get("status") not in ("waiting", "countdown"):
+        raise HTTPException(status_code=409, detail="Le statut Prêt ne peut plus être modifié.")
+    result = await db.multiplayer_rooms.update_one(
+        {"code": room["code"], "players.user_id": user["id"]},
+        {"$set": {
+            "players.$.ready": data.ready,
+            "players.$.last_seen": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if not result.matched_count:
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    await _broadcast_room(room["code"], "ready_changed", user_id=user["id"])
+    await _evaluate_multiplayer_countdown(room["code"])
+    updated = await _room_by_code(room["code"])
+    return _public_room(updated)
+
+
+@api_router.post("/multiplayer/rooms/{code}/reaction")
+async def send_multiplayer_reaction(code: str, data: MultiplayerReaction, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room or not any(player.get("user_id") == user["id"] for player in room.get("players", [])):
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    if data.reaction not in MULTIPLAYER_REACTIONS:
+        raise HTTPException(status_code=400, detail="Réaction non autorisée.")
+    await multiplayer_connections.broadcast(code.strip().upper(), {
+        "type": "reaction",
+        "user_id": user["id"],
+        "name": user.get("name") or "Joueur",
+        "reaction": data.reaction,
+        "label": MULTIPLAYER_REACTIONS[data.reaction],
+    })
+    return {"status": "sent"}
+
+
+@api_router.post("/multiplayer/rooms/{code}/leave")
+async def leave_multiplayer_room(code: str, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room:
+        return {"status": "left"}
+    if not any(player.get("user_id") == user["id"] for player in room.get("players", [])):
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    await db.multiplayer_rooms.update_one(
+        {"code": room["code"]},
+        {"$pull": {"players": {"user_id": user["id"]}},
+         "$set": {"status": "waiting", "updated_at": datetime.now(timezone.utc).isoformat()},
+         "$unset": {"countdown_id": ""}},
+    )
+    updated = await _room_by_code(room["code"])
+    if not updated or not updated.get("players"):
+        await db.multiplayer_rooms.delete_one({"code": room["code"]})
+        await _cancel_multiplayer_countdown(room["code"])
+        return {"status": "deleted"}
+    if updated.get("creator_id") == user["id"]:
+        await db.multiplayer_rooms.update_one(
+            {"code": room["code"]},
+            {"$set": {"creator_id": updated["players"][0]["user_id"]}},
+        )
+    await _cancel_multiplayer_countdown(room["code"])
+    await _broadcast_room(room["code"], "player_left", user_id=user["id"])
+    return {"status": "left"}
+
+
+@api_router.post("/multiplayer/socket-ticket")
+async def create_multiplayer_socket_ticket(user: dict = Depends(get_current_user)):
+    ticket = secrets.token_urlsafe(32)
+    ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    await db.multiplayer_ws_tickets.insert_one({
+        "ticket_hash": ticket_hash,
+        "user_id": user["id"],
+        "expires_at": (now + timedelta(seconds=60)).isoformat(),
+        "created_at": now.isoformat(),
+    })
+    return {"ticket": ticket, "expires_in": 60}
+
+
+@api_router.websocket("/multiplayer/ws/{code}")
+async def multiplayer_websocket(websocket: WebSocket, code: str, ticket: str):
+    normalized_code = code.strip().upper()
+    ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+    ticket_doc = await db.multiplayer_ws_tickets.find_one_and_delete(
+        {"ticket_hash": ticket_hash}
+    )
+    if not ticket_doc:
+        await websocket.close(code=4401, reason="Ticket invalide")
+        return
+    try:
+        expires_at = datetime.fromisoformat(ticket_doc["expires_at"])
+    except (KeyError, ValueError):
+        await websocket.close(code=4401, reason="Ticket invalide")
+        return
+    if expires_at <= datetime.now(timezone.utc):
+        await websocket.close(code=4401, reason="Ticket expiré")
+        return
+    user = await db.users.find_one({"id": ticket_doc["user_id"]}, {"_id": 0})
+    room = await _room_by_code(normalized_code)
+    if not user or not room or not any(
+        player.get("user_id") == user["id"] for player in room.get("players", [])
+    ):
+        await websocket.close(code=4403, reason="Accès refusé")
+        return
+
+    await multiplayer_connections.connect(normalized_code, user["id"], websocket)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.multiplayer_rooms.update_one(
+        {"code": normalized_code, "players.user_id": user["id"]},
+        {"$set": {
+            "players.$.connected": True,
+            "players.$.last_seen": now,
+            "updated_at": now,
+        }},
+    )
+    await _broadcast_room(normalized_code, "presence_changed", user_id=user["id"])
+
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            if payload.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "sent_at": payload.get("sent_at")})
+    except (WebSocketDisconnect, RuntimeError, ValueError):
+        pass
+    finally:
+        last_connection = await multiplayer_connections.disconnect(
+            normalized_code, user["id"], websocket
+        )
+        if last_connection:
+            now = datetime.now(timezone.utc).isoformat()
+            await db.multiplayer_rooms.update_one(
+                {"code": normalized_code, "players.user_id": user["id"]},
+                {"$set": {
+                    "players.$.connected": False,
+                    "players.$.ready": False,
+                    "players.$.last_seen": now,
+                    "status": "waiting",
+                    "updated_at": now,
+                }, "$unset": {"countdown_id": ""}},
+            )
+            await _cancel_multiplayer_countdown(normalized_code)
+            await _broadcast_room(normalized_code, "presence_changed", user_id=user["id"])
 
 # ============== RAMADAN ==============
 
