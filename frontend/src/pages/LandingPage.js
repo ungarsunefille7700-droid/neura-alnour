@@ -361,7 +361,7 @@ const LandingPage = () => {
               <Link to="/subscription" className="hover:text-foreground transition-colors">Abonnements</Link>
             </div>
             <p className="text-sm text-muted-foreground">
-              © 2024 NEURA AL-NOUR. Tous droits réservés.
+              © {new Date().getFullYear()} NEURA AL-NOUR. Tous droits réservés.
             </p>
           </div>
         </div>

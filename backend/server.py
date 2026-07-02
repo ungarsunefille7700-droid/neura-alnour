@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 import bcrypt
 import asyncio
@@ -140,6 +141,54 @@ Règles importantes:
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 
 بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"""
+
+
+def current_ai_context() -> str:
+    """Build request-time context so long-running workers never keep a stale date."""
+    now, timezone_label = current_server_time()
+    return (
+        "\n\n=== CONTEXTE TEMPOREL FIABLE ===\n"
+        f"Date et heure actuelles du serveur : {now.strftime('%Y-%m-%d %H:%M:%S')} "
+        f"(fuseau {timezone_label}).\n"
+        f"Nous sommes en {now.year}. Cette date dynamique prévaut sur toute date de connaissance "
+        "interne du modèle. Ne prétends jamais être dans une autre année si cela la "
+        "contredit. Pour une actualité, une météo, un score ou tout fait récent, ne donne une "
+        "réponse précise que si des résultats Web fournis dans cette requête la confirment. "
+        "Sinon, indique clairement que l'information actuelle n'a pas pu être vérifiée.\n"
+        "=================================\n"
+    )
+
+
+def current_server_time():
+    try:
+        now = datetime.now(ZoneInfo("Europe/Paris"))
+        timezone_label = "Europe/Paris"
+    except ZoneInfoNotFoundError:
+        now = datetime.now().astimezone()
+        timezone_label = str(now.tzinfo or "heure locale du serveur")
+    return now, timezone_label
+
+
+def web_results_context(sources: list) -> str:
+    if not sources:
+        return (
+            "\n\nRECHERCHE WEB : aucun résultat exploitable n'a été récupéré. "
+            "N'invente aucune information actuelle et réponds clairement que la vérification "
+            "Web a échoué ou que tu ne peux pas confirmer le fait demandé."
+        )
+    answer = next((source.get("search_answer", "") for source in sources if source.get("search_answer")), "")
+    answer_context = f"\nSynthèse de recherche sourcée : {answer}\n" if answer else ""
+    block = "\n\n".join(
+        f"[{i}] {source['title']}\n{source['url']}\n"
+        f"{source.get('published_date', '')}\n{source['snippet']}"
+        for i, source in enumerate(sources, 1)
+    )
+    return (
+        "\n\nRÉSULTATS WEB RÉCUPÉRÉS POUR CETTE REQUÊTE :\n"
+        f"{answer_context}{block}\n\nUtilise ces résultats comme base pour les faits récents et cite [1], [2], etc. "
+        "Ne complète pas un score, une date ou une actualité avec ta mémoire si les sources ne "
+        "les confirment pas. Si elles sont insuffisantes ou contradictoires, dis-le explicitement."
+    )
 MODEL_PROFILES = {
     "chatgpt": {
         "label": "ChatGPT",
@@ -678,7 +727,16 @@ Règles importantes:
 5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 
-بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"""
+بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ""" + current_ai_context()
+
+    sources = []
+    if message.web_search:
+        try:
+            sources = await tavily_search(message.content, max_results=5)
+        except Exception as exc:
+            logger.error(f"Tavily (message/vision) error: {exc}")
+            sources = []
+        system_message += web_results_context(sources)
     
     # Send current message with or without image. Retry transient Gemini blips
     # (429 rate spike / 503 high-demand) with backoff; the chat is rebuilt each
@@ -791,7 +849,8 @@ Règles importantes:
     
     return {
         "message": response,
-        "conversation_id": conversation_id
+        "conversation_id": conversation_id,
+        "sources": sources,
     }
 
 
@@ -800,18 +859,40 @@ async def tavily_search(query: str, max_results: int = 5):
     api_key = os.environ.get('TAVILY_API_KEY')
     if not api_key:
         return []
+    now, _ = current_server_time()
+    dated_query = (
+        f"{query}\nDate actuelle : {now.strftime('%Y-%m-%d')}. "
+        "Privilégier les informations les plus récentes et les résultats finaux confirmés."
+    )
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={"query": query, "max_results": max_results, "search_depth": "basic"},
+            json={
+                "query": dated_query,
+                "max_results": max_results,
+                "auto_parameters": True,
+                "include_answer": "advanced",
+                "include_raw_content": False,
+            },
         )
         resp.raise_for_status()
         data = resp.json()
-    return [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+    search_answer = data.get("answer", "")
+    results = [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "snippet": str(r.get("content", ""))[:1500],
+            "published_date": r.get("published_date", ""),
+            "search_answer": "",
+        }
         for r in data.get("results", [])
+        if str(r.get("url", "")).startswith(("http://", "https://"))
     ]
+    if results and search_answer:
+        results[0]["search_answer"] = search_answer
+    return results
 
 
 @api_router.post("/chat/stream")
@@ -858,7 +939,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             # Cost control: real paid models (GPT-4o / Claude) only for Neura+/Ultra/founders.
             if not _is_premium_ai(user):
                 profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
-            system_prompt = BASE_CHAT_SYSTEM + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+            system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             if message.lang:
                 system_prompt += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
@@ -876,16 +957,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     logger.error(f"Tavily error: {e}")
                     sources = []
                 yield sse({"type": "phase", "phase": "reading_sources", "sources": sources})
-                if sources:
-                    system_prompt += (
-                        "\n\nTu disposes de résultats de recherche web ci-dessous. "
-                        "Utilise-les et cite les sources pertinentes avec [1], [2], etc."
-                    )
-                    block = "\n\n".join(
-                        f"[{i}] {s['title']}\n{s['url']}\n{s['snippet']}"
-                        for i, s in enumerate(sources, 1)
-                    )
-                    user_text = f"Résultats de recherche web :\n{block}\n\nQuestion : {message.content}"
+                system_prompt += web_results_context(sources)
 
             # initial_messages must include the system prompt first (the library does NOT
             # auto-add it when initial_messages is provided).
@@ -2591,7 +2663,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
     ).sort("created_at", 1).to_list(tier["memory_turns"])
 
-    system_prompt = _build_dev_system_prompt(tier_name)
+    system_prompt = _build_dev_system_prompt(tier_name) + current_ai_context()
     # Expert role (Neura+/Ultra only) — adopt a senior specialist persona.
     if message.role in DEV_ROLES and tier_name in ("plus", "ultra"):
         system_prompt += (
@@ -2630,15 +2702,8 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         except Exception as e:
             logger.error(f"Tavily (dev) error: {e}")
             sources = []
-        if sources:
-            block = "\n\n".join(
-                f"[{i}] {s['title']}\n{s['url']}\n{s['snippet']}"
-                for i, s in enumerate(sources, 1)
-            )
-            user_text = (
-                "Résultats de recherche web (utilise-les et cite les sources pertinentes "
-                f"avec [1], [2]...) :\n{block}\n\nDemande : {message.content}"
-            )
+        system_prompt += web_results_context(sources)
+        initial_messages[0]["content"] = system_prompt
 
     # Build the user message (with optional image for screenshot / code analysis).
     if message.image_base64:

@@ -408,7 +408,8 @@ const ChatPage = () => {
         conversation_id: currentConversation,
         image_base64: imageToSend,
         model: selectedModel,
-        lang: languageName
+        lang: languageName,
+        web_search: webSearch
       }, {
         headers: getAuthHeader(),
         timeout: 120000 // 2 minute timeout for image analysis
@@ -419,6 +420,7 @@ const ChatPage = () => {
         id: `ai-${Date.now()}`,
         role: 'assistant',
         content: response.data.message,
+        sources: response.data.sources || [],
         created_at: new Date().toISOString()
       };
       setMessages(prev => [...prev, aiMessage]);

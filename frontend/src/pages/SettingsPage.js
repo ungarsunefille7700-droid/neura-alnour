@@ -221,7 +221,7 @@ const SettingsPage = () => {
           {/* Footer Info */}
           <div className="text-center mt-8 text-sm text-muted-foreground">
             <p>NEURA AL-NOUR v1.0.0</p>
-            <p className="mt-1">© 2024 NEURA AL-NOUR. Tous droits réservés.</p>
+            <p className="mt-1">© {new Date().getFullYear()} NEURA AL-NOUR. Tous droits réservés.</p>
           </div>
         </div>
       </main>
