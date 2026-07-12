@@ -4502,11 +4502,38 @@ async def language_tutor_progress(user: dict = Depends(get_current_user)):
 
 # ============== ISLAM LEARNING (cautious AI teacher) ==============
 
+ISLAM_ACADEMY_CHAPTERS = [
+    {"id": "decouvrir-islam", "level": 1, "title": "Decouvrir l'Islam", "summary": "Les bases, le sens de l'adoration et les objectifs du parcours.", "source_note": "Bases generales appuyees par le Coran et la Sunna authentique."},
+    {"id": "cinq-piliers", "level": 2, "title": "Les cinq piliers", "summary": "Chahada, priere, zakat, jeune de Ramadan et hajj.", "source_note": "Hadith des cinq piliers rapporte par Al-Bukhari et Muslim."},
+    {"id": "six-piliers-foi", "level": 3, "title": "Les six piliers de la foi", "summary": "Foi en Allah, Ses anges, Ses livres, Ses messagers, le Jour dernier et le destin.", "source_note": "Hadith de Jibril rapporte par Muslim."},
+    {"id": "purification", "level": 4, "title": "La purification", "summary": "Ablutions, proprete, intention et preparation a la priere.", "source_note": "Coran 5:6 et hadiths authentiques."},
+    {"id": "priere", "level": 5, "title": "La priere", "summary": "Importance, horaires, conditions, gestes et concentration.", "source_note": "Coran 4:103 et hadiths authentiques sur la salat."},
+    {"id": "jeune", "level": 6, "title": "Le jeune", "summary": "Ramadan, intention, adab, dispenses et objectifs spirituels.", "source_note": "Coran 2:183-185."},
+    {"id": "zakat", "level": 7, "title": "La Zakat", "summary": "Sens, responsabilite sociale et grandes categories.", "source_note": "Coran 9:60 pour les categories."},
+    {"id": "hajj", "level": 8, "title": "Le Hajj", "summary": "Sens du pelerinage, etapes principales et adab.", "source_note": "Coran 3:97 et traditions authentiques."},
+    {"id": "coran", "level": 9, "title": "Le Coran", "summary": "Respect du texte, lecture, comprehension et memorisation progressive.", "source_note": "Le lecteur Coran existant reste la source de lecture."},
+    {"id": "invocations", "level": 10, "title": "Les invocations", "summary": "Duas et adhkar du quotidien avec prudence sur les formulations.", "source_note": "Duas authentiques selon les recueils reconnus."},
+    {"id": "prophetes", "level": 11, "title": "Les Prophetes", "summary": "Leurs histoires, leur patience et leurs enseignements.", "source_note": "Recits coraniques authentiques."},
+    {"id": "prophete-muhammad", "level": 12, "title": "Le Prophete Muhammad", "summary": "Biographie, mission, misericorde et exemple moral.", "source_note": "Sirah reconnue et hadiths authentiques."},
+    {"id": "compagnons", "level": 13, "title": "Les Compagnons", "summary": "Leur role, leurs qualites et leur transmission.", "source_note": "Sources historiques sunnites reconnues, avec prudence."},
+    {"id": "comportement", "level": 14, "title": "Le bon comportement", "summary": "Langue, sincerite, famille, voisinage, justice et pudeur.", "source_note": "Coran et hadiths authentiques sur l'akhlaq."},
+    {"id": "histoire-islam", "level": 15, "title": "L'histoire de l'Islam", "summary": "Grandes periodes, prudence historique et reperes essentiels.", "source_note": "Sources historiques reconnues, avis divergents signales."},
+]
+
 class IslamLearnMessage(BaseModel):
     content: str
     level: Optional[str] = "débutant"
     topic: Optional[str] = None
     session_id: Optional[str] = None
+
+
+class IslamAcademyNote(BaseModel):
+    chapter_id: str
+    content: str = Field(..., max_length=5000)
+
+class IslamAcademyFavorite(BaseModel):
+    chapter_id: str
+    favorite: bool = True
 
 
 @api_router.post("/islam-learning/chat")
@@ -4630,6 +4657,93 @@ async def set_islam_learning_progress(
         {"user_id": user["id"]}, topic_update, upsert=True
     )
     return await get_islam_learning_progress(user)
+
+
+@api_router.get("/islam-learning/chapters")
+async def get_islam_academy_chapters():
+    return ISLAM_ACADEMY_CHAPTERS
+
+
+@api_router.get("/islam-learning/search")
+async def search_islam_academy(q: str = "", user: dict = Depends(get_current_user)):
+    term = q.strip().lower()
+    chapters = [
+        chapter for chapter in ISLAM_ACADEMY_CHAPTERS
+        if not term or term in chapter["title"].lower() or term in chapter["summary"].lower()
+    ]
+    notes = []
+    if term:
+        notes = await db.islam_learning_notes.find(
+            {"user_id": user["id"], "content": {"$regex": term, "$options": "i"}},
+            {"_id": 0}
+        ).sort("updated_at", -1).to_list(50)
+    return {"chapters": chapters, "notes": notes}
+
+
+@api_router.get("/islam-learning/notes")
+async def get_islam_academy_notes(user: dict = Depends(get_current_user)):
+    return await db.islam_learning_notes.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(200)
+
+
+@api_router.post("/islam-learning/notes")
+async def save_islam_academy_note(data: IslamAcademyNote, user: dict = Depends(get_current_user)):
+    if data.chapter_id not in {chapter["id"] for chapter in ISLAM_ACADEMY_CHAPTERS}:
+        raise HTTPException(status_code=400, detail="Chapitre invalide.")
+    now = datetime.now(timezone.utc).isoformat()
+    note = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "chapter_id": data.chapter_id,
+        "content": data.content.strip(),
+        "updated_at": now,
+    }
+    await db.islam_learning_notes.update_one(
+        {"user_id": user["id"], "chapter_id": data.chapter_id},
+        {"$set": note, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return note
+
+
+@api_router.post("/islam-learning/favorites")
+async def set_islam_academy_favorite(data: IslamAcademyFavorite, user: dict = Depends(get_current_user)):
+    if data.chapter_id not in {chapter["id"] for chapter in ISLAM_ACADEMY_CHAPTERS}:
+        raise HTTPException(status_code=400, detail="Chapitre invalide.")
+    update = {"$addToSet": {"favorite_topics": data.chapter_id}} if data.favorite else {"$pull": {"favorite_topics": data.chapter_id}}
+    update["$set"] = {"user_id": user["id"], "updated_at": datetime.now(timezone.utc).isoformat()}
+    await db.islam_learning_progress.update_one({"user_id": user["id"]}, update, upsert=True)
+    return await get_islam_learning_progress(user)
+
+
+@api_router.get("/islam-learning/goals")
+async def get_islam_academy_goals(user: dict = Depends(get_current_user)):
+    progress = await get_islam_learning_progress(user)
+    completed = len(progress.get("completed_topics", []))
+    notes = await db.islam_learning_notes.count_documents({"user_id": user["id"]})
+    goals = [
+        {"id": "first-course", "label": "Terminer un premier cours", "done": completed >= 1},
+        {"id": "three-chapters", "label": "Terminer 3 chapitres", "done": completed >= 3},
+        {"id": "five-notes", "label": "Prendre 5 notes personnelles", "done": notes >= 5},
+        {"id": "full-path", "label": "Terminer le parcours complet", "done": completed >= len(ISLAM_ACADEMY_CHAPTERS)},
+    ]
+    return {"goals": goals, "completed_chapters": completed, "total_chapters": len(ISLAM_ACADEMY_CHAPTERS)}
+
+
+@api_router.get("/islam-learning/certificate")
+async def get_islam_academy_certificate(user: dict = Depends(get_current_user)):
+    progress = await get_islam_learning_progress(user)
+    completed = set(progress.get("completed_topics", []))
+    is_complete = all(chapter["id"] in completed for chapter in ISLAM_ACADEMY_CHAPTERS)
+    return {
+        "available": is_complete,
+        "user_name": user.get("name"),
+        "title": "Certificat de parcours - Academie de l'Islam",
+        "completed_at": progress.get("updated_at") if is_complete else None,
+        "completed_chapters": len(completed),
+        "total_chapters": len(ISLAM_ACADEMY_CHAPTERS),
+    }
 
 
 # ============== SUBSCRIPTIONS ==============
