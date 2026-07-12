@@ -32,6 +32,7 @@ import MushafPage from "@/pages/MushafPage";
 import RemindersPage from "@/pages/RemindersPage";
 import MultiplayerQuizPage from "@/pages/MultiplayerQuizPage";
 import FounderAdminPage from "@/pages/FounderAdminPage";
+import GamificationPage from "@/pages/GamificationPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -95,6 +96,7 @@ function AppRouter() {
       <Route path="/islam-learning" element={<ProtectedRoute><IslamLearningPage /></ProtectedRoute>} />
       <Route path="/reminders" element={<RemindersPage />} />
       <Route path="/founder-admin" element={<ProtectedRoute><FounderAdminPage /></ProtectedRoute>} />
+      <Route path="/rewards" element={<ProtectedRoute><GamificationPage /></ProtectedRoute>} />
     </Routes>
   );
 }

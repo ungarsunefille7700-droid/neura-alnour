@@ -3595,6 +3595,168 @@ async def get_multiplayer_history(user: dict = Depends(get_current_user)):
     }
 
 
+GAMIFICATION_MISSIONS = [
+    {"id": "daily_quiz", "period": "daily", "title": "Reussir un quiz", "target": 1, "xp": 20, "metric": "quiz_completed"},
+    {"id": "daily_course", "period": "daily", "title": "Terminer un cours", "target": 1, "xp": 25, "metric": "course_completed"},
+    {"id": "daily_exercise", "period": "daily", "title": "Reussir un exercice", "target": 1, "xp": 15, "metric": "exercise_passed"},
+    {"id": "weekly_quiz_5", "period": "weekly", "title": "Terminer 5 quiz", "target": 5, "xp": 80, "metric": "quiz_completed"},
+    {"id": "weekly_courses_3", "period": "weekly", "title": "Terminer 3 cours", "target": 3, "xp": 90, "metric": "course_completed"},
+    {"id": "monthly_learning_10", "period": "monthly", "title": "Terminer 10 chapitres", "target": 10, "xp": 250, "metric": "course_completed"},
+    {"id": "quran_pages_future", "period": "daily", "title": "Lire plusieurs pages du Coran", "target": 3, "xp": 30, "metric": "quran_pages", "locked_reason": "Le suivi de lecture page par page n'est pas encore active pour ne pas toucher au lecteur Coran existant."},
+]
+
+CHEST_RARITIES = [
+    {"rarity": "commun", "weight": 700, "xp": 20, "quiz_bonus": 2},
+    {"rarity": "rare", "weight": 220, "xp": 40, "quiz_bonus": 3},
+    {"rarity": "epique", "weight": 65, "xp": 70, "quiz_bonus": 5},
+    {"rarity": "legendaire", "weight": 13, "xp": 110, "quiz_bonus": 8},
+    {"rarity": "ultra_rare", "weight": 2, "xp": 160, "quiz_bonus": 10},
+]
+
+
+def _period_key(period: str) -> str:
+    now = datetime.now(timezone.utc)
+    if period == "daily":
+        return now.strftime("%Y-%m-%d")
+    if period == "weekly":
+        return f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+    if period == "monthly":
+        return now.strftime("%Y-%m")
+    return "all"
+
+
+async def _gamification_metrics(user: dict) -> dict:
+    today = _period_start("today").isoformat()
+    week = _period_start("week").isoformat()
+    month = _period_start("month").isoformat()
+    quiz_daily = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": today}})
+    quiz_week = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": week}})
+    quiz_month = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": month}})
+    multi_daily = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": today}})
+    multi_week = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": week}})
+    multi_month = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": month}})
+    islam_progress = await get_islam_learning_progress(user)
+    learn_progress = await get_learn_progress(user)
+    completed_courses = len(set(islam_progress.get("completed_topics", [])) | set(learn_progress.get("completed_lessons", [])))
+    return {
+        "quiz_completed": {"daily": quiz_daily + multi_daily, "weekly": quiz_week + multi_week, "monthly": quiz_month + multi_month},
+        "course_completed": {"daily": completed_courses, "weekly": completed_courses, "monthly": completed_courses},
+        "exercise_passed": {"daily": int(islam_progress.get("exercises_passed", 0)), "weekly": int(islam_progress.get("exercises_passed", 0)), "monthly": int(islam_progress.get("exercises_passed", 0))},
+        "quran_pages": {"daily": 0, "weekly": 0, "monthly": 0},
+    }
+
+
+def _choose_chest_reward() -> dict:
+    total = sum(item["weight"] for item in CHEST_RARITIES)
+    pick = secrets.randbelow(total)
+    current = 0
+    for item in CHEST_RARITIES:
+        current += item["weight"]
+        if pick < current:
+            return item
+    return CHEST_RARITIES[0]
+
+
+@api_router.get("/gamification/status")
+async def gamification_status(user: dict = Depends(get_current_user)):
+    metrics = await _gamification_metrics(user)
+    claims = await db.gamification_claims.find({"user_id": user["id"]}, {"_id": 0}).to_list(500)
+    claim_keys = {f"{claim['mission_id']}:{claim['period_key']}" for claim in claims}
+    missions = []
+    for mission in GAMIFICATION_MISSIONS:
+        progress = metrics.get(mission["metric"], {}).get(mission["period"], 0)
+        period_key = _period_key(mission["period"])
+        claimed = f"{mission['id']}:{period_key}" in claim_keys
+        missions.append({
+            **mission,
+            "progress": min(progress, mission["target"]),
+            "completed": progress >= mission["target"] and not mission.get("locked_reason"),
+            "claimed": claimed,
+            "period_key": period_key,
+        })
+    chests = await db.gamification_chests.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(50)
+    return {
+        "xp": int(user.get("quiz_xp", 0)),
+        "level": int(user.get("quiz_level", 1)),
+        "missions": missions,
+        "chests": chests,
+    }
+
+
+@api_router.post("/gamification/missions/{mission_id}/claim")
+async def claim_gamification_mission(mission_id: str, user: dict = Depends(get_current_user)):
+    mission = next((item for item in GAMIFICATION_MISSIONS if item["id"] == mission_id), None)
+    if not mission or mission.get("locked_reason"):
+        raise HTTPException(status_code=404, detail="Mission indisponible.")
+    metrics = await _gamification_metrics(user)
+    progress = metrics.get(mission["metric"], {}).get(mission["period"], 0)
+    if progress < mission["target"]:
+        raise HTTPException(status_code=409, detail="Mission pas encore terminee.")
+    period_key = _period_key(mission["period"])
+    existing = await db.gamification_claims.find_one({"user_id": user["id"], "mission_id": mission_id, "period_key": period_key})
+    if existing:
+        raise HTTPException(status_code=409, detail="Mission deja recompensee pour cette periode.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    old_xp = int(user.get("quiz_xp", 0))
+    new_xp = old_xp + int(mission["xp"])
+    new_level = max(1, new_xp // 100 + 1)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"quiz_xp": new_xp, "quiz_level": new_level}})
+    claim = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "mission_id": mission_id,
+        "period": mission["period"],
+        "period_key": period_key,
+        "xp": mission["xp"],
+        "created_at": now,
+    }
+    await db.gamification_claims.insert_one(claim)
+
+    chest = None
+    # Chests are intentionally rare: 3% per completed mission.
+    if secrets.randbelow(100) < 3:
+        chest = {
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "source": mission_id,
+            "status": "closed",
+            "created_at": now,
+        }
+        await db.gamification_chests.insert_one(chest)
+    return {"ok": True, "xp_added": mission["xp"], "xp": new_xp, "level": new_level, "chest": chest}
+
+
+@api_router.post("/gamification/chests/{chest_id}/open")
+async def open_gamification_chest(chest_id: str, user: dict = Depends(get_current_user)):
+    chest = await db.gamification_chests.find_one({"id": chest_id, "user_id": user["id"]}, {"_id": 0})
+    if not chest:
+        raise HTTPException(status_code=404, detail="Coffre introuvable.")
+    if chest.get("status") == "opened":
+        raise HTTPException(status_code=409, detail="Coffre deja ouvert.")
+    reward = _choose_chest_reward()
+    now = datetime.now(timezone.utc).isoformat()
+    old_xp = int(user.get("quiz_xp", 0))
+    new_xp = old_xp + reward["xp"]
+    new_level = max(1, new_xp // 100 + 1)
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"quiz_xp": new_xp, "quiz_level": new_level}, "$inc": {"quiz_bonus_points": min(10, reward["quiz_bonus"])}},
+    )
+    opened = {
+        "status": "opened",
+        "opened_at": now,
+        "rarity": reward["rarity"],
+        "xp": reward["xp"],
+        "quiz_bonus": min(10, reward["quiz_bonus"]),
+        "badge": "Premier coffre" if reward["rarity"] != "ultra_rare" else "Coffre Ultra Rare",
+    }
+    await db.gamification_chests.update_one({"id": chest_id}, {"$set": opened})
+    return {"ok": True, "reward": opened, "xp": new_xp, "level": new_level}
+
+
 @api_router.post("/multiplayer/questions/report")
 async def report_multiplayer_question(data: MultiplayerQuestionReport, user: dict = Depends(get_current_user)):
     now = datetime.now(timezone.utc).isoformat()

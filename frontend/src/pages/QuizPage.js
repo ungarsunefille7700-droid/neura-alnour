@@ -187,6 +187,21 @@ const QuizPage = () => {
               </div>
             </Link>
 
+            {user && (
+              <Link to="/rewards" className="block mb-6">
+                <div className="border border-border rounded-lg p-5 flex items-center gap-4 hover:bg-muted/40 transition-colors">
+                  <div className="w-11 h-11 rounded-md bg-yellow-500/15 text-yellow-500 flex items-center justify-center">
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="font-semibold">Missions et recompenses</h2>
+                    <p className="text-sm text-muted-foreground">Gagner de l'XP, suivre ses missions et ouvrir les coffres rares.</p>
+                  </div>
+                  <ArrowRight className="w-5 h-5 ml-auto text-primary" />
+                </div>
+              </Link>
+            )}
+
             <div className="mb-6">
               <p className="text-sm text-muted-foreground text-center mb-3">Ou choisir une catégorie :</p>
               <div className="flex flex-wrap justify-center gap-2">
