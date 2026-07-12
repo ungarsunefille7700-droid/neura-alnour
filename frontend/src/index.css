@@ -28,11 +28,71 @@ body {
     overflow-x: hidden;
 }
 
+html {
+    scroll-behavior: smooth;
+}
+
 img,
 video,
 canvas,
 svg {
     max-width: 100%;
+}
+
+button,
+a,
+input,
+select,
+textarea,
+[role="button"] {
+    transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+    transition-duration: 160ms;
+    transition-timing-function: ease-out;
+}
+
+button:active,
+[role="button"]:active {
+    transform: translateY(1px) scale(0.99);
+}
+
+:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+}
+
+::selection {
+    background: hsl(var(--primary) / 0.22);
+}
+
+.page-enter {
+    animation: page-enter 180ms ease-out both;
+}
+
+@keyframes page-enter {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.001ms !important;
+    }
+
+    button:active,
+    [role="button"]:active {
+        transform: none;
+    }
 }
 
 h1, h2, h3, h4, h5, h6 {
