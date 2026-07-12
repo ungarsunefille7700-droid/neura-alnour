@@ -338,6 +338,22 @@ export default function MultiplayerQuizPage() {
     }
   };
 
+  const reportPlayer = async (player) => {
+    if (!room || !player || player.user_id === user?.id) return;
+    const reason = window.prompt(`Pourquoi signaler ${player.name} ?`);
+    if (!reason?.trim()) return;
+    try {
+      await axios.post(
+        `${API}/multiplayer/rooms/${room.code}/report-player`,
+        { target_user_id: player.user_id, reason: reason.trim().slice(0, 120), details: 'Signalement depuis le quiz multijoueur' },
+        { headers: authHeaders }
+      );
+      toast.success('Signalement envoye au panel admin.');
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || 'Signalement impossible.');
+    }
+  };
+
   if (screen === 'lobby' && room && (room.status === 'playing' || room.status === 'finished')) {
     const game = room.game || {};
     const me = room.players.find((player) => player.user_id === user?.id);
@@ -517,6 +533,11 @@ export default function MultiplayerQuizPage() {
                       <p className="text-xs text-muted-foreground">
                         {player.correct_count || 0} juste(s) - serie {player.streak || 0}
                       </p>
+                      {player.user_id !== user?.id && (
+                        <button onClick={() => reportPlayer(player)} className="text-[11px] text-amber-400 hover:text-amber-300">
+                          Signaler
+                        </button>
+                      )}
                     </div>
                     <span className="font-bold text-primary">{player.score || 0}</span>
                   </div>
@@ -622,6 +643,11 @@ export default function MultiplayerQuizPage() {
                         {player.ready && player.connected ? 'Prêt' : player.connected ? 'En attente' : 'Hors ligne'}
                       </span>
                       <span className={`block w-2 h-2 rounded-full ml-auto mt-1 ${player.connected ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+                      {player.user_id !== user?.id && (
+                        <button onClick={() => reportPlayer(player)} className="block text-[11px] text-amber-400 hover:text-amber-300 mt-2">
+                          Signaler
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}

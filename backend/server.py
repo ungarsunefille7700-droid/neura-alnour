@@ -2707,6 +2707,11 @@ class MultiplayerQuestionReport(BaseModel):
     reason: str = Field(..., min_length=3, max_length=120)
     details: Optional[str] = Field(default="", max_length=1000)
 
+class MultiplayerPlayerReport(BaseModel):
+    target_user_id: str
+    reason: str = Field(..., min_length=3, max_length=120)
+    details: Optional[str] = Field(default="", max_length=1000)
+
 class FounderSubscriptionGift(BaseModel):
     user_id: str
     plan: str = "neura_ultra"
@@ -3776,6 +3781,36 @@ async def report_multiplayer_question(data: MultiplayerQuestionReport, user: dic
     return {"ok": True, "report_id": report["id"], "status": report["status"]}
 
 
+@api_router.post("/multiplayer/rooms/{code}/report-player")
+async def report_multiplayer_player(code: str, data: MultiplayerPlayerReport, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room:
+        raise HTTPException(status_code=404, detail="Salle introuvable.")
+    players = room.get("players", [])
+    if not any(player.get("user_id") == user["id"] for player in players):
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    target = next((player for player in players if player.get("user_id") == data.target_user_id), None)
+    if not target or target.get("user_id") == user["id"]:
+        raise HTTPException(status_code=400, detail="Joueur a signaler invalide.")
+    now = datetime.now(timezone.utc).isoformat()
+    report = {
+        "id": str(uuid.uuid4()),
+        "room_code": room["code"],
+        "reporter_user_id": user["id"],
+        "reporter_email": user.get("email"),
+        "target_user_id": target["user_id"],
+        "target_name": target.get("name"),
+        "reason": data.reason.strip(),
+        "details": (data.details or "").strip(),
+        "status": "open",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.multiplayer_player_reports.insert_one(report)
+    await _admin_log("player_report", user, target["user_id"], {"room_code": room["code"], "reason": report["reason"]})
+    return {"ok": True, "report_id": report["id"], "status": report["status"]}
+
+
 @api_router.get("/founder-admin/overview")
 async def founder_admin_overview(user: dict = Depends(get_current_user)):
     role = await _require_founder_admin(user)
@@ -3807,7 +3842,10 @@ async def founder_admin_overview(user: dict = Depends(get_current_user)):
         "games_month": await db.multiplayer_history.count_documents({"played_at": {"$gte": month}}),
         "new_users_today": await db.users.count_documents({"created_at": {"$gte": today}}),
         "subscribers": subscribers,
-        "open_reports": await db.multiplayer_question_reports.count_documents({"status": "open"}),
+        "open_reports": (
+            await db.multiplayer_question_reports.count_documents({"status": "open"})
+            + await db.multiplayer_player_reports.count_documents({"status": "open"})
+        ),
         "rewards_total": await db.founder_rewards.count_documents({}),
         "total_quiz": await db.multiplayer_history.count_documents({}),
         "total_questions": answered_total,
@@ -3928,7 +3966,13 @@ async def founder_admin_rewards(user: dict = Depends(get_current_user)):
 @api_router.get("/founder-admin/question-reports")
 async def founder_admin_question_reports(user: dict = Depends(get_current_user)):
     await _require_founder_admin(user)
-    return await db.multiplayer_question_reports.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    question_reports = await db.multiplayer_question_reports.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    player_reports = await db.multiplayer_player_reports.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    for item in question_reports:
+        item["report_type"] = "question"
+    for item in player_reports:
+        item["report_type"] = "player"
+    return sorted(question_reports + player_reports, key=lambda item: item.get("created_at", ""), reverse=True)[:200]
 
 
 @api_router.get("/founder-admin/logs")
@@ -3944,6 +3988,20 @@ async def send_multiplayer_reaction(code: str, data: MultiplayerReaction, user: 
         raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
     if data.reaction not in MULTIPLAYER_REACTIONS:
         raise HTTPException(status_code=400, detail="Réaction non autorisée.")
+    recent = await db.multiplayer_reaction_logs.count_documents({
+        "room_code": code.strip().upper(),
+        "user_id": user["id"],
+        "created_at": {"$gte": (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()},
+    })
+    if recent >= 2:
+        raise HTTPException(status_code=429, detail="Trop de reactions en peu de temps.")
+    await db.multiplayer_reaction_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "room_code": code.strip().upper(),
+        "user_id": user["id"],
+        "reaction": data.reaction,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
     await multiplayer_connections.broadcast(code.strip().upper(), {
         "type": "reaction",
         "user_id": user["id"],
