@@ -30,6 +30,7 @@ import IslamLearningPage from "@/pages/IslamLearningPage";
 import MushafPage from "@/pages/MushafPage";
 import RemindersPage from "@/pages/RemindersPage";
 import MultiplayerQuizPage from "@/pages/MultiplayerQuizPage";
+import FounderAdminPage from "@/pages/FounderAdminPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -92,6 +93,7 @@ function AppRouter() {
       <Route path="/language-tutor" element={<ProtectedRoute><LanguageTutorPage /></ProtectedRoute>} />
       <Route path="/islam-learning" element={<ProtectedRoute><IslamLearningPage /></ProtectedRoute>} />
       <Route path="/reminders" element={<RemindersPage />} />
+      <Route path="/founder-admin" element={<ProtectedRoute><FounderAdminPage /></ProtectedRoute>} />
     </Routes>
   );
 }

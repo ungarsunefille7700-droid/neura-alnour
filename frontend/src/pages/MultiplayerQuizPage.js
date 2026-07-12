@@ -317,6 +317,27 @@ export default function MultiplayerQuizPage() {
     }
   };
 
+  const reportCurrentQuestion = async () => {
+    if (!room?.game?.question) return;
+    const reason = window.prompt('Pourquoi signaler cette question ?');
+    if (!reason?.trim()) return;
+    try {
+      await axios.post(
+        `${API}/multiplayer/questions/report`,
+        {
+          room_code: room.code,
+          question_id: room.game.question.id || `${room.code}-${room.game.current_index}`,
+          reason: reason.trim().slice(0, 120),
+          details: room.game.question.question,
+        },
+        { headers: authHeaders }
+      );
+      toast.success('Signalement envoye au panel admin.');
+    } catch (error) {
+      toast.error('Signalement impossible pour le moment.');
+    }
+  };
+
   if (screen === 'lobby' && room && (room.status === 'playing' || room.status === 'finished')) {
     const game = room.game || {};
     const me = room.players.find((player) => player.user_id === user?.id);
@@ -440,6 +461,9 @@ export default function MultiplayerQuizPage() {
                 </div>
                 {game.explanation && <p className="mt-4 text-sm leading-relaxed text-muted-foreground">{game.explanation}</p>}
                 {game.source && <p className="mt-2 text-xs text-primary">Source : {game.source}</p>}
+                <button onClick={reportCurrentQuestion} className="mt-4 text-xs text-amber-400 hover:text-amber-300">
+                  Signaler cette question
+                </button>
               </div>
             )}
 
@@ -537,6 +561,11 @@ export default function MultiplayerQuizPage() {
             <Trophy className="w-5 h-5 text-primary" />
             <span className="font-semibold">Salle {room.code}</span>
             <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+              {(user?.is_vip || user?.subscription === 'neura_ultra') && (
+                <Link to="/founder-admin" className="hidden sm:inline-flex items-center gap-1 hover:text-foreground">
+                  <ShieldCheck className="w-4 h-4" /> Admin
+                </Link>
+              )}
               <span className="inline-flex items-center gap-1">
                 {socketState === 'connected' ? <Wifi className="w-4 h-4 text-emerald-500" /> : <WifiOff className="w-4 h-4 text-amber-500" />}
                 {socketState === 'connected' ? 'Temps réel' : 'Reconnexion'}
@@ -669,7 +698,12 @@ export default function MultiplayerQuizPage() {
           </button>
           <Trophy className="w-5 h-5 text-primary" />
           <span className="font-semibold">Quiz multijoueur</span>
-          <Link to="/" className="ml-auto text-sm text-muted-foreground hover:text-foreground">Accueil</Link>
+          <div className="ml-auto flex items-center gap-3">
+            {(user?.is_vip || user?.subscription === 'neura_ultra') && (
+              <Link to="/founder-admin" className="text-sm text-primary hover:text-primary/80">Panel fondateur</Link>
+            )}
+            <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">Accueil</Link>
+          </div>
         </div>
       </header>
 

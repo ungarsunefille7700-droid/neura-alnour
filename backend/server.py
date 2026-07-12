@@ -2528,6 +2528,18 @@ class MultiplayerAnswer(BaseModel):
     question_index: int
     answer: int
 
+class MultiplayerQuestionReport(BaseModel):
+    room_code: Optional[str] = None
+    question_id: Optional[str] = None
+    reason: str = Field(..., min_length=3, max_length=120)
+    details: Optional[str] = Field(default="", max_length=1000)
+
+class FounderSubscriptionGift(BaseModel):
+    user_id: str
+    plan: str = "neura_ultra"
+    months: int = Field(default=1, ge=1, le=12)
+    reason: Optional[str] = Field(default="", max_length=500)
+
 
 class MultiplayerConnectionManager:
     def __init__(self):
@@ -2588,6 +2600,7 @@ def _public_game(room: dict) -> Optional[dict]:
         source_question = questions[index]
         question = {
             "index": index,
+            "id": source_question.get("id"),
             "question": source_question["question"],
             "options": source_question["options"],
             "category": source_question.get("category", "general"),
@@ -2655,6 +2668,107 @@ def _public_room(room: dict) -> dict:
         "updated_at": room.get("updated_at"),
         "game": _public_game(room),
     }
+
+
+def _founder_admin_role(user: dict) -> Optional[str]:
+    email = (user.get("email") or "").strip().lower()
+    if is_founder(email):
+        return "founder"
+    if user.get("is_vip") or is_vip_email(email):
+        return "admin"
+    return None
+
+
+async def _require_founder_admin(user: dict) -> str:
+    role = _founder_admin_role(user)
+    if not role:
+        raise HTTPException(status_code=403, detail="Acces reserve aux fondateurs et administrateurs.")
+    return role
+
+
+async def _admin_log(action: str, actor: dict, target_user_id: Optional[str] = None, metadata: Optional[dict] = None):
+    await db.founder_admin_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": action,
+        "actor_id": actor.get("id"),
+        "actor_email": actor.get("email"),
+        "target_user_id": target_user_id,
+        "metadata": metadata or {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _period_start(period: str) -> Optional[datetime]:
+    now = datetime.now(timezone.utc)
+    if period == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "week":
+        start = now - timedelta(days=now.weekday())
+        return start.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "month":
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if period == "year":
+        return now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return None
+
+
+def _season_name(now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    if now.month in (3, 4, 5):
+        return "Printemps"
+    if now.month in (6, 7, 8):
+        return "Ete"
+    if now.month in (9, 10, 11):
+        return "Automne"
+    return "Hiver"
+
+
+async def _multiplayer_leaderboard(period: str = "all", limit: int = 100) -> List[dict]:
+    query = {}
+    start = _period_start(period)
+    if start:
+        query["played_at"] = {"$gte": start.isoformat()}
+    pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": "$user_id",
+            "score": {"$sum": "$score"},
+            "games": {"$sum": 1},
+            "wins": {"$sum": {"$cond": ["$won", 1, 0]}},
+            "correct": {"$sum": "$correct_count"},
+            "wrong": {"$sum": "$wrong_count"},
+            "xp": {"$sum": "$xp_earned"},
+            "average_ms": {"$avg": "$average_response_ms"},
+        }},
+        {"$sort": {"score": -1, "wins": -1, "correct": -1, "average_ms": 1}},
+        {"$limit": max(1, min(limit, 100))},
+    ]
+    rows = await db.multiplayer_history.aggregate(pipeline).to_list(limit)
+    users = await db.users.find(
+        {"id": {"$in": [row["_id"] for row in rows]}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "picture": 1, "username": 1}
+    ).to_list(len(rows) or 1)
+    users_by_id = {item["id"]: item for item in users}
+    result = []
+    for position, row in enumerate(rows, start=1):
+        profile = users_by_id.get(row["_id"], {})
+        answered = int(row.get("correct", 0)) + int(row.get("wrong", 0))
+        result.append({
+            "position": position,
+            "user_id": row["_id"],
+            "name": profile.get("name") or "Utilisateur",
+            "email": profile.get("email"),
+            "picture": profile.get("picture"),
+            "score": int(row.get("score", 0)),
+            "games": int(row.get("games", 0)),
+            "wins": int(row.get("wins", 0)),
+            "correct": int(row.get("correct", 0)),
+            "wrong": int(row.get("wrong", 0)),
+            "accuracy": round(int(row.get("correct", 0)) / answered * 100, 1) if answered else 0,
+            "xp": int(row.get("xp", 0)),
+            "average_response_ms": round(row.get("average_ms") or 0),
+        })
+    return result
 
 
 async def _room_by_code(code: str) -> dict:
@@ -3306,6 +3420,186 @@ async def get_multiplayer_history(user: dict = Depends(get_current_user)):
             "average_response_ms": round(sum(average_values) / len(average_values)) if average_values else 0,
         },
     }
+
+
+@api_router.post("/multiplayer/questions/report")
+async def report_multiplayer_question(data: MultiplayerQuestionReport, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    report = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "room_code": (data.room_code or "").strip().upper() or None,
+        "question_id": data.question_id,
+        "reason": data.reason.strip(),
+        "details": (data.details or "").strip(),
+        "status": "open",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.multiplayer_question_reports.insert_one(report)
+    return {"ok": True, "report_id": report["id"], "status": report["status"]}
+
+
+@api_router.get("/founder-admin/overview")
+async def founder_admin_overview(user: dict = Depends(get_current_user)):
+    role = await _require_founder_admin(user)
+    now = datetime.now(timezone.utc)
+    today = _period_start("today").isoformat()
+    week = _period_start("week").isoformat()
+    month = _period_start("month").isoformat()
+    users_total = await db.users.count_documents({})
+    connected_rooms = await db.multiplayer_rooms.find(
+        {"players.connected": True}, {"_id": 0, "players": 1}
+    ).to_list(200)
+    connected_ids = set()
+    for room in connected_rooms:
+        connected_ids.update(player["user_id"] for player in room.get("players", []) if player.get("connected"))
+    players_in_game = await db.multiplayer_rooms.count_documents({"status": "playing"})
+    subscribers = await db.users.count_documents({"subscription": {"$ne": "free"}})
+    question_totals = await db.multiplayer_history.aggregate([
+        {"$group": {"_id": None, "correct": {"$sum": "$correct_count"}, "wrong": {"$sum": "$wrong_count"}}}
+    ]).to_list(1)
+    answered_total = int((question_totals[0].get("correct", 0) + question_totals[0].get("wrong", 0)) if question_totals else 0)
+    return {
+        "role": role,
+        "season": _season_name(now),
+        "users_total": users_total,
+        "users_connected": len(connected_ids),
+        "players_in_game": players_in_game,
+        "games_today": await db.multiplayer_history.count_documents({"played_at": {"$gte": today}}),
+        "games_week": await db.multiplayer_history.count_documents({"played_at": {"$gte": week}}),
+        "games_month": await db.multiplayer_history.count_documents({"played_at": {"$gte": month}}),
+        "new_users_today": await db.users.count_documents({"created_at": {"$gte": today}}),
+        "subscribers": subscribers,
+        "open_reports": await db.multiplayer_question_reports.count_documents({"status": "open"}),
+        "rewards_total": await db.founder_rewards.count_documents({}),
+        "total_quiz": await db.multiplayer_history.count_documents({}),
+        "total_questions": answered_total,
+    }
+
+
+@api_router.get("/founder-admin/users")
+async def founder_admin_users(search: str = "", limit: int = 50, user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    query = {}
+    term = search.strip()
+    if term:
+        query = {"$or": [
+            {"name": {"$regex": term, "$options": "i"}},
+            {"username": {"$regex": term, "$options": "i"}},
+            {"email": {"$regex": term, "$options": "i"}},
+            {"id": {"$regex": term, "$options": "i"}},
+        ]}
+    users = await db.users.find(query, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
+    user_ids = [item["id"] for item in users]
+    history = await db.multiplayer_history.aggregate([
+        {"$match": {"user_id": {"$in": user_ids}}},
+        {"$group": {"_id": "$user_id", "games": {"$sum": 1}, "wins": {"$sum": {"$cond": ["$won", 1, 0]}}, "correct": {"$sum": "$correct_count"}}}
+    ]).to_list(len(user_ids) or 1)
+    stats = {item["_id"]: item for item in history}
+    connected_rooms = await db.multiplayer_rooms.find({"players.user_id": {"$in": user_ids}}, {"_id": 0, "players": 1, "status": 1}).to_list(200)
+    connected = {}
+    for room in connected_rooms:
+        for player in room.get("players", []):
+            if player.get("user_id") in user_ids and player.get("connected"):
+                connected[player["user_id"]] = "playing" if room.get("status") == "playing" else "online"
+    for item in users:
+        item["role"] = _founder_admin_role(item) or "user"
+        item["status"] = connected.get(item["id"], "offline")
+        item["quiz_games"] = int(stats.get(item["id"], {}).get("games", 0))
+        item["quiz_wins"] = int(stats.get(item["id"], {}).get("wins", 0))
+        item["quiz_correct"] = int(stats.get(item["id"], {}).get("correct", 0))
+    return users
+
+
+@api_router.get("/founder-admin/users/{target_user_id}")
+async def founder_admin_user_detail(target_user_id: str, user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    target = await db.users.find_one({"id": target_user_id}, {"_id": 0, "password": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    history = await db.multiplayer_history.find({"user_id": target_user_id}, {"_id": 0}).sort("played_at", -1).to_list(100)
+    rewards = await db.founder_rewards.find({"target_user_id": target_user_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    badges = sorted({badge for item in history for badge in item.get("badges_earned", [])})
+    target["role"] = _founder_admin_role(target) or "user"
+    target["history"] = history
+    target["rewards"] = rewards
+    target["badges"] = badges
+    return target
+
+
+@api_router.get("/founder-admin/leaderboards")
+async def founder_admin_leaderboards(period: str = "all", user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    safe_period = period if period in {"today", "week", "month", "year", "all"} else "all"
+    return {"period": safe_period, "rows": await _multiplayer_leaderboard(safe_period, 100)}
+
+
+@api_router.post("/founder-admin/rewards/subscription")
+async def founder_admin_gift_subscription(data: FounderSubscriptionGift, user: dict = Depends(get_current_user)):
+    role = await _require_founder_admin(user)
+    if role not in {"founder", "admin"}:
+        raise HTTPException(status_code=403, detail="Permission insuffisante.")
+    if data.plan not in {"premium", "pro", "mongo", "developer_elite", "developer_ultimate", "neura_plus", "neura_ultra"}:
+        raise HTTPException(status_code=400, detail="Abonnement invalide.")
+    target = await db.users.find_one({"id": data.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=31 * data.months)
+    await db.users.update_one(
+        {"id": data.user_id},
+        {"$set": {
+            "subscription": data.plan,
+            "gifted_subscription": True,
+            "gifted_until": expires_at.isoformat(),
+            "subscription_updated_at": now.isoformat(),
+        }},
+    )
+    reward = {
+        "id": str(uuid.uuid4()),
+        "type": "subscription_gift",
+        "plan": data.plan,
+        "months": data.months,
+        "target_user_id": data.user_id,
+        "target_email": target.get("email"),
+        "actor_id": user.get("id"),
+        "actor_email": user.get("email"),
+        "reason": (data.reason or "").strip(),
+        "expires_at": expires_at.isoformat(),
+        "created_at": now.isoformat(),
+    }
+    await db.founder_rewards.insert_one(reward)
+    await db.notifications.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": data.user_id,
+        "type": "subscription_gift",
+        "title": "Felicitations !",
+        "message": "Vous avez recu un abonnement offert par l'equipe de Neura Al Nour.",
+        "read": False,
+        "created_at": now.isoformat(),
+    })
+    await _admin_log("subscription_gift", user, data.user_id, {"plan": data.plan, "months": data.months})
+    return {"ok": True, "reward": {k: v for k, v in reward.items() if k != "_id"}}
+
+
+@api_router.get("/founder-admin/rewards")
+async def founder_admin_rewards(user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    return await db.founder_rewards.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+@api_router.get("/founder-admin/question-reports")
+async def founder_admin_question_reports(user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    return await db.multiplayer_question_reports.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+@api_router.get("/founder-admin/logs")
+async def founder_admin_logs(user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    return await db.founder_admin_logs.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
 
 
 @api_router.post("/multiplayer/rooms/{code}/reaction")
