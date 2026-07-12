@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import {
   ArrowLeft, Check, Clipboard, Clock3, Globe2, Loader2, LockKeyhole,
   LogOut, Radio, RefreshCw, ShieldCheck, Signal, Sparkles, Trophy, Users,
-  Wifi, WifiOff, Zap
+  Wifi, WifiOff, Zap, Volume2, VolumeX
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
@@ -14,6 +14,14 @@ const BACKEND = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 const API = `${BACKEND}/api`;
 const WS_BASE = BACKEND.replace(/^http/, 'ws');
 const CAPACITIES = [2, 4, 6, 8, 10];
+const GAME_CATEGORIES = [
+  ['general', 'Toutes catégories'], ['piliers', 'Piliers'], ['coran', 'Coran'],
+  ['priere', 'Prière'], ['ramadan', 'Ramadan'], ['prophetes', 'Prophètes'], ['croyance', 'Croyance']
+];
+const DIFFICULTIES = [
+  ['debutant', 'Débutant'], ['facile', 'Facile'], ['moyen', 'Moyen'],
+  ['difficile', 'Difficile'], ['expert', 'Expert']
+];
 const REACTIONS = [
   ['well_played', 'Bien joué !'],
   ['bravo', 'Bravo !'],
@@ -34,6 +42,10 @@ export default function MultiplayerQuizPage() {
   const [publicRooms, setPublicRooms] = useState([]);
   const [capacity, setCapacity] = useState(4);
   const [visibility, setVisibility] = useState('public');
+  const [category, setCategory] = useState('general');
+  const [difficulty, setDifficulty] = useState('moyen');
+  const [questionCount, setQuestionCount] = useState(10);
+  const [questionTime, setQuestionTime] = useState(15);
   const [joinCode, setJoinCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [socketState, setSocketState] = useState('disconnected');
@@ -41,6 +53,10 @@ export default function MultiplayerQuizPage() {
   const [countdown, setCountdown] = useState(null);
   const [reaction, setReaction] = useState(null);
   const [launched, setLaunched] = useState(false);
+  const [gameAnswer, setGameAnswer] = useState(null);
+  const [gameAnswerResult, setGameAnswerResult] = useState(null);
+  const [clockNow, setClockNow] = useState(Date.now());
+  const [soundsEnabled, setSoundsEnabled] = useState(true);
 
   const socketRef = useRef(null);
   const heartbeatRef = useRef(null);
@@ -53,6 +69,16 @@ export default function MultiplayerQuizPage() {
   );
 
   useEffect(() => { roomRef.current = room; }, [room]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 200);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setGameAnswer(null);
+    setGameAnswerResult(null);
+  }, [room?.game?.current_index]);
 
   const loadPublicRooms = useCallback(async () => {
     try {
@@ -102,7 +128,7 @@ export default function MultiplayerQuizPage() {
         if (payload.type === 'pong' && payload.sent_at) setPing(Math.max(0, Date.now() - payload.sent_at));
         if (payload.type === 'countdown') setCountdown(payload.value);
         if (payload.type === 'countdown_cancelled') setCountdown(null);
-        if (payload.type === 'game_start') {
+        if (payload.type === 'game_start' || payload.type === 'game_welcome') {
           setCountdown(null);
           setLaunched(true);
         }
@@ -141,7 +167,14 @@ export default function MultiplayerQuizPage() {
     try {
       const response = await axios.post(
         `${API}/multiplayer/rooms`,
-        { max_players: capacity, visibility },
+        {
+          max_players: capacity,
+          visibility,
+          category,
+          difficulty,
+          question_count: questionCount,
+          question_time: questionTime,
+        },
         { headers: authHeaders }
       );
       await enterRoom(response.data);
@@ -240,6 +273,255 @@ export default function MultiplayerQuizPage() {
       toast.error(`Code de la salle : ${room.code}`);
     }
   };
+
+  const playFeedbackSound = useCallback((correct) => {
+    if (!soundsEnabled || typeof window === 'undefined') return;
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      const context = new AudioContext();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = correct ? 720 : 210;
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, context.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.2);
+      window.setTimeout(() => context.close(), 280);
+    } catch (error) {
+      // Sound feedback is optional and must never block the game.
+    }
+  }, [soundsEnabled]);
+
+  const submitGameAnswer = async (answerIndex) => {
+    if (!room?.game || gameAnswer !== null || busy) return;
+    setGameAnswer(answerIndex);
+    setBusy(true);
+    try {
+      const response = await axios.post(
+        `${API}/multiplayer/rooms/${room.code}/answer`,
+        { question_index: room.game.current_index, answer: answerIndex },
+        { headers: authHeaders }
+      );
+      setGameAnswerResult(response.data);
+      playFeedbackSound(Boolean(response.data.correct));
+    } catch (error) {
+      setGameAnswer(null);
+      toast.error(roomError(error, 'Reponse refusee par le serveur.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (screen === 'lobby' && room && (room.status === 'playing' || room.status === 'finished')) {
+    const game = room.game || {};
+    const me = room.players.find((player) => player.user_id === user?.id);
+    const rankings = [...room.players].sort((a, b) => (
+      (b.score || 0) - (a.score || 0) ||
+      (b.correct_count || 0) - (a.correct_count || 0) ||
+      (a.total_response_ms || 0) - (b.total_response_ms || 0)
+    ));
+    const endsAt = game.question_ends_at ? new Date(game.question_ends_at).getTime() : null;
+    const remainingMs = endsAt ? Math.max(0, endsAt - clockNow) : 0;
+    const remainingSec = Math.ceil(remainingMs / 1000);
+    const totalQuestionMs = Math.max(1, (room.question_time || 15) * 1000);
+    const timerPct = Math.max(0, Math.min(100, (remainingMs / totalQuestionMs) * 100));
+    const isQuestionPhase = game.phase === 'question' && game.question;
+    const showReveal = ['reveal', 'ranking', 'finished'].includes(game.phase);
+    const correctAnswer = Number(game.correct_answer);
+    const currentAnswered = Array.isArray(game.round_answers)
+      ? game.round_answers.some((answer) => answer.user_id === user?.id)
+      : false;
+    const winnerIds = new Set(game.winner_ids || []);
+
+    const narratorText = (() => {
+      if (game.phase === 'welcome') return 'Bienvenue dans le Quiz Islamique. Reste concentre, les questions arrivent.';
+      if (game.phase === 'question') return game.is_tiebreak ? 'Question decisive : seuls les joueurs a egalite peuvent marquer.' : 'Lis bien la question. Le score est calcule par le serveur.';
+      if (game.phase === 'reveal') return 'Correction : observe la bonne reponse et la source indiquee.';
+      if (game.phase === 'ranking') return 'Classement en direct avant la prochaine question.';
+      if (game.phase === 'finished') return winnerIds.has(user?.id) ? 'Victoire. QuAllah mette de la baraka dans ton apprentissage.' : 'Partie terminee. Chaque erreur est une occasion dapprendre.';
+      return 'Synchronisation de la partie...';
+    })();
+
+    return (
+      <main className="min-h-screen bg-background text-foreground">
+        <header className="border-b border-border bg-background/95 sticky top-0 z-30">
+          <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
+            <button onClick={leaveRoom} className="p-2 rounded-md hover:bg-muted" aria-label="Quitter la partie">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <Trophy className="w-5 h-5 text-primary" />
+            <span className="font-semibold">Partie {room.code}</span>
+            <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+              <button
+                onClick={() => setSoundsEnabled((value) => !value)}
+                className="p-2 rounded-md hover:bg-muted"
+                aria-label={soundsEnabled ? 'Desactiver les sons' : 'Activer les sons'}
+              >
+                {soundsEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              </button>
+              {socketState === 'connected' ? <Wifi className="w-4 h-4 text-emerald-500" /> : <WifiOff className="w-4 h-4 text-amber-500" />}
+              <span className="hidden sm:inline">{socketState === 'connected' ? 'Temps reel' : 'Reconnexion'}</span>
+            </div>
+          </div>
+        </header>
+
+        <section className="max-w-6xl mx-auto px-4 py-6 grid lg:grid-cols-[1fr_320px] gap-6">
+          <div className="space-y-5">
+            <div className="rounded-lg border border-border bg-card p-5">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mb-3">
+                <span className="px-2.5 py-1 rounded-md bg-muted">{room.category || 'general'}</span>
+                <span className="px-2.5 py-1 rounded-md bg-muted">{room.difficulty || 'moyen'}</span>
+                <span className="px-2.5 py-1 rounded-md bg-muted">{room.question_count || game.total_questions || 0} questions</span>
+                {game.is_tiebreak && <span className="px-2.5 py-1 rounded-md bg-amber-500/15 text-amber-400">Question decisive</span>}
+              </div>
+              <p className="text-sm text-primary font-medium mb-1">Animateur NEURA</p>
+              <p className="text-lg">{narratorText}</p>
+            </div>
+
+            {isQuestionPhase && (
+              <div className="rounded-lg border border-border bg-card p-5" data-testid="multiplayer-game-question">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="text-sm text-muted-foreground">
+                    Question {(game.current_index || 0) + 1}/{game.total_questions || room.question_count}
+                  </div>
+                  <div className="ml-auto text-sm font-semibold text-primary">{remainingSec}s</div>
+                </div>
+                <div className="h-2 rounded-full bg-muted overflow-hidden mb-5">
+                  <div className="h-full bg-primary transition-all duration-200" style={{ width: `${timerPct}%` }} />
+                </div>
+                <h1 className="text-2xl font-bold leading-snug mb-5">{game.question.question}</h1>
+                <div className="grid gap-3">
+                  {(game.question.options || []).map((option, index) => {
+                    const selected = gameAnswer === index;
+                    return (
+                      <button
+                        key={`${game.current_index}-${index}`}
+                        onClick={() => submitGameAnswer(index)}
+                        disabled={busy || gameAnswer !== null || currentAnswered}
+                        className={`text-left rounded-lg border px-4 py-3 transition-colors ${
+                          selected ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background hover:bg-muted'
+                        } disabled:cursor-not-allowed`}
+                      >
+                        <span className="font-semibold mr-2">{String.fromCharCode(65 + index)}.</span>{option}
+                      </button>
+                    );
+                  })}
+                </div>
+                {gameAnswerResult && (
+                  <p className={`mt-4 text-sm font-medium ${gameAnswerResult.correct ? 'text-emerald-500' : 'text-amber-400'}`}>
+                    {gameAnswerResult.correct
+                      ? `Bonne reponse +${gameAnswerResult.points} points`
+                      : 'Reponse enregistree. La correction arrive apres le chrono.'}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {showReveal && game.question && (
+              <div className="rounded-lg border border-border bg-card p-5" data-testid="multiplayer-game-reveal">
+                <p className="text-sm text-primary font-medium mb-2">Correction</p>
+                <h2 className="text-xl font-semibold mb-3">{game.question.question}</h2>
+                <div className="space-y-2">
+                  {(game.question.options || []).map((option, index) => (
+                    <div
+                      key={`${game.current_index}-reveal-${index}`}
+                      className={`rounded-md px-4 py-3 border ${
+                        index === correctAnswer ? 'border-emerald-500 bg-emerald-500/10 text-emerald-400' : 'border-border bg-background'
+                      }`}
+                    >
+                      <span className="font-semibold mr-2">{String.fromCharCode(65 + index)}.</span>{option}
+                    </div>
+                  ))}
+                </div>
+                {game.explanation && <p className="mt-4 text-sm leading-relaxed text-muted-foreground">{game.explanation}</p>}
+                {game.source && <p className="mt-2 text-xs text-primary">Source : {game.source}</p>}
+              </div>
+            )}
+
+            {game.phase === 'finished' && (
+              <div className="rounded-lg border border-border bg-card p-5" data-testid="multiplayer-game-finished">
+                <p className="text-sm text-primary font-medium mb-2">Podium final</p>
+                <h1 className="text-3xl font-bold mb-5">Partie terminee</h1>
+                <div className="grid sm:grid-cols-3 gap-3 mb-5">
+                  {rankings.slice(0, 3).map((player, index) => (
+                    <div key={player.user_id} className="rounded-lg border border-border bg-background p-4 text-center">
+                      <p className="text-3xl font-bold text-primary">#{index + 1}</p>
+                      <p className="font-semibold mt-2 truncate">{player.name}</p>
+                      <p className="text-sm text-muted-foreground">{player.score || 0} points</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid sm:grid-cols-4 gap-3 text-sm">
+                  <div className="rounded-md bg-muted p-3"><p className="text-muted-foreground">Score</p><p className="font-bold">{me?.score || 0}</p></div>
+                  <div className="rounded-md bg-muted p-3"><p className="text-muted-foreground">Bonnes reponses</p><p className="font-bold">{me?.correct_count || 0}</p></div>
+                  <div className="rounded-md bg-muted p-3"><p className="text-muted-foreground">Meilleure serie</p><p className="font-bold">{me?.best_streak || 0}</p></div>
+                  <div className="rounded-md bg-muted p-3"><p className="text-muted-foreground">XP gagne</p><p className="font-bold">+{me?.xp_earned || 0}</p></div>
+                </div>
+                {Array.isArray(me?.badges_earned) && me.badges_earned.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {me.badges_earned.map((badge) => (
+                      <span key={badge} className="px-3 py-1.5 rounded-full bg-primary/10 text-primary text-sm">{badge}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex flex-col sm:flex-row gap-3 mt-6">
+                  <Button onClick={leaveRoom}>Creer ou rejoindre une nouvelle partie</Button>
+                  <Button variant="outline" onClick={() => navigate('/quiz')}>Retour au quiz</Button>
+                  <Button variant="ghost" onClick={() => navigate('/')}>Accueil</Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <aside className="space-y-5">
+            <div className="rounded-lg border border-border bg-card p-5">
+              <h2 className="font-semibold mb-4">Classement live</h2>
+              <div className="space-y-3" data-testid="multiplayer-live-ranking">
+                {rankings.map((player, index) => (
+                  <div key={player.user_id} className="flex items-center gap-3">
+                    <span className="w-7 h-7 rounded-full bg-muted flex items-center justify-center text-xs font-bold">#{index + 1}</span>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium truncate">
+                        {player.name}
+                        {player.abandoned && <span className="ml-2 text-xs text-amber-400">abandonne</span>}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {player.correct_count || 0} juste(s) - serie {player.streak || 0}
+                      </p>
+                    </div>
+                    <span className="font-bold text-primary">{player.score || 0}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-card p-5">
+              <h2 className="font-semibold mb-3">Reactions respectueuses</h2>
+              <div className="flex flex-wrap gap-2">
+                {REACTIONS.map(([key, label]) => (
+                  <button key={key} onClick={() => sendReaction(key)} className="text-xs px-2.5 py-1.5 rounded-md bg-muted hover:bg-primary/10 hover:text-primary">
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">Aucun chat libre : le quiz reste calme et propre.</p>
+            </div>
+          </aside>
+        </section>
+
+        {reaction && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 rounded-full bg-primary text-primary-foreground px-5 py-3 shadow-xl text-sm">
+            {reaction}
+          </div>
+        )}
+      </main>
+    );
+  }
 
   if (screen === 'lobby' && room) {
     const me = room.players.find((player) => player.user_id === user?.id);
@@ -435,6 +717,30 @@ export default function MultiplayerQuizPage() {
                   <button onClick={() => setVisibility('private')} className={`h-11 px-4 rounded-md ${visibility === 'private' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>Privée</button>
                 </div>
               </div>
+              <label className="block">
+                <span className="block text-sm text-muted-foreground mb-2">Categorie</span>
+                <select value={category} onChange={(event) => setCategory(event.target.value)} className="h-11 bg-muted rounded-md px-3 min-w-44">
+                  {GAME_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </label>
+              <label className="block">
+                <span className="block text-sm text-muted-foreground mb-2">Difficulte</span>
+                <select value={difficulty} onChange={(event) => setDifficulty(event.target.value)} className="h-11 bg-muted rounded-md px-3 min-w-36">
+                  {DIFFICULTIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </label>
+              <label className="block">
+                <span className="block text-sm text-muted-foreground mb-2">Questions</span>
+                <select value={questionCount} onChange={(event) => setQuestionCount(Number(event.target.value))} className="h-11 bg-muted rounded-md px-3 min-w-32">
+                  {[3, 5, 10, 15].map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </label>
+              <label className="block">
+                <span className="block text-sm text-muted-foreground mb-2">Temps</span>
+                <select value={questionTime} onChange={(event) => setQuestionTime(Number(event.target.value))} className="h-11 bg-muted rounded-md px-3 min-w-32">
+                  {[10, 15, 20, 30].map((value) => <option key={value} value={value}>{value}s</option>)}
+                </select>
+              </label>
               <Button onClick={createRoom} disabled={busy} className="h-11 sm:ml-auto">
                 {busy && <Loader2 className="w-4 h-4 animate-spin mr-2" />} Créer
               </Button>

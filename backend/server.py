@@ -2476,11 +2476,40 @@ MULTIPLAYER_REACTIONS = {
     "nice_answer": "Belle réponse !",
 }
 multiplayer_countdown_tasks: Dict[str, asyncio.Task] = {}
+multiplayer_game_tasks: Dict[str, asyncio.Task] = {}
+multiplayer_round_events: Dict[str, asyncio.Event] = {}
+
+MULTIPLAYER_CATEGORIES = {
+    "general", "piliers", "coran", "priere", "ramadan", "prophetes", "croyance"
+}
+MULTIPLAYER_DIFFICULTIES = {"debutant", "facile", "moyen", "difficile", "expert"}
+MULTIPLAYER_SAFE_QUESTION_IDS = {
+    "q1", "q2", "q3", "q4", "q5", "q6", "q8", "q9", "q10", "q11", "q12", "q14", "q15"
+}
+MULTIPLAYER_QUESTION_SOURCES = {
+    "q1": "Sahih al-Bukhari, hadith 8 ; Sahih Muslim, hadith 16",
+    "q2": "Sahih al-Bukhari, hadith 8 ; Sahih Muslim, hadith 16",
+    "q3": "Mushaf du Coran : 114 sourates",
+    "q4": "Mushaf du Coran : sourate Al-Fatiha",
+    "q5": "Sahih al-Bukhari, hadith 1907",
+    "q6": "Sahih al-Bukhari, hadith 349 ; Sahih Muslim, hadith 163",
+    "q8": "Coran, sourate Al-Baqara, verset 144",
+    "q9": "Coran, sourate Al-Baqara, verset 2",
+    "q10": "Coran, sourate Al-Baqara, verset 185",
+    "q11": "Coran, sourate At-Tawba, verset 60",
+    "q12": "Coran, sourate Al-Ahzab, verset 40",
+    "q14": "Coran, sourate Al-Qadr",
+    "q15": "Sira d'Ibn Hisham, naissance du Prophète ﷺ à La Mecque",
+}
 
 
 class MultiplayerRoomCreate(BaseModel):
     max_players: int = 2
     visibility: str = "public"
+    category: str = "general"
+    difficulty: str = "moyen"
+    question_count: int = 10
+    question_time: int = 15
 
 
 class MultiplayerJoin(BaseModel):
@@ -2493,6 +2522,11 @@ class MultiplayerReady(BaseModel):
 
 class MultiplayerReaction(BaseModel):
     reaction: str
+
+
+class MultiplayerAnswer(BaseModel):
+    question_index: int
+    answer: int
 
 
 class MultiplayerConnectionManager:
@@ -2543,6 +2577,43 @@ class MultiplayerConnectionManager:
 multiplayer_connections = MultiplayerConnectionManager()
 
 
+def _public_game(room: dict) -> Optional[dict]:
+    game = room.get("game")
+    if not game:
+        return None
+    question = None
+    index = int(game.get("current_index", -1))
+    questions = game.get("questions", [])
+    if 0 <= index < len(questions):
+        source_question = questions[index]
+        question = {
+            "index": index,
+            "question": source_question["question"],
+            "options": source_question["options"],
+            "category": source_question.get("category", "general"),
+        }
+        if game.get("phase") in ("reveal", "ranking", "finished"):
+            correct_index = int(source_question["correct_answer"])
+            question.update({
+                "correct_answer": correct_index,
+                "correct_option": source_question["options"][correct_index],
+                "explanation": source_question.get("explanation"),
+                "source": source_question.get("source"),
+            })
+    return {
+        "phase": game.get("phase", "waiting"),
+        "current_index": index,
+        "total_questions": int(game.get("total_questions", 0)),
+        "question": question,
+        "question_started_at": game.get("question_started_at"),
+        "question_ends_at": game.get("question_ends_at"),
+        "answered_user_ids": [answer["user_id"] for answer in game.get("round_answers", [])],
+        "is_tiebreak": bool(game.get("is_tiebreak", False)),
+        "winner_ids": game.get("winner_ids", []),
+        "finished_at": game.get("finished_at"),
+    }
+
+
 def _public_room(room: dict) -> dict:
     if not room:
         return {}
@@ -2552,6 +2623,10 @@ def _public_room(room: dict) -> dict:
         "code": room["code"],
         "visibility": room["visibility"],
         "max_players": room["max_players"],
+        "category": room.get("category", "general"),
+        "difficulty": room.get("difficulty", "moyen"),
+        "question_count": int(room.get("question_count", 10)),
+        "question_time": int(room.get("question_time", 15)),
         "status": room.get("status", "waiting"),
         "creator_id": room.get("creator_id"),
         "player_count": len(players),
@@ -2563,12 +2638,22 @@ def _public_room(room: dict) -> dict:
                 "xp": int(player.get("xp", 0)),
                 "ready": bool(player.get("ready", False)),
                 "connected": bool(player.get("connected", False)),
+                "score": int(player.get("score", 0)),
+                "correct_count": int(player.get("correct_count", 0)),
+                "wrong_count": int(player.get("wrong_count", 0)),
+                "streak": int(player.get("streak", 0)),
+                "best_streak": int(player.get("best_streak", 0)),
+                "xp_earned": int(player.get("xp_earned", 0)),
+                "level_gained": int(player.get("level_gained", 0)),
+                "badges_earned": player.get("badges_earned", []),
+                "abandoned": bool(player.get("abandoned", False)),
                 "joined_at": player.get("joined_at"),
             }
             for player in players
         ],
         "created_at": room.get("created_at"),
         "updated_at": room.get("updated_at"),
+        "game": _public_game(room),
     }
 
 
@@ -2585,6 +2670,17 @@ def _new_multiplayer_player(user: dict) -> dict:
         "xp": int(user.get("quiz_xp", 0)),
         "ready": False,
         "connected": False,
+        "score": 0,
+        "correct_count": 0,
+        "wrong_count": 0,
+        "streak": 0,
+        "best_streak": 0,
+        "answered_count": 0,
+        "total_response_ms": 0,
+        "xp_earned": 0,
+        "level_gained": 0,
+        "badges_earned": [],
+        "abandoned": False,
         "joined_at": now,
         "last_seen": now,
     }
@@ -2629,6 +2725,277 @@ async def _cancel_multiplayer_countdown(code: str):
     )
 
 
+def _multiplayer_question_pool(room: dict) -> list:
+    category = room.get("category", "general")
+    pool = [q for q in QUIZ_QUESTIONS if q.get("id") in MULTIPLAYER_SAFE_QUESTION_IDS]
+    if category != "general":
+        category_pool = [q for q in pool if q.get("category") == category]
+        if category_pool:
+            pool = category_pool
+    random.shuffle(pool)
+    prepared = []
+    for question in pool:
+        correct_index = int(question["correct_answer"])
+        prepared.append({
+            "id": question["id"],
+            "question": question["question"],
+            "options": list(question["options"]),
+            "correct_answer": correct_index,
+            "category": question.get("category", "general"),
+            "explanation": f"La bonne réponse est « {question['options'][correct_index]} ».",
+            "source": MULTIPLAYER_QUESTION_SOURCES.get(question["id"], "Banque éditoriale NEURA AL-NOUR"),
+        })
+    return prepared
+
+
+def _rank_multiplayer_players(room: dict) -> list:
+    def ranking_key(player):
+        answered = max(1, int(player.get("answered_count", 0)))
+        average_ms = int(player.get("total_response_ms", 0)) / answered
+        return (
+            -int(player.get("score", 0)),
+            -int(player.get("correct_count", 0)),
+            average_ms,
+            player.get("joined_at", ""),
+        )
+    return sorted(room.get("players", []), key=ranking_key)
+
+
+async def _set_multiplayer_phase(code: str, phase: str, **fields):
+    now = datetime.now(timezone.utc).isoformat()
+    values = {"game.phase": phase, "updated_at": now, **fields}
+    await db.multiplayer_rooms.update_one(
+        {"code": code, "status": "playing"}, {"$set": values}
+    )
+    await _broadcast_room(code, f"game_{phase}")
+
+
+async def _finish_multiplayer_game(code: str):
+    room = await _room_by_code(code)
+    if not room or room.get("status") != "playing":
+        return
+    ranked = _rank_multiplayer_players(room)
+    if not ranked:
+        return
+    winning_score = int(ranked[0].get("score", 0))
+    winner_ids = [p["user_id"] for p in ranked if int(p.get("score", 0)) == winning_score]
+    now = datetime.now(timezone.utc).isoformat()
+
+    for position, player in enumerate(ranked, start=1):
+        participation_xp = 10 + int(player.get("correct_count", 0)) * 5
+        if player["user_id"] in winner_ids:
+            participation_xp += 20
+        user_doc = await db.users.find_one({"id": player["user_id"]}, {"_id": 0}) or {}
+        old_xp = int(user_doc.get("quiz_xp", 0))
+        old_level = int(user_doc.get("quiz_level", max(1, old_xp // 100 + 1)))
+        new_xp = old_xp + participation_xp
+        new_level = max(1, new_xp // 100 + 1)
+        previous_history = await db.multiplayer_history.find(
+            {"user_id": player["user_id"]}, {"_id": 0, "won": 1, "correct_count": 1}
+        ).to_list(1000)
+        total_correct = sum(int(item.get("correct_count", 0)) for item in previous_history) + int(player.get("correct_count", 0))
+        total_wins = sum(1 for item in previous_history if item.get("won")) + (1 if player["user_id"] in winner_ids else 0)
+        badges = []
+        if not previous_history:
+            badges.append("Premier quiz multijoueur")
+        for threshold in (100, 500, 1000):
+            if total_correct >= threshold:
+                badges.append(f"{threshold} bonnes réponses")
+        for threshold in (10, 50, 100):
+            if total_wins >= threshold:
+                badges.append(f"{threshold} victoires")
+        for threshold in (3, 5, 10):
+            if int(player.get("best_streak", 0)) >= threshold:
+                badges.append(f"Série de {threshold}")
+        await db.multiplayer_rooms.update_one(
+            {"code": code, "players.user_id": player["user_id"]},
+            {"$set": {
+                "players.$.xp_earned": participation_xp,
+                "players.$.level": new_level,
+                "players.$.xp": new_xp,
+                "players.$.level_gained": max(0, new_level - old_level),
+                "players.$.badges_earned": badges,
+            }},
+        )
+        await db.users.update_one(
+            {"id": player["user_id"]},
+            {"$set": {"quiz_xp": new_xp, "quiz_level": new_level}},
+        )
+        answered = int(player.get("answered_count", 0))
+        average_ms = round(int(player.get("total_response_ms", 0)) / answered) if answered else 0
+        await db.multiplayer_history.insert_one({
+            "id": str(uuid.uuid4()),
+            "room_id": room["room_id"],
+            "user_id": player["user_id"],
+            "played_at": now,
+            "score": int(player.get("score", 0)),
+            "position": position,
+            "player_count": len(ranked),
+            "category": room.get("category", "general"),
+            "difficulty": room.get("difficulty", "moyen"),
+            "correct_count": int(player.get("correct_count", 0)),
+            "wrong_count": int(player.get("wrong_count", 0)),
+            "average_response_ms": average_ms,
+            "xp_earned": participation_xp,
+            "level": new_level,
+            "level_gained": max(0, new_level - old_level),
+            "badges_earned": badges,
+            "won": player["user_id"] in winner_ids,
+            "abandoned": bool(player.get("abandoned", False)),
+        })
+
+    await db.multiplayer_rooms.update_one(
+        {"code": code, "status": "playing"},
+        {"$set": {
+            "status": "finished",
+            "game.phase": "finished",
+            "game.winner_ids": winner_ids,
+            "game.finished_at": now,
+            "updated_at": now,
+        }},
+    )
+    await _broadcast_room(code, "game_finished")
+
+
+async def _run_multiplayer_game(code: str):
+    try:
+        room = await _room_by_code(code)
+        if not room or room.get("status") != "playing":
+            return
+        game = room.get("game", {})
+        total = int(game.get("total_questions", 0))
+        for index in range(total):
+            room = await _room_by_code(code)
+            if not room or room.get("status") != "playing":
+                return
+            now = datetime.now(timezone.utc)
+            end = now + timedelta(seconds=int(room.get("question_time", 15)))
+            event = asyncio.Event()
+            multiplayer_round_events[code] = event
+            await db.multiplayer_rooms.update_one(
+                {"code": code, "status": "playing"},
+                {"$set": {
+                    "game.phase": "question",
+                    "game.current_index": index,
+                    "game.question_started_at": now.isoformat(),
+                    "game.question_ends_at": end.isoformat(),
+                    "game.round_answers": [],
+                    "game.is_tiebreak": False,
+                    "updated_at": now.isoformat(),
+                }, "$unset": {"game.first_correct_user_id": ""}},
+            )
+            await _broadcast_room(code, "game_question")
+            try:
+                await asyncio.wait_for(event.wait(), timeout=max(0.1, (end - datetime.now(timezone.utc)).total_seconds()))
+            except asyncio.TimeoutError:
+                pass
+
+            await _set_multiplayer_phase(code, "reveal")
+            await asyncio.sleep(3)
+            await _set_multiplayer_phase(code, "ranking")
+            await asyncio.sleep(2)
+
+        reserve_index = total
+        while True:
+            room = await _room_by_code(code)
+            ranked = _rank_multiplayer_players(room)
+            if not ranked:
+                return
+            top_score = int(ranked[0].get("score", 0))
+            tied_ids = [p["user_id"] for p in ranked if int(p.get("score", 0)) == top_score]
+            questions = room.get("game", {}).get("questions", [])
+            if len(tied_ids) <= 1:
+                break
+            if reserve_index >= len(questions):
+                # Deterministic final fallback after all decisive questions: best accuracy, then speed.
+                await db.multiplayer_rooms.update_one(
+                    {"code": code, "players.user_id": ranked[0]["user_id"]},
+                    {"$inc": {"players.$.score": 1}},
+                )
+                break
+            now = datetime.now(timezone.utc)
+            end = now + timedelta(seconds=int(room.get("question_time", 15)))
+            event = asyncio.Event()
+            multiplayer_round_events[code] = event
+            await db.multiplayer_rooms.update_one(
+                {"code": code, "status": "playing"},
+                {"$set": {
+                    "game.phase": "question",
+                    "game.current_index": reserve_index,
+                    "game.question_started_at": now.isoformat(),
+                    "game.question_ends_at": end.isoformat(),
+                    "game.round_answers": [],
+                    "game.is_tiebreak": True,
+                    "game.tiebreak_user_ids": tied_ids,
+                    "updated_at": now.isoformat(),
+                }, "$unset": {"game.first_correct_user_id": ""}},
+            )
+            await _broadcast_room(code, "game_tiebreak")
+            try:
+                await asyncio.wait_for(event.wait(), timeout=max(0.1, (end - datetime.now(timezone.utc)).total_seconds()))
+            except asyncio.TimeoutError:
+                pass
+            await _set_multiplayer_phase(code, "reveal")
+            await asyncio.sleep(3)
+            await _set_multiplayer_phase(code, "ranking")
+            await asyncio.sleep(2)
+            reserve_index += 1
+
+        await _finish_multiplayer_game(code)
+    except asyncio.CancelledError:
+        return
+    except Exception as error:
+        logger.error(f"Multiplayer game error for {code}: {error}")
+        await db.multiplayer_rooms.update_one(
+            {"code": code, "status": "playing"},
+            {"$set": {"status": "finished", "game.phase": "finished", "game.error": True}},
+        )
+        await _broadcast_room(code, "game_error")
+    finally:
+        multiplayer_round_events.pop(code, None)
+        if multiplayer_game_tasks.get(code) is asyncio.current_task():
+            multiplayer_game_tasks.pop(code, None)
+
+
+async def _start_multiplayer_game(code: str, countdown_id: str):
+    room = await _room_by_code(code)
+    if not room or room.get("countdown_id") != countdown_id or not _room_can_countdown(room):
+        await _cancel_multiplayer_countdown(code)
+        return False
+    questions = _multiplayer_question_pool(room)
+    requested = int(room.get("question_count", 10))
+    selected = questions[:]
+    if len(selected) < requested + 3:
+        general_room = {**room, "category": "general"}
+        selected_ids = {q["id"] for q in selected}
+        selected.extend(q for q in _multiplayer_question_pool(general_room) if q["id"] not in selected_ids)
+    main_total = min(requested, len(selected))
+    selected = selected[:min(len(selected), main_total + 3)]
+    if not selected:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    await db.multiplayer_rooms.update_one(
+        {"code": code, "countdown_id": countdown_id, "status": "countdown"},
+        {"$set": {
+            "status": "playing",
+            "game": {
+                "phase": "welcome",
+                "current_index": -1,
+                "total_questions": main_total,
+                "questions": selected,
+                "round_answers": [],
+                "started_at": now,
+                "winner_ids": [],
+            },
+            "updated_at": now,
+        }, "$unset": {"countdown_id": ""}},
+    )
+    await _broadcast_room(code, "game_welcome")
+    task = asyncio.create_task(_run_multiplayer_game(code))
+    multiplayer_game_tasks[code] = task
+    return True
+
+
 async def _multiplayer_countdown(code: str, countdown_id: str):
     try:
         for value in (3, 2, 1):
@@ -2648,13 +3015,7 @@ async def _multiplayer_countdown(code: str, countdown_id: str):
             await _cancel_multiplayer_countdown(code)
             await _broadcast_room(code, "countdown_cancelled")
             return
-        now = datetime.now(timezone.utc).isoformat()
-        await db.multiplayer_rooms.update_one(
-            {"code": code, "countdown_id": countdown_id, "status": "countdown"},
-            {"$set": {"status": "ready", "ready_at": now, "updated_at": now},
-             "$unset": {"countdown_id": ""}},
-        )
-        await _broadcast_room(code, "game_start")
+        await _start_multiplayer_game(code, countdown_id)
     except asyncio.CancelledError:
         return
     finally:
@@ -2717,6 +3078,16 @@ async def create_multiplayer_room(data: MultiplayerRoomCreate, user: dict = Depe
     visibility = data.visibility.strip().lower()
     if visibility not in ("public", "private"):
         raise HTTPException(status_code=400, detail="La salle doit être publique ou privée.")
+    category = data.category.strip().lower()
+    if category not in MULTIPLAYER_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Catégorie de quiz invalide.")
+    difficulty = data.difficulty.strip().lower()
+    if difficulty not in MULTIPLAYER_DIFFICULTIES:
+        raise HTTPException(status_code=400, detail="Difficulté de quiz invalide.")
+    if data.question_count < 3 or data.question_count > 15:
+        raise HTTPException(status_code=400, detail="Le quiz doit contenir entre 3 et 15 questions.")
+    if data.question_time not in (10, 15, 20, 30):
+        raise HTTPException(status_code=400, detail="Durée autorisée : 10, 15, 20 ou 30 secondes.")
     code = await _unique_room_code()
     now = datetime.now(timezone.utc).isoformat()
     room = {
@@ -2724,6 +3095,10 @@ async def create_multiplayer_room(data: MultiplayerRoomCreate, user: dict = Depe
         "code": code,
         "visibility": visibility,
         "max_players": data.max_players,
+        "category": category,
+        "difficulty": difficulty,
+        "question_count": data.question_count,
+        "question_time": data.question_time,
         "status": "waiting",
         "creator_id": user["id"],
         "players": [_new_multiplayer_player(user)],
@@ -2806,6 +3181,133 @@ async def set_multiplayer_ready(code: str, data: MultiplayerReady, user: dict = 
     return _public_room(updated)
 
 
+@api_router.post("/multiplayer/rooms/{code}/answer")
+async def submit_multiplayer_answer(code: str, data: MultiplayerAnswer, user: dict = Depends(get_current_user)):
+    room = await _room_by_code(code)
+    if not room or not any(player.get("user_id") == user["id"] for player in room.get("players", [])):
+        raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    game = room.get("game", {})
+    if room.get("status") != "playing" or game.get("phase") != "question":
+        raise HTTPException(status_code=409, detail="Aucune question n'accepte de réponse actuellement.")
+    current_index = int(game.get("current_index", -1))
+    if data.question_index != current_index:
+        raise HTTPException(status_code=409, detail="Cette question n'est plus active.")
+    questions = game.get("questions", [])
+    if current_index < 0 or current_index >= len(questions):
+        raise HTTPException(status_code=409, detail="Question active introuvable.")
+    question = questions[current_index]
+    is_tiebreak = bool(game.get("is_tiebreak", False))
+    if is_tiebreak and user["id"] not in game.get("tiebreak_user_ids", []):
+        raise HTTPException(status_code=403, detail="Seuls les joueurs à égalité répondent à la question décisive.")
+    if data.answer < 0 or data.answer >= len(question.get("options", [])):
+        raise HTTPException(status_code=400, detail="Réponse invalide.")
+    now = datetime.now(timezone.utc)
+    try:
+        started_at = datetime.fromisoformat(game["question_started_at"])
+        ends_at = datetime.fromisoformat(game["question_ends_at"])
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=409, detail="Chronomètre de question invalide.")
+    if now > ends_at:
+        raise HTTPException(status_code=409, detail="Le temps de réponse est terminé.")
+
+    response_ms = max(0, int((now - started_at).total_seconds() * 1000))
+    is_correct = data.answer == int(question["correct_answer"])
+    answer_record = {
+        "user_id": user["id"],
+        "answer": data.answer,
+        "is_correct": is_correct,
+        "response_ms": response_ms,
+        "answered_at": now.isoformat(),
+    }
+    inserted = await db.multiplayer_rooms.update_one(
+        {
+            "code": room["code"],
+            "status": "playing",
+            "game.phase": "question",
+            "game.current_index": current_index,
+            "game.round_answers.user_id": {"$ne": user["id"]},
+        },
+        {"$push": {"game.round_answers": answer_record}},
+    )
+    if not inserted.modified_count:
+        raise HTTPException(status_code=409, detail="Vous avez déjà répondu à cette question.")
+
+    first_correct = False
+    if is_correct:
+        first_claim = await db.multiplayer_rooms.update_one(
+            {"code": room["code"], "game.first_correct_user_id": {"$exists": False}},
+            {"$set": {"game.first_correct_user_id": user["id"]}},
+        )
+        first_correct = bool(first_claim.modified_count)
+    player = next(p for p in room["players"] if p.get("user_id") == user["id"])
+    previous_streak = int(player.get("streak", 0))
+    new_streak = previous_streak + 1 if is_correct else 0
+    time_limit_ms = int(room.get("question_time", 15)) * 1000
+    speed_bonus = 0 if is_tiebreak else (3 if is_correct and response_ms <= time_limit_ms // 4 else 0)
+    first_bonus = 0 if is_tiebreak else (5 if is_correct and first_correct else 0)
+    points = ((1 if first_correct else 0) if is_tiebreak else (10 + speed_bonus + first_bonus)) if is_correct else 0
+    player_update = {
+        "players.$.streak": new_streak,
+        "players.$.best_streak": max(int(player.get("best_streak", 0)), new_streak),
+    }
+    increments = {
+        "players.$.score": points,
+        "players.$.answered_count": 1,
+        "players.$.total_response_ms": response_ms,
+        "players.$.correct_count" if is_correct else "players.$.wrong_count": 1,
+    }
+    await db.multiplayer_rooms.update_one(
+        {"code": room["code"], "players.user_id": user["id"]},
+        {"$set": player_update, "$inc": increments},
+    )
+    updated = await _room_by_code(room["code"])
+    await multiplayer_connections.broadcast(room["code"], {
+        "type": "answer_received",
+        "user_id": user["id"],
+        "room": _public_room(updated),
+    })
+    active_players = [p for p in updated.get("players", []) if not p.get("abandoned")]
+    if is_tiebreak:
+        eligible_ids = set(updated.get("game", {}).get("tiebreak_user_ids", []))
+        active_players = [p for p in active_players if p["user_id"] in eligible_ids]
+    if (is_tiebreak and is_correct and first_correct) or len(updated.get("game", {}).get("round_answers", [])) >= len(active_players):
+        event = multiplayer_round_events.get(room["code"])
+        if event:
+            event.set()
+    return {
+        "accepted": True,
+        "correct": is_correct,
+        "points": points,
+        "base_points": 10 if is_correct else 0,
+        "first_bonus": first_bonus,
+        "speed_bonus": speed_bonus,
+        "streak": new_streak,
+    }
+
+
+@api_router.get("/multiplayer/history")
+async def get_multiplayer_history(user: dict = Depends(get_current_user)):
+    history = await db.multiplayer_history.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("played_at", -1).to_list(100)
+    total = len(history)
+    victories = sum(1 for item in history if item.get("won"))
+    correct = sum(int(item.get("correct_count", 0)) for item in history)
+    wrong = sum(int(item.get("wrong_count", 0)) for item in history)
+    answered = correct + wrong
+    average_values = [int(item.get("average_response_ms", 0)) for item in history if item.get("average_response_ms")]
+    return {
+        "matches": history,
+        "stats": {
+            "total_games": total,
+            "victories": victories,
+            "accuracy": round(correct / answered * 100, 1) if answered else 0,
+            "answered_questions": answered,
+            "average_response_ms": round(sum(average_values) / len(average_values)) if average_values else 0,
+        },
+    }
+
+
 @api_router.post("/multiplayer/rooms/{code}/reaction")
 async def send_multiplayer_reaction(code: str, data: MultiplayerReaction, user: dict = Depends(get_current_user)):
     room = await _room_by_code(code)
@@ -2830,6 +3332,27 @@ async def leave_multiplayer_room(code: str, user: dict = Depends(get_current_use
         return {"status": "left"}
     if not any(player.get("user_id") == user["id"] for player in room.get("players", [])):
         raise HTTPException(status_code=403, detail="Vous ne faites pas partie de cette salle.")
+    if room.get("status") == "playing":
+        now = datetime.now(timezone.utc).isoformat()
+        await db.multiplayer_rooms.update_one(
+            {"code": room["code"], "players.user_id": user["id"]},
+            {"$set": {
+                "players.$.connected": False,
+                "players.$.ready": False,
+                "players.$.abandoned": True,
+                "players.$.last_seen": now,
+                "updated_at": now,
+            }},
+        )
+        event = multiplayer_round_events.get(room["code"])
+        if event:
+            updated = await _room_by_code(room["code"])
+            active = [p for p in updated.get("players", []) if not p.get("abandoned")]
+            answers = updated.get("game", {}).get("round_answers", [])
+            if len(answers) >= len(active):
+                event.set()
+        await _broadcast_room(room["code"], "player_abandoned", user_id=user["id"])
+        return {"status": "abandoned"}
     await db.multiplayer_rooms.update_one(
         {"code": room["code"]},
         {"$pull": {"players": {"user_id": user["id"]}},
@@ -2916,17 +3439,28 @@ async def multiplayer_websocket(websocket: WebSocket, code: str, ticket: str):
         )
         if last_connection:
             now = datetime.now(timezone.utc).isoformat()
-            await db.multiplayer_rooms.update_one(
-                {"code": normalized_code, "players.user_id": user["id"]},
-                {"$set": {
-                    "players.$.connected": False,
-                    "players.$.ready": False,
-                    "players.$.last_seen": now,
-                    "status": "waiting",
-                    "updated_at": now,
-                }, "$unset": {"countdown_id": ""}},
-            )
-            await _cancel_multiplayer_countdown(normalized_code)
+            current_room = await _room_by_code(normalized_code)
+            if current_room and current_room.get("status") == "playing":
+                await db.multiplayer_rooms.update_one(
+                    {"code": normalized_code, "players.user_id": user["id"]},
+                    {"$set": {
+                        "players.$.connected": False,
+                        "players.$.last_seen": now,
+                        "updated_at": now,
+                    }},
+                )
+            else:
+                await db.multiplayer_rooms.update_one(
+                    {"code": normalized_code, "players.user_id": user["id"]},
+                    {"$set": {
+                        "players.$.connected": False,
+                        "players.$.ready": False,
+                        "players.$.last_seen": now,
+                        "status": "waiting",
+                        "updated_at": now,
+                    }, "$unset": {"countdown_id": ""}},
+                )
+                await _cancel_multiplayer_countdown(normalized_code)
             await _broadcast_room(normalized_code, "presence_changed", user_id=user["id"])
 
 # ============== RAMADAN ==============
