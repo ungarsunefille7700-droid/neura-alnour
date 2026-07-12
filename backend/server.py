@@ -1,6 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import json
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -316,6 +316,71 @@ app = FastAPI(title="NEURA AL-NOUR API", version="1.0.0")
 
 # Create router with /api prefix
 api_router = APIRouter(prefix="/api")
+
+SYSTEM_MODULES = [
+    {"name": "auth", "scope": "Connexion classique, Google, sessions JWT", "collections": ["users", "auth_sessions"]},
+    {"name": "chat", "scope": "Assistant IA, recherche Web, images utilisateur", "collections": ["conversations", "messages"]},
+    {"name": "quran", "scope": "Lecteur Coran existant, sourates, traduction, audio", "collections": []},
+    {"name": "quiz", "scope": "Quiz solo et multijoueur", "collections": ["quiz_sessions", "multiplayer_rooms", "multiplayer_history"]},
+    {"name": "islam_learning", "scope": "Academie de l'Islam, progression, notes, favoris", "collections": ["islam_learning_progress", "islam_learning_notes", "islam_messages"]},
+    {"name": "language_tutor", "scope": "Professeur de langues IA et progression", "collections": ["lang_messages", "lang_progress"]},
+    {"name": "developer", "scope": "Workspace developpeur IA, quotas, fichiers", "collections": ["developer_sessions", "developer_messages", "dev_files"]},
+    {"name": "admin", "scope": "Panel fondateur, logs, recompenses, signalements", "collections": ["founder_admin_logs", "founder_rewards", "multiplayer_question_reports"]},
+    {"name": "payments", "scope": "Abonnements Stripe", "collections": ["payment_transactions"]},
+    {"name": "videos", "scope": "Rappels video statiques", "collections": []},
+]
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), geolocation=(self), microphone=(self)",
+}
+
+
+@app.middleware("http")
+async def system_safety_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        elapsed_ms = round((time.perf_counter() - start) * 1000)
+        logger.exception(f"Unhandled request error {request_id}: {error}")
+        try:
+            await db.system_logs.insert_one({
+                "id": str(uuid.uuid4()),
+                "type": "unhandled_error",
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "elapsed_ms": elapsed_ms,
+                "error": str(error)[:500],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+        response = JSONResponse(status_code=500, content={"detail": "Erreur serveur controlee.", "request_id": request_id})
+    elapsed_ms = round((time.perf_counter() - start) * 1000)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time-ms"] = str(elapsed_ms)
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    if elapsed_ms >= 2000 and request.url.path.startswith("/api"):
+        try:
+            await db.system_logs.insert_one({
+                "id": str(uuid.uuid4()),
+                "type": "slow_request",
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": response.status_code,
+                "elapsed_ms": elapsed_ms,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+    return response
 
 # ============== MODELS ==============
 
@@ -4875,6 +4940,46 @@ async def root():
 @api_router.get("/health")
 async def health_check():
     return {"status": "healthy", "app": "NEURA AL-NOUR"}
+
+@api_router.get("/system/health")
+async def system_health():
+    started = time.perf_counter()
+    db_ok = True
+    db_error = None
+    try:
+        await db.command("ping")
+    except Exception as error:
+        db_ok = False
+        db_error = str(error)[:200]
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "app": "NEURA AL-NOUR",
+        "version": app.version,
+        "date": datetime.now(timezone.utc).isoformat(),
+        "database": {"ok": db_ok, "error": db_error},
+        "response_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+@api_router.get("/system/architecture")
+async def system_architecture(user: dict = Depends(get_current_user)):
+    role = _founder_admin_role(user)
+    return {
+        "app": "NEURA AL-NOUR",
+        "api_version": "v1",
+        "modules": SYSTEM_MODULES,
+        "principles": [
+            "Les modules religieux restent gratuits.",
+            "Les donnees sensibles restent cote serveur.",
+            "Les actions sensibles sont validees cote backend.",
+            "Le lecteur Coran et les recitations restent independants.",
+        ],
+        "admin_access": bool(role),
+    }
+
+@api_router.get("/system/logs")
+async def system_logs(limit: int = 100, user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    return await db.system_logs.find({}, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(limit, 200)))
 
 # Include router
 app.include_router(api_router)

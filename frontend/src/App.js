@@ -2,6 +2,7 @@ import { useState, useEffect, createContext, useContext } from "react";
 import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
+import AppErrorBoundary from "@/components/AppErrorBoundary";
 
 // Context
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
@@ -107,7 +108,9 @@ function AppContent() {
   
   return (
     <div className="min-h-screen bg-background">
-      <AppRouter />
+      <AppErrorBoundary>
+        <AppRouter />
+      </AppErrorBoundary>
       <Toaster position="top-right" richColors />
     </div>
   );
