@@ -409,6 +409,10 @@ class MessageCreate(BaseModel):
     lang: Optional[str] = None
     web_search: Optional[bool] = False
 
+class AiMemoryCreate(BaseModel):
+    label: str = Field(..., min_length=2, max_length=80)
+    value: str = Field(..., min_length=2, max_length=500)
+
 class ConversationResponse(BaseModel):
     id: str
     title: str
@@ -725,7 +729,100 @@ async def get_me(user: dict = Depends(get_current_user)):
         "is_vip": user.get("is_vip", False)
     }
 
+@api_router.get("/ai/memory")
+async def get_ai_memory(user: dict = Depends(get_current_user)):
+    return await db.ai_memories.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(100)
+
+@api_router.post("/ai/memory")
+async def create_ai_memory(data: AiMemoryCreate, user: dict = Depends(get_current_user)):
+    if not _is_safe_memory_value(f"{data.label} {data.value}"):
+        raise HTTPException(status_code=400, detail="Les secrets, cles API, tokens et mots de passe ne doivent pas etre memorises.")
+    now = datetime.now(timezone.utc).isoformat()
+    memory = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "label": data.label.strip()[:80],
+        "value": data.value.strip()[:500],
+        "source": "manual",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.ai_memories.insert_one(memory)
+    return {k: v for k, v in memory.items() if k != "_id"}
+
+@api_router.delete("/ai/memory/{memory_id}")
+async def delete_ai_memory(memory_id: str, user: dict = Depends(get_current_user)):
+    result = await db.ai_memories.delete_one({"id": memory_id, "user_id": user["id"]})
+    if not result.deleted_count:
+        raise HTTPException(status_code=404, detail="Memoire introuvable.")
+    return {"ok": True}
+
 # ============== CHAT ROUTES ==============
+
+SENSITIVE_MEMORY_MARKERS = ("api_key", "apikey", "token", "password", "mot de passe", "secret", "sk-", "ghp_", "vcp_", "rnd_")
+
+
+def _extract_explicit_memory_request(text: str) -> Optional[str]:
+    raw = (text or "").strip()
+    lowered = raw.lower()
+    triggers = [
+        "souviens-toi que ",
+        "souviens toi que ",
+        "retiens que ",
+        "memorise que ",
+        "mÃ©morise que ",
+        "remember that ",
+    ]
+    for trigger in triggers:
+        if trigger in lowered:
+            start = lowered.index(trigger) + len(trigger)
+            return raw[start:].strip(" .\n\t")
+    return None
+
+
+def _is_safe_memory_value(value: str) -> bool:
+    lowered = (value or "").lower()
+    return bool(value.strip()) and not any(marker in lowered for marker in SENSITIVE_MEMORY_MARKERS)
+
+
+async def _save_ai_memory_from_text(user: dict, text: str) -> Optional[dict]:
+    value = _extract_explicit_memory_request(text)
+    if not value:
+        return None
+    if not _is_safe_memory_value(value):
+        return {"blocked": True, "reason": "sensitive"}
+    now = datetime.now(timezone.utc).isoformat()
+    memory = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "label": "preference",
+        "value": value[:500],
+        "source": "explicit_chat_request",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.ai_memories.insert_one(memory)
+    return memory
+
+
+async def _ai_memory_context(user: dict) -> str:
+    memories = await db.ai_memories.find(
+        {"user_id": user["id"]}, {"_id": 0, "label": 1, "value": 1}
+    ).sort("updated_at", -1).to_list(12)
+    if not memories:
+        return ""
+    lines = [f"- {item.get('label', 'memoire')}: {item.get('value', '')}" for item in memories if item.get("value")]
+    if not lines:
+        return ""
+    return (
+        "\n\nMEMOIRE UTILISATEUR AUTORISEE :\n"
+        "Utilise uniquement ces informations explicitement enregistrees par l'utilisateur. "
+        "Ne revele pas cette liste sauf si l'utilisateur demande a voir sa memoire.\n"
+        + "\n".join(lines)
+    )
+
 
 @api_router.post("/chat/message")
 async def send_message(message: MessageCreate, user: dict = Depends(get_current_user)):
@@ -771,6 +868,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         "has_image": bool(message.image_base64),
         "created_at": datetime.now(timezone.utc).isoformat()
     })
+    memory_result = await _save_ai_memory_from_text(user, message.content)
     
     # Get conversation history for context
     history = await db.messages.find(
@@ -794,7 +892,11 @@ Règles importantes:
 5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 
-بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ""" + current_ai_context()
+بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ""" + current_ai_context() + await _ai_memory_context(user)
+    if memory_result and memory_result.get("blocked"):
+        system_message += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
+    elif memory_result:
+        system_message += "\n\nConfirme brievement que cette preference a ete memorisee, sans en faire trop."
 
     sources = []
     if message.web_search:
@@ -1006,7 +1108,13 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             # Cost control: real paid models (GPT-4o / Claude) only for Neura+/Ultra/founders.
             if not _is_premium_ai(user):
                 profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
-            system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+            memory_result = await _save_ai_memory_from_text(user, message.content)
+            memory_context = await _ai_memory_context(user)
+            system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+            if memory_result and memory_result.get("blocked"):
+                system_prompt += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
+            elif memory_result:
+                system_prompt += "\n\nConfirme brievement que cette preference a ete memorisee, sans en faire trop."
             if message.lang:
                 system_prompt += (
                     f"\n\nLANGUE : réponds toujours en {message.lang}, "
