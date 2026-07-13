@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
-import { ArrowLeft, Box, Check, Gift, Loader2, Sparkles, Star, Trophy, Zap } from 'lucide-react';
+import { ArrowLeft, Award, Box, Check, Gift, Loader2, Sparkles, Star, Trophy, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useAuth } from '@/contexts/AuthContext';
@@ -139,6 +139,37 @@ export default function GamificationPage() {
                 </div>
               );
             })}
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-end justify-between gap-3 mb-4">
+            <div>
+              <h1 className="text-2xl font-bold">Badges</h1>
+              <p className="text-sm text-muted-foreground">Des marques de progression simples, sans avantage injuste.</p>
+            </div>
+          </div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {(status.badges || []).map((badge) => (
+              <div key={badge.id} className={`rounded-lg border p-4 ${badge.unlocked ? 'border-primary/40 bg-primary/10' : 'border-border bg-card'}`}>
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-md flex items-center justify-center ${badge.unlocked ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="font-semibold truncate">{badge.title}</h2>
+                    <p className="text-xs text-muted-foreground">{badge.unlocked ? 'Debloque' : 'En cours'}</p>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground mt-3">{badge.description}</p>
+                {badge.target ? (
+                  <>
+                    <Progress value={Math.round((badge.progress / Math.max(1, badge.target)) * 100)} className="h-2 mt-3" />
+                    <p className="text-xs text-muted-foreground mt-2">{badge.progress}/{badge.target}</p>
+                  </>
+                ) : null}
+              </div>
+            ))}
           </div>
         </section>
 

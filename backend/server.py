@@ -3757,6 +3757,13 @@ CHEST_RARITIES = [
     {"rarity": "ultra_rare", "weight": 2, "xp": 160, "quiz_bonus": 10},
 ]
 
+GAMIFICATION_BADGES = [
+    {"id": "quiz_100", "title": "100 quiz", "description": "Terminer 100 quiz.", "type": "quiz", "target": 100},
+    {"id": "quiz_500", "title": "500 quiz", "description": "Terminer 500 quiz.", "type": "quiz", "target": 500},
+    {"id": "first_chest", "title": "Premier coffre", "description": "Ouvrir son premier coffre.", "type": "first_chest"},
+    {"id": "ultra_rare_chest", "title": "Coffre Ultra Rare", "description": "Obtenir un coffre ultra rare.", "type": "ultra_rare_chest"},
+]
+
 
 def _period_key(period: str) -> str:
     now = datetime.now(timezone.utc)
@@ -3801,6 +3808,34 @@ def _choose_chest_reward() -> dict:
     return CHEST_RARITIES[0]
 
 
+async def _gamification_badges(user: dict, chests: List[dict]) -> List[dict]:
+    quiz_total = await db.quiz_history.count_documents({"user_id": user["id"]})
+    multiplayer_total = await db.multiplayer_history.count_documents({"user_id": user["id"]})
+    total_quizzes = quiz_total + multiplayer_total
+    opened_chests = [chest for chest in chests if chest.get("status") == "opened"]
+    has_ultra_rare = any(chest.get("rarity") == "ultra_rare" for chest in opened_chests)
+
+    badges = []
+    for badge in GAMIFICATION_BADGES:
+        progress = 0
+        unlocked = False
+        if badge["type"] == "quiz":
+            progress = min(total_quizzes, badge["target"])
+            unlocked = total_quizzes >= badge["target"]
+        elif badge["type"] == "first_chest":
+            progress = 1 if opened_chests else 0
+            unlocked = bool(opened_chests)
+        elif badge["type"] == "ultra_rare_chest":
+            progress = 1 if has_ultra_rare else 0
+            unlocked = has_ultra_rare
+        badges.append({
+            **badge,
+            "progress": progress,
+            "unlocked": unlocked,
+        })
+    return badges
+
+
 @api_router.get("/gamification/status")
 async def gamification_status(user: dict = Depends(get_current_user)):
     metrics = await _gamification_metrics(user)
@@ -3821,11 +3856,13 @@ async def gamification_status(user: dict = Depends(get_current_user)):
     chests = await db.gamification_chests.find(
         {"user_id": user["id"]}, {"_id": 0}
     ).sort("created_at", -1).to_list(50)
+    badges = await _gamification_badges(user, chests)
     return {
         "xp": int(user.get("quiz_xp", 0)),
         "level": int(user.get("quiz_level", 1)),
         "missions": missions,
         "chests": chests,
+        "badges": badges,
     }
 
 
