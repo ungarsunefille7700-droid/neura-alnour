@@ -171,6 +171,60 @@ def current_server_time():
     return now, timezone_label
 
 
+def _current_date_direct_answer(user_text: str, lang: Optional[str] = None) -> Optional[str]:
+    """Answer simple current-date questions from the server clock, bypassing stale LLM context."""
+    text = (user_text or "").strip().lower()
+    normalized = (
+        text.replace("é", "e")
+        .replace("è", "e")
+        .replace("ê", "e")
+        .replace("à", "a")
+        .replace("ù", "u")
+        .replace("ç", "c")
+    )
+    asks_date = any(marker in normalized for marker in (
+        "quelle date", "quel date", "on est quel", "on et quel",
+        "on est quelle", "nous sommes quel", "nous sommes quelle",
+        "date aujourd", "jour sommes", "annee sommes", "quel jour",
+        "what date", "current date", "today's date", "what day is it",
+    ))
+    if not asks_date:
+        return None
+
+    now, timezone_label = current_server_time()
+    weekdays = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    months = [
+        "janvier", "fevrier", "mars", "avril", "mai", "juin",
+        "juillet", "aout", "septembre", "octobre", "novembre", "decembre",
+    ]
+    date_fr = f"{weekdays[now.weekday()]} {now.day} {months[now.month - 1]} {now.year}"
+    if lang and str(lang).lower().startswith("en"):
+        return f"Today is {now.strftime('%A, %B %d, %Y')} ({timezone_label})."
+    return f"Nous sommes aujourd'hui le {date_fr} ({timezone_label})."
+
+
+async def _save_direct_chat_answer(conversation_id: str, user_id: str, answer: str):
+    await db.messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "role": "assistant",
+        "content": answer,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.conversations.update_one(
+        {"id": conversation_id},
+        {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+
+async def _safe_background_db_write(awaitable, label: str):
+    try:
+        await awaitable
+    except Exception as exc:
+        logger.error("%s background write failed: %s", label, str(exc)[:200])
+
+
 def web_results_context(sources: list) -> str:
     if not sources:
         return (
@@ -527,15 +581,15 @@ async def google_auth_session(request: Request):
         picture = google_data.get("picture")
         session_token = google_data.get("session_token")
         
-        # Check if VIP admin
-        is_vip = any(admin["email"] == email for admin in VIP_ADMINS)
+        # Check founder/VIP accounts: they must get the top tier even through Google auth.
+        is_vip = is_vip_email(email)
         
         # Check if user exists
         existing_user = await db.users.find_one({"email": email}, {"_id": 0})
         
         if existing_user:
             user_id = existing_user["id"]
-            subscription = "developer" if is_vip else existing_user.get("subscription", "free")
+            subscription = "neura_ultra" if is_vip else existing_user.get("subscription", "free")
             user_write = db.users.update_one(
                 {"email": email},
                 {"$set": {
@@ -545,6 +599,7 @@ async def google_auth_session(request: Request):
                     "subscription": subscription
                 }}
             )
+            user_write_required = False
         else:
             # Create new user
             user_id = str(uuid.uuid4())
@@ -554,7 +609,7 @@ async def google_auth_session(request: Request):
                 "name": name,
                 "picture": picture,
                 "password": None,  # Google auth users don't have password
-                "subscription": "developer" if is_vip else "free",
+                "subscription": "neura_ultra" if is_vip else "free",
                 "is_vip": is_vip,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "screens_today": 0,
@@ -563,6 +618,7 @@ async def google_auth_session(request: Request):
             }
             subscription = user["subscription"]
             user_write = db.users.insert_one(user)
+            user_write_required = True
         
         # Store session in database
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
@@ -577,7 +633,11 @@ async def google_auth_session(request: Request):
             upsert=True
         )
         database_started_at = time.perf_counter()
-        await asyncio.gather(user_write, session_write)
+        if user_write_required:
+            await user_write
+        else:
+            asyncio.create_task(_safe_background_db_write(user_write, "google_user_update"))
+        asyncio.create_task(_safe_background_db_write(session_write, "google_session"))
         database_ms = round((time.perf_counter() - database_started_at) * 1000)
         
         # Create JWT token
@@ -868,6 +928,16 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         "has_image": bool(message.image_base64),
         "created_at": datetime.now(timezone.utc).isoformat()
     })
+
+    direct_answer = None if message.image_base64 else _current_date_direct_answer(message.content, message.lang)
+    if direct_answer:
+        await _save_direct_chat_answer(conversation_id, user["id"], direct_answer)
+        return {
+            "message": direct_answer,
+            "conversation_id": conversation_id,
+            "sources": [],
+        }
+
     memory_result = await _save_ai_memory_from_text(user, message.content)
     
     # Get conversation history for context
@@ -1097,6 +1167,14 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "content": message.content,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
+
+            direct_answer = _current_date_direct_answer(message.content, message.lang)
+            if direct_answer:
+                await _save_direct_chat_answer(conversation_id, user["id"], direct_answer)
+                yield sse({"type": "phase", "phase": "writing"})
+                yield sse({"type": "delta", "content": direct_answer})
+                yield sse({"type": "done", "conversation_id": conversation_id, "sources": []})
+                return
 
             # Conversation history (exclude the message we just saved)
             history = await db.messages.find(
