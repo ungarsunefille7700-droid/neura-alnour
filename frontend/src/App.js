@@ -93,7 +93,7 @@ function AppRouter() {
       <Route path="/support" element={<SupportPage />} />
       <Route path="/developer" element={<ProtectedRoute><DeveloperPage /></ProtectedRoute>} />
       <Route path="/language-tutor" element={<ProtectedRoute><LanguageTutorPage /></ProtectedRoute>} />
-      <Route path="/islam-learning" element={<ProtectedRoute><IslamLearningPage /></ProtectedRoute>} />
+      <Route path="/islam-learning" element={<IslamLearningPage />} />
       <Route path="/reminders" element={<RemindersPage />} />
       <Route path="/founder-admin" element={<ProtectedRoute><FounderAdminPage /></ProtectedRoute>} />
       <Route path="/rewards" element={<ProtectedRoute><GamificationPage /></ProtectedRoute>} />

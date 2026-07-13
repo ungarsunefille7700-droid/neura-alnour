@@ -65,8 +65,10 @@ export default function IslamLearningPage() {
   const [loadingProgress, setLoadingProgress] = useState(true);
   const bottomRef = useRef(null);
   const headers = useMemo(() => getAuthHeader(), [getAuthHeader]);
+  const isSignedIn = Boolean(user);
 
   const refreshMeta = async () => {
+    if (!isSignedIn) return;
     const [goalsRes, certificateRes] = await Promise.all([
       axios.get(`${API}/islam-learning/goals`, { headers }),
       axios.get(`${API}/islam-learning/certificate`, { headers }),
@@ -78,23 +80,30 @@ export default function IslamLearningPage() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [chaptersRes, progressRes, notesRes, goalsRes, certificateRes] = await Promise.all([
-          axios.get(`${API}/islam-learning/chapters`),
-          axios.get(`${API}/islam-learning/progress`, { headers }),
-          axios.get(`${API}/islam-learning/notes`, { headers }),
-          axios.get(`${API}/islam-learning/goals`, { headers }),
-          axios.get(`${API}/islam-learning/certificate`, { headers }),
-        ]);
+        const chaptersRes = await axios.get(`${API}/islam-learning/chapters`);
         const chapters = (chaptersRes.data || []).map((chapter) => ({
           ...chapter,
           icon: chapterIcon(chapter.level),
         }));
         setTopics(chapters.length ? chapters : FALLBACK_TOPICS);
-        setProgress({ favorite_topics: [], completed_topics: [], ...(progressRes.data || {}) });
-        setLevel(progressRes.data?.level || 'debutant');
-        setNotes(notesRes.data || []);
-        setGoals(goalsRes.data);
-        setCertificate(certificateRes.data);
+        if (isSignedIn) {
+          const [progressRes, notesRes, goalsRes, certificateRes] = await Promise.all([
+            axios.get(`${API}/islam-learning/progress`, { headers }),
+            axios.get(`${API}/islam-learning/notes`, { headers }),
+            axios.get(`${API}/islam-learning/goals`, { headers }),
+            axios.get(`${API}/islam-learning/certificate`, { headers }),
+          ]);
+          setProgress({ favorite_topics: [], completed_topics: [], ...(progressRes.data || {}) });
+          setLevel(progressRes.data?.level || 'debutant');
+          setNotes(notesRes.data || []);
+          setGoals(goalsRes.data);
+          setCertificate(certificateRes.data);
+        } else {
+          setProgress({ completed_topics: [], favorite_topics: [], current_topic: null });
+          setNotes([]);
+          setGoals({ goals: [], completed_chapters: 0, total_chapters: chapters.length || FALLBACK_TOPICS.length });
+          setCertificate(null);
+        }
       } catch (error) {
         console.error('Islam learning load error:', error);
       } finally {
@@ -102,7 +111,7 @@ export default function IslamLearningPage() {
       }
     };
     load();
-  }, [headers, user]);
+  }, [headers, isSignedIn]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -117,6 +126,17 @@ export default function IslamLearningPage() {
   const sendMessage = async (text, topic = selectedTopic) => {
     const content = (text ?? input).trim();
     if (!content || busy) return;
+    if (!isSignedIn) {
+      setMessages((current) => [
+        ...current,
+        {
+          role: 'assistant',
+          content: "Connecte-toi gratuitement pour utiliser le professeur IA, garder ton historique et reprendre ton apprentissage plus tard. Les cours restent lisibles sans abonnement.",
+        },
+      ]);
+      setView('assistant');
+      return;
+    }
     setInput('');
     setMessages((current) => [...current, { role: 'user', content }]);
     setBusy(true);
@@ -152,6 +172,7 @@ export default function IslamLearningPage() {
 
   const toggleTopicCompletion = async () => {
     if (!selectedTopic) return;
+    if (!isSignedIn) return;
     const isCompleted = progress.completed_topics?.includes(selectedTopic.id);
     try {
       const response = await axios.post(
@@ -168,6 +189,7 @@ export default function IslamLearningPage() {
 
   const saveNote = async () => {
     if (!selectedTopic) return;
+    if (!isSignedIn) return;
     try {
       const response = await axios.post(
         `${API}/islam-learning/notes`,
@@ -183,6 +205,18 @@ export default function IslamLearningPage() {
 
   const toggleFavorite = async (topic, event) => {
     event.stopPropagation();
+    if (!isSignedIn) {
+      setSelectedTopic(topic);
+      setView('assistant');
+      setMessages((current) => [
+        ...current,
+        {
+          role: 'assistant',
+          content: "Connecte-toi gratuitement pour enregistrer tes favoris, tes notes et ta progression.",
+        },
+      ]);
+      return;
+    }
     const favorite = !progress.favorite_topics?.includes(topic.id);
     try {
       const response = await axios.post(
@@ -230,6 +264,12 @@ export default function IslamLearningPage() {
           <p className="text-muted-foreground max-w-3xl">
             Parcours progressif, professeur IA prudent, notes personnelles, favoris, objectifs et certificat de fin de parcours.
           </p>
+          {!isSignedIn && (
+            <div className="mt-4 rounded-lg border border-primary/25 bg-primary/5 p-4 text-sm text-muted-foreground">
+              Les cours d'islam sont accessibles gratuitement. Connecte-toi gratuitement pour activer le professeur IA, les notes, les favoris et la sauvegarde de progression.
+              <Link to="/auth" className="ml-2 font-medium text-primary hover:underline">Se connecter</Link>
+            </div>
+          )}
           <div className="mt-5 max-w-xl">
             <div className="flex justify-between text-sm mb-2">
               <span>{loadingProgress ? 'Chargement...' : `${completedCount} / ${topics.length} chapitres termines`}</span>
@@ -330,7 +370,7 @@ export default function IslamLearningPage() {
                   </p>
                 </div>
                 {selectedTopic && messages.some((message) => message.role === 'assistant') && (
-                  <Button variant="outline" className="ml-auto" onClick={toggleTopicCompletion}>
+                  <Button variant="outline" className="ml-auto" onClick={toggleTopicCompletion} disabled={!isSignedIn}>
                     <Check className="w-4 h-4 mr-2" />
                     {progress.completed_topics?.includes(selectedTopic.id) ? 'Marquer a revoir' : 'Etape terminee'}
                   </Button>
@@ -399,11 +439,11 @@ export default function IslamLearningPage() {
                 <textarea
                   value={noteDraft}
                   onChange={(event) => setNoteDraft(event.target.value)}
-                  placeholder={selectedTopic ? `Note sur ${selectedTopic.title}` : 'Choisis un chapitre pour prendre une note.'}
-                  disabled={!selectedTopic}
+                  placeholder={!isSignedIn ? 'Connecte-toi gratuitement pour sauvegarder tes notes.' : selectedTopic ? `Note sur ${selectedTopic.title}` : 'Choisis un chapitre pour prendre une note.'}
+                  disabled={!selectedTopic || !isSignedIn}
                   className="w-full h-32 rounded-md bg-muted border border-border p-3 text-sm resize-none outline-none focus:ring-2 focus:ring-primary"
                 />
-                <Button onClick={saveNote} disabled={!selectedTopic} className="w-full mt-3">Sauvegarder la note</Button>
+                <Button onClick={saveNote} disabled={!selectedTopic || !isSignedIn} className="w-full mt-3">Sauvegarder la note</Button>
               </div>
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
                 <div className="flex gap-3">
