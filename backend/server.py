@@ -23,6 +23,7 @@ from urllib.parse import quote
 import time
 import secrets
 import hashlib
+import re
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -2905,6 +2906,18 @@ class MultiplayerConnectionManager:
 
 multiplayer_connections = MultiplayerConnectionManager()
 
+CONTACT_SHARING_PATTERN = re.compile(
+    r"(https?://|www\.|[\w.+-]+@[\w-]+\.[\w.-]+|\+?\d[\d\s().-]{7,}\d)",
+    re.IGNORECASE,
+)
+
+
+def _safe_public_display_name(name: Optional[str]) -> str:
+    value = (name or "Joueur").strip()
+    if not value or CONTACT_SHARING_PATTERN.search(value):
+        return "Joueur"
+    return value[:40]
+
 
 def _public_game(room: dict) -> Optional[dict]:
     game = room.get("game")
@@ -2963,7 +2976,7 @@ def _public_room(room: dict) -> dict:
         "players": [
             {
                 "user_id": player["user_id"],
-                "name": player.get("name", "Joueur"),
+                "name": _safe_public_display_name(player.get("name")),
                 "level": int(player.get("level", 1)),
                 "xp": int(player.get("xp", 0)),
                 "ready": bool(player.get("ready", False)),
@@ -3096,7 +3109,7 @@ def _new_multiplayer_player(user: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     return {
         "user_id": user["id"],
-        "name": user.get("name") or "Joueur",
+        "name": _safe_public_display_name(user.get("name")),
         "level": int(user.get("quiz_level", 1)),
         "xp": int(user.get("quiz_xp", 0)),
         "ready": False,
