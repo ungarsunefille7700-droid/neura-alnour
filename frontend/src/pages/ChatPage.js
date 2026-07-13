@@ -29,6 +29,7 @@ import {
   Heart,
   Brain,
   Image as ImageIcon,
+  FileText,
   Loader2,
   Crown,
   Zap,
@@ -143,6 +144,7 @@ const ChatPage = () => {
   const [currentConversation, setCurrentConversation] = useState(conversationId);
   const [selectedImage, setSelectedImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
+  const [selectedDocument, setSelectedDocument] = useState(null);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [imageGenRemaining, setImageGenRemaining] = useState(null);
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('neura_model') || 'chatgpt');
@@ -347,11 +349,14 @@ const ChatPage = () => {
   };
 
   // Developer (Code) mode: dedicated assistant endpoint with per-plan quotas.
-  const sendDevMessage = async (userMessage, tempId, imageToSend) => {
+  const sendDevMessage = async (userMessage, tempId, imageToSend, documentToSend = null) => {
     setLoading(true);
     try {
+      const devContent = documentToSend
+        ? `${userMessage || 'Analyse ce document.'}\n\nDocument fourni (${documentToSend.name}) :\n\`\`\`text\n${documentToSend.content}\n\`\`\``
+        : userMessage;
       const r = await axios.post(`${API}/developer/chat`,
-        { content: userMessage, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch, role: devRole || null },
+        { content: devContent, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch, role: devRole || null },
         { headers: getAuthHeader(), timeout: 120000 });
       setDevSessionId(r.data.session_id);
       if (r.data.quota) setDevStatus(s => s ? { ...s, remaining: r.data.quota.remaining, used: r.data.quota.used, reset_at: r.data.quota.reset_at } : s);
@@ -381,7 +386,7 @@ const ChatPage = () => {
 
   const sendMessage = async (e) => {
     e.preventDefault();
-    if ((!inputMessage.trim() && !selectedImage) || loading || streaming) return;
+    if ((!inputMessage.trim() && !selectedImage && !selectedDocument) || loading || streaming) return;
 
     const userMessage = inputMessage.trim();
     setInputMessage('');
@@ -390,8 +395,9 @@ const ChatPage = () => {
     const tempUserMsg = {
       id: `temp-${Date.now()}`,
       role: 'user',
-      content: userMessage || (selectedImage ? '[Image envoyée]' : ''),
+      content: userMessage || (selectedImage ? '[Image envoyée]' : selectedDocument ? `[Document envoyé : ${selectedDocument.name}]` : ''),
       has_image: !!selectedImage,
+      document_name: selectedDocument?.name,
       image_preview: imagePreview,
       created_at: new Date().toISOString()
     };
@@ -399,17 +405,19 @@ const ChatPage = () => {
 
     // Clear image after adding to message
     const imageToSend = selectedImage;
+    const documentToSend = selectedDocument;
     setSelectedImage(null);
     setImagePreview(null);
+    setSelectedDocument(null);
 
     // Developer (Code) mode -> dedicated assistant endpoint (supports image + web).
     if (devMode) {
-      await sendDevMessage(userMessage, tempUserMsg.id, imageToSend);
+      await sendDevMessage(userMessage, tempUserMsg.id, imageToSend, documentToSend);
       return;
     }
 
     // Web search uses the SSE streaming endpoint (text only).
-    if (webSearch && !imageToSend) {
+    if (webSearch && !imageToSend && !documentToSend) {
       await sendMessageStream(userMessage, tempUserMsg.id);
       return;
     }
@@ -417,15 +425,17 @@ const ChatPage = () => {
     setLoading(true);
     try {
       const response = await axios.post(`${API}/chat/message`, {
-        content: userMessage || "Analyse cette image s'il te plaît.",
+        content: userMessage || (documentToSend ? "Analyse ce document s'il te plaît." : "Analyse cette image s'il te plaît."),
         conversation_id: currentConversation,
         image_base64: imageToSend,
+        document_name: documentToSend?.name || null,
+        document_text: documentToSend?.content || null,
         model: selectedModel,
         lang: languageName,
         web_search: webSearch
       }, {
         headers: getAuthHeader(),
-        timeout: 120000 // 2 minute timeout for image analysis
+        timeout: 120000 // 2 minute timeout for image/document analysis
       });
 
       // Update with real response
@@ -459,32 +469,68 @@ const ChatPage = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check file size (max 5MB)
-    if (file.size > 5 * 1024 * 1024) {
+    const isImage = file.type.startsWith('image/');
+    const textLike = (
+      file.type.startsWith('text/') ||
+      [
+        'application/json',
+        'application/xml',
+        'application/javascript',
+        'application/typescript',
+        'application/x-python-code'
+      ].includes(file.type) ||
+      /\.(txt|md|csv|json|xml|html|css|js|jsx|ts|tsx|py|java|php|sql|yml|yaml|toml|ini|log)$/i.test(file.name)
+    );
+
+    // Check file size (max 5MB for images, 1MB for text/code documents)
+    if (isImage && file.size > 5 * 1024 * 1024) {
       toast.error('L\'image ne doit pas dépasser 5 Mo');
       return;
     }
 
-    // Check file type
-    if (!file.type.startsWith('image/')) {
-      toast.error('Veuillez sélectionner une image');
+    if (!isImage && file.size > 1024 * 1024) {
+      toast.error('Le document texte ne doit pas dépasser 1 Mo');
+      return;
+    }
+
+    if (!isImage && !textLike) {
+      toast.error('Format non pris en charge. Utilise une image ou un fichier texte/code.');
       return;
     }
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const base64 = event.target.result;
-      setImagePreview(base64);
-      // Remove the data:image/xxx;base64, prefix for the API
-      const base64Data = base64.split(',')[1];
-      setSelectedImage(base64Data);
+      if (isImage) {
+        const base64 = event.target.result;
+        setImagePreview(base64);
+        setSelectedDocument(null);
+        // Remove the data:image/xxx;base64, prefix for the API
+        const base64Data = base64.split(',')[1];
+        setSelectedImage(base64Data);
+      } else {
+        setSelectedImage(null);
+        setImagePreview(null);
+        setSelectedDocument({
+          name: file.name,
+          type: file.type || 'text/plain',
+          content: String(event.target.result || '').slice(0, 20000)
+        });
+      }
     };
-    reader.readAsDataURL(file);
+    if (isImage) reader.readAsDataURL(file);
+    else reader.readAsText(file);
   };
 
   const removeSelectedImage = () => {
     setSelectedImage(null);
     setImagePreview(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const removeSelectedDocument = () => {
+    setSelectedDocument(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -848,6 +894,21 @@ const ChatPage = () => {
                 </button>
               </div>
             )}
+            {selectedDocument && (
+              <div className="mb-3 inline-flex max-w-full items-center gap-3 rounded-lg border border-border bg-muted px-3 py-2 text-sm">
+                <FileText className="h-4 w-4 text-primary shrink-0" />
+                <span className="truncate">{selectedDocument.name}</span>
+                <button
+                  type="button"
+                  onClick={removeSelectedDocument}
+                  className="ml-1 rounded-full p-1 text-muted-foreground hover:text-foreground"
+                  data-testid="remove-document-btn"
+                  aria-label="Retirer le document"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
             
             <div className="mb-2 flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Modèle :</span>
@@ -939,7 +1000,7 @@ const ChatPage = () => {
                 type="file"
                 ref={fileInputRef}
                 onChange={handleImageSelect}
-                accept="image/*"
+                accept="image/*,.txt,.md,.csv,.json,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.php,.sql,.yml,.yaml,.toml,.ini,.log"
                 className="hidden"
                 data-testid="image-input"
               />
@@ -991,7 +1052,7 @@ const ChatPage = () => {
                   ref={inputRef}
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  placeholder={selectedImage ? "Ajoutez un message (optionnel)..." : "Posez votre question..."}
+                  placeholder={selectedImage || selectedDocument ? "Ajoutez un message (optionnel)..." : "Posez votre question..."}
                   className="pr-4 h-12 rounded-full bg-muted border-0"
                   disabled={loading}
                   data-testid="chat-input"
@@ -1001,7 +1062,7 @@ const ChatPage = () => {
                 type="submit" 
                 size="icon" 
                 className="h-12 w-12 rounded-full"
-                disabled={loading || generatingImage || (!inputMessage.trim() && !selectedImage)}
+                disabled={loading || generatingImage || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
                 data-testid="send-message-btn"
               >
                 <Send className="w-5 h-5" />

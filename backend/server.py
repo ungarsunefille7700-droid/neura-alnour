@@ -459,6 +459,8 @@ class MessageCreate(BaseModel):
     content: str
     conversation_id: Optional[str] = None
     image_base64: Optional[str] = None
+    document_name: Optional[str] = None
+    document_text: Optional[str] = None
     model: Optional[str] = None
     lang: Optional[str] = None
     web_search: Optional[bool] = False
@@ -929,7 +931,20 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         "created_at": datetime.now(timezone.utc).isoformat()
     })
 
-    direct_answer = None if message.image_base64 else _current_date_direct_answer(message.content, message.lang)
+    document_context = ""
+    if message.document_text:
+        clean_doc_name = (message.document_name or "document").strip()[:120]
+        clean_doc_text = message.document_text[:20000]
+        document_context = (
+            f"\n\nDOCUMENT FOURNI PAR L'UTILISATEUR ({clean_doc_name}) :\n"
+            "```text\n"
+            f"{clean_doc_text}\n"
+            "```\n"
+            "Analyse ce document uniquement comme contexte fourni par l'utilisateur. "
+            "Ne prétends pas avoir lu un fichier externe au-delà de ce contenu."
+        )
+
+    direct_answer = None if (message.image_base64 or message.document_text) else _current_date_direct_answer(message.content, message.lang)
     if direct_answer:
         await _save_direct_chat_answer(conversation_id, user["id"], direct_answer)
         return {
@@ -963,6 +978,7 @@ Règles importantes:
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 
 بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ""" + current_ai_context() + await _ai_memory_context(user)
+    system_message += document_context
     if memory_result and memory_result.get("blocked"):
         system_message += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
     elif memory_result:
