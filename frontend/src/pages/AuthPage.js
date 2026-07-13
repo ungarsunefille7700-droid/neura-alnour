@@ -32,7 +32,9 @@ const AuthPage = () => {
 
   useEffect(() => {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 6000);
+    // Render free instances can need ~20s after sleep. Let the warmup finish
+    // while the user is on the auth page instead of aborting too early.
+    const timeout = window.setTimeout(() => controller.abort(), 25000);
     fetch(`${API}/health`, {
       cache: 'no-store',
       signal: controller.signal,
