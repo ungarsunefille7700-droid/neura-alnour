@@ -100,6 +100,8 @@ export default function LanguageTutorPage() {
   const recognitionRef = useRef(null);
   const recognitionTextRef = useRef('');
   const recognitionSentRef = useRef(false);
+  const recognitionConfidenceRef = useRef(1);
+  const recognitionFallbackRef = useRef(false);
   const bottomRef = useRef(null);
   const callModeRef = useRef(false);
   useEffect(() => { callModeRef.current = callMode; }, [callMode]);
@@ -230,19 +232,25 @@ export default function LanguageTutorPage() {
   }, [input, busy, langName, level, sessionId, getAuthHeader, speak]);
 
   // --- Speech to text ---
-  const startListening = useCallback(() => {
+  const startListening = useCallback((fallbackLocale = null) => {
     if (!sttSupported) return;
     try {
       try { recognitionRef.current?.abort(); } catch (error) {}
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       const rec = new SR();
-      rec.lang = speechLang(language);
+      const primaryLocale = speechLang(language);
+      rec.lang = fallbackLocale || primaryLocale;
       rec.interimResults = true;
       rec.maxAlternatives = 5;
-      rec.continuous = false;
+      rec.continuous = Boolean(callModeRef.current);
       recognitionTextRef.current = '';
       recognitionSentRef.current = false;
-      rec.onstart = () => { setListening(true); setVoiceNotice(''); };
+      recognitionConfidenceRef.current = 1;
+      recognitionFallbackRef.current = Boolean(fallbackLocale);
+      rec.onstart = () => {
+        setListening(true);
+        setVoiceNotice(fallbackLocale ? 'Je retente en français pour mieux comprendre...' : '');
+      };
       rec.onerror = (event) => {
         setListening(false);
         const notices = {
@@ -252,6 +260,12 @@ export default function LanguageTutorPage() {
           'network': "La reconnaissance vocale est momentanément indisponible. Vérifie la connexion puis réessaie.",
           'no-speech': "Je n'ai pas entendu de phrase. Rapproche-toi du microphone et parle clairement.",
         };
+        if (event.error === 'no-speech' && callModeRef.current) {
+          window.setTimeout(() => {
+            if (callModeRef.current) startListening(fallbackLocale);
+          }, 700);
+          return;
+        }
         if (event.error !== 'aborted') {
           setVoiceNotice(notices[event.error] || "Je n'ai pas bien compris. Réessaie en parlant un peu plus lentement.");
         }
@@ -261,6 +275,17 @@ export default function LanguageTutorPage() {
         setListening(false);
         const said = recognitionTextRef.current.trim();
         if (said && !recognitionSentRef.current) {
+          const shouldRetryFrench = (
+            !recognitionFallbackRef.current
+            && primaryLocale.toLowerCase() !== 'fr-fr'
+            && recognitionConfidenceRef.current < 0.55
+          );
+          if (shouldRetryFrench) {
+            window.setTimeout(() => {
+              if (!recognitionSentRef.current) startListening('fr-FR');
+            }, 250);
+            return;
+          }
           recognitionSentRef.current = true;
           setVoiceNotice('');
           send(said, true);
@@ -274,6 +299,9 @@ export default function LanguageTutorPage() {
           let best = result[0];
           for (let alt = 1; alt < result.length; alt += 1) {
             if ((result[alt].confidence || 0) > (best.confidence || 0)) best = result[alt];
+          }
+          if (typeof best.confidence === 'number' && best.confidence > 0) {
+            recognitionConfidenceRef.current = Math.min(recognitionConfidenceRef.current, best.confidence);
           }
           if (result.isFinal) finalText = `${finalText} ${best.transcript}`.trim();
           else interimText = `${interimText} ${best.transcript}`.trim();
