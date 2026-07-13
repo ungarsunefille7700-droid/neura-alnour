@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
   Code2, Send, Crown, Zap, Clock, Plus, History as HistoryIcon,
-  Copy, Check, ArrowUpCircle, Loader2
+  Copy, Check, ArrowUpCircle, Loader2, BookOpen
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -22,6 +22,74 @@ const DEV_ROLES = [
   { value: 'security', label: 'Expert sécurité' },
   { value: 'database', label: 'Expert base de données' },
   { value: 'mobile', label: 'Mobile senior' },
+];
+
+const PROMPT_LIBRARY = [
+  {
+    category: 'React',
+    prompts: [
+      'Crée un composant React propre avec props, états de chargement, erreurs et responsive.',
+      'Analyse ce composant React et propose une version plus lisible sans casser son comportement.',
+      'Ajoute une page React complète avec route, appels API, états loading/empty/error et design cohérent.',
+    ],
+  },
+  {
+    category: 'API',
+    prompts: [
+      'Crée une API REST propre avec validation, erreurs contrôlées, sécurité et exemples de réponses.',
+      'Analyse cette route API, trouve les risques et propose une correction robuste.',
+      'Ajoute un endpoint backend avec modèle de données, contrôle d’accès et tests à prévoir.',
+    ],
+  },
+  {
+    category: 'Stripe',
+    prompts: [
+      'Vérifie cette intégration Stripe sans toucher aux clés, explique les risques et propose un correctif sûr.',
+      'Crée un flux abonnement Stripe propre avec checkout, webhook, statut utilisateur et erreurs contrôlées.',
+    ],
+  },
+  {
+    category: 'Authentification',
+    prompts: [
+      'Analyse ce système de login et propose une correction sans casser les comptes existants.',
+      'Ajoute une protection backend pour réserver une route aux admins ou aux abonnés premium.',
+    ],
+  },
+  {
+    category: 'Dashboard',
+    prompts: [
+      'Crée un dashboard avec cartes statistiques, filtres, tableau, états vides et responsive.',
+      'Modernise cette page dashboard en gardant la logique métier existante.',
+    ],
+  },
+  {
+    category: 'Base de données',
+    prompts: [
+      'Conçois un schéma MongoDB propre pour cette fonctionnalité avec index, relations et limites.',
+      'Analyse cette requête base de données et propose une optimisation sûre.',
+    ],
+  },
+  {
+    category: 'SaaS',
+    prompts: [
+      'Découpe ce projet SaaS en étapes, pose les questions indispensables avant de générer le code.',
+      'Crée l’architecture frontend/backend/base de données d’un MVP SaaS sans pseudo-code.',
+    ],
+  },
+  {
+    category: 'Mobile',
+    prompts: [
+      'Crée une structure React Native propre avec navigation, écrans, appels API et états offline.',
+      'Analyse cette idée d’application mobile et pose les bonnes questions avant de coder.',
+    ],
+  },
+  {
+    category: 'FiveM',
+    prompts: [
+      'Je veux créer un serveur FiveM : pose-moi les bonnes questions avant de générer le moindre code.',
+      'Crée un script FiveM simple et propre en précisant ESX/QBCore, fichiers, config et installation.',
+    ],
+  },
 ];
 
 // Code block with a copy button (used to render fenced code from the AI).
@@ -81,6 +149,7 @@ export default function DeveloperPage() {
   const [history, setHistory] = useState([]);
   const [limitMsg, setLimitMsg] = useState(null);
   const [role, setRole] = useState('');
+  const [promptCategory, setPromptCategory] = useState(PROMPT_LIBRARY[0].category);
   const bottomRef = useRef(null);
 
   const fetchStatus = useCallback(async () => {
@@ -233,13 +302,29 @@ export default function DeveloperPage() {
                 Décris une fonctionnalité, un bug à corriger, une page à créer ou une API.
                 L'IA propose un plan, les fichiers concernés (chemin exact) et le code prêt à copier.
               </p>
-              <div className="grid sm:grid-cols-2 gap-2 text-left text-sm">
-                {['Ajoute une page premium en React', 'Corrige ce bug : [colle ton erreur]', 'Crée une API Express pour des utilisateurs', 'Crée un petit script FiveM ESX'].map((ex, i) => (
-                  <button key={i} onClick={() => setInput(ex)}
-                    className="px-4 py-3 rounded-xl border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-                    {ex}
-                  </button>
-                ))}
+              <div className="rounded-2xl border border-border bg-card/60 p-4 text-left">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <BookOpen className="w-4 h-4 text-primary" />
+                  <span className="font-medium">Bibliothèque de prompts</span>
+                  <select
+                    value={promptCategory}
+                    onChange={(e) => setPromptCategory(e.target.value)}
+                    className="ml-auto h-9 rounded-full border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-primary"
+                    data-testid="developer-prompt-category"
+                  >
+                    {PROMPT_LIBRARY.map((group) => (
+                      <option key={group.category} value={group.category}>{group.category}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid sm:grid-cols-2 gap-2 text-sm">
+                  {PROMPT_LIBRARY.find((group) => group.category === promptCategory)?.prompts.map((prompt, i) => (
+                    <button key={i} onClick={() => setInput(prompt)}
+                      className="px-4 py-3 rounded-xl border border-border hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
