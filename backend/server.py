@@ -526,6 +526,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
         if not user:
             raise HTTPException(status_code=401, detail="Utilisateur non trouvé")
+        if is_vip_email(user.get("email")):
+            user = {**user, "is_vip": True, "subscription": "neura_ultra"}
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expiré")
@@ -538,6 +540,8 @@ async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+        if user and is_vip_email(user.get("email")):
+            user = {**user, "is_vip": True, "subscription": "neura_ultra"}
         return user
     except:
         return None
@@ -743,7 +747,7 @@ async def login(credentials: UserLogin):
                 "email": credentials.email,
                 "name": "Admin VIP",
                 "password": hash_password(credentials.password),
-                "subscription": "developer",
+                "subscription": "neura_ultra",
                 "is_vip": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "screens_today": 0,
@@ -757,7 +761,12 @@ async def login(credentials: UserLogin):
         # Verify password
         if vip_admin and credentials.password == vip_admin["password"]:
             # VIP admin with predefined password
-            pass
+            if user.get("subscription") != "neura_ultra" or not user.get("is_vip"):
+                await db.users.update_one(
+                    {"id": user["id"]},
+                    {"$set": {"subscription": "neura_ultra", "is_vip": True}}
+                )
+                user = {**user, "subscription": "neura_ultra", "is_vip": True}
         elif not user.get("password"):
             # Google-auth account (no password): classic email/password login
             # is not applicable. Return a clean 401, never crash on password=None.
