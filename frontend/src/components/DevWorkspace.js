@@ -18,6 +18,7 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
   const [content, setContent] = useState('');
   const [status, setStatus] = useState(null);
   const [diff, setDiff] = useState(null);
+  const [diffApproved, setDiffApproved] = useState(false);
   const [history, setHistory] = useState(null);
   const [locked, setLocked] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -36,16 +37,20 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
   const loadFile = async (p) => {
     try {
       const r = await axios.get(`${API}/developer/files/content`, { headers: getAuthHeader(), params: { path: p } });
-      setPath(r.data.path); setContent(r.data.content); setStatus(null); setDiff(null); setHistory(null);
+      setPath(r.data.path); setContent(r.data.content); setStatus(null); setDiff(null); setDiffApproved(false); setHistory(null);
     } catch (e) { /* ignore */ }
   };
 
   const save = async () => {
     if (!path.trim()) { setStatus('Indique un chemin de fichier (ex: src/App.js).'); return; }
+    if (!diffApproved) {
+      setStatus('Validation requise : clique d’abord sur Diff pour vérifier les changements avant d’enregistrer.');
+      return;
+    }
     setBusy(true);
     try {
       await axios.post(`${API}/developer/files`, { path: path.trim(), content }, { headers: getAuthHeader() });
-      setStatus('Enregistré (version précédente sauvegardée, rollback possible).'); setDiff(null); refresh();
+      setStatus('Enregistré (version précédente sauvegardée, rollback possible).'); setDiff(null); setDiffApproved(false); refresh();
     } catch (e) { setStatus('Erreur enregistrement.'); }
     setBusy(false);
   };
@@ -54,7 +59,7 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
     if (!path.trim()) { setStatus('Indique un chemin de fichier.'); return; }
     try {
       const r = await axios.post(`${API}/developer/files/diff`, { path: path.trim(), new_content: content }, { headers: getAuthHeader() });
-      setDiff(r.data); setStatus(r.data.is_new ? 'Nouveau fichier.' : `Changements : +${r.data.added} / -${r.data.removed}`);
+      setDiff(r.data); setDiffApproved(true); setStatus(r.data.is_new ? 'Nouveau fichier validé avant enregistrement.' : `Changements validés : +${r.data.added} / -${r.data.removed}`);
     } catch (e) { setStatus('Erreur diff.'); }
   };
 
@@ -82,7 +87,7 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
   const del = async (p) => {
     try {
       await axios.delete(`${API}/developer/files`, { headers: getAuthHeader(), params: { path: p } });
-      if (p === path) { setPath(''); setContent(''); }
+      if (p === path) { setPath(''); setContent(''); setDiffApproved(false); setDiff(null); }
       refresh();
     } catch (e) { /* ignore */ }
   };
@@ -91,6 +96,8 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
     if (!lastAiCode) { setStatus('Aucun code IA détecté dans la dernière réponse.'); return; }
     if (lastAiCode.path) setPath(lastAiCode.path);
     setContent(lastAiCode.code);
+    setDiffApproved(false);
+    setDiff(null);
     setStatus("Code de l'IA chargé - vérifie le chemin, puis Diff / Enregistrer.");
   };
 
@@ -120,7 +127,7 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
                 <span className="text-xs text-muted-foreground">Fichiers</span>
                 <button onClick={refresh} className="p-1 rounded hover:bg-muted" title="Rafraîchir"><RefreshCw className="w-3.5 h-3.5" /></button>
               </div>
-              <button onClick={() => { setPath(''); setContent(''); setStatus('Nouveau fichier.'); setDiff(null); setHistory(null); }}
+              <button onClick={() => { setPath(''); setContent(''); setStatus('Nouveau fichier.'); setDiff(null); setDiffApproved(false); setHistory(null); }}
                 className="w-full text-left text-sm px-2 py-1 rounded text-primary hover:bg-muted mb-1">+ Nouveau</button>
               {files.length === 0 && <p className="text-xs text-muted-foreground px-2">Aucun fichier.</p>}
               {files.map((f) => (
@@ -134,13 +141,13 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
             {/* Editor */}
             <div className="flex-1 flex flex-col p-3 min-w-0">
               <div className="flex items-center gap-2 mb-2">
-                <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="chemin/du/fichier.js"
+                <input value={path} onChange={(e) => { setPath(e.target.value); setDiffApproved(false); setDiff(null); }} placeholder="chemin/du/fichier.js"
                   className="flex-1 text-sm rounded-lg border border-border bg-background px-3 py-1.5 outline-none focus:ring-2 focus:ring-primary" />
                 <Button size="sm" variant="outline" className="rounded-full gap-1" onClick={useAiCode} title="Reprendre le code de la dernière réponse IA">
                   <Sparkles className="w-4 h-4" /> Code IA
                 </Button>
               </div>
-              <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="// contenu du fichier…"
+              <textarea value={content} onChange={(e) => { setContent(e.target.value); setDiffApproved(false); setDiff(null); }} placeholder="// contenu du fichier…"
                 className="flex-1 resize-none rounded-lg bg-[#0d1117] text-[#e6edf3] p-3 text-sm font-mono border border-border min-h-[200px] outline-none" />
 
               <div className="flex flex-wrap items-center gap-2 mt-2">
@@ -149,6 +156,9 @@ export default function DevWorkspace({ open, onClose, lastAiCode }) {
                 <Button size="sm" variant="outline" className="rounded-full gap-1" onClick={checkSyntax}><CheckCircle2 className="w-4 h-4" /> Syntaxe</Button>
                 <Button size="sm" variant="outline" className="rounded-full gap-1" onClick={loadHistory}><HistoryIcon className="w-4 h-4" /> Historique</Button>
               </div>
+              <p className={`text-xs mt-2 ${diffApproved ? 'text-primary' : 'text-amber-400'}`}>
+                {diffApproved ? 'Diff validé : tu peux enregistrer avec sauvegarde automatique.' : 'Sécurité : vérifie le Diff avant chaque enregistrement.'}
+              </p>
 
               {status && <p className="text-xs mt-2 text-muted-foreground">{status}</p>}
 
