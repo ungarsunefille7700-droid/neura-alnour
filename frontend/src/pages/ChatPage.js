@@ -10,6 +10,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
+import DevWorkspace from '@/components/DevWorkspace';
 import { toast } from 'sonner';
 import { 
   Send, 
@@ -60,6 +61,17 @@ function CodeBlock({ children }) {
       </pre>
     </div>
   );
+}
+
+// Extract the last AI code block (+ "Fichier: path") to pre-fill the workspace editor.
+function extractAiCode(messages) {
+  const lastAi = [...(messages || [])].reverse().find((m) => m.role === 'assistant');
+  if (!lastAi) return null;
+  const text = lastAi.content || '';
+  const fence = text.match(/```[a-zA-Z0-9]*\n([\s\S]*?)```/);
+  if (!fence) return null;
+  const pathMatch = text.match(/Fichier\s*:\s*([^\n`]+)/i);
+  return { code: fence[1].replace(/\n$/, ''), path: pathMatch ? pathMatch[1].trim() : '' };
 }
 
 const mdComponents = {
@@ -139,6 +151,7 @@ const ChatPage = () => {
   const [devSessionId, setDevSessionId] = useState(null);
   const [devStatus, setDevStatus] = useState(null);
   const [devRole, setDevRole] = useState('');
+  const [wsOpen, setWsOpen] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState(null);
   const [streamContent, setStreamContent] = useState('');
@@ -897,6 +910,11 @@ const ChatPage = () => {
                     <option value="mobile">Mobile senior</option>
                   </select>
                 )}
+                <button type="button" onClick={() => setWsOpen(true)}
+                  className="rounded-full bg-primary/10 text-primary px-3 py-1 hover:bg-primary/20 transition-colors inline-flex items-center gap-1"
+                  data-testid="dev-workspace-btn">
+                  <Code2 className="w-3 h-3" /> Projet
+                </button>
                 {[
                   { label: 'Page React', text: 'Crée une page React ' },
                   { label: 'Corriger un bug', text: 'Corrige ce bug : ' },
@@ -912,6 +930,8 @@ const ChatPage = () => {
                 ))}
               </div>
             )}
+
+            <DevWorkspace open={wsOpen} onClose={() => setWsOpen(false)} lastAiCode={extractAiCode(messages)} />
 
             <div className="relative flex items-center gap-2">
               {/* Hidden file input */}
