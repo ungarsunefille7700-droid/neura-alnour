@@ -4811,6 +4811,7 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
         "- Garde la conversation VIVANTE : termine souvent par une petite question pour faire parler l'élève. "
         "Sois encourageant et concret. Reste respectueux (application à vocation islamique)."
     )
+    system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
     history = await db.lang_messages.find(
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
@@ -4895,6 +4896,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
             "- Réponds aux demandes de correction, exercices, quiz et explications.\n"
             "- Termine souvent par une petite question. Reste respectueux et concret."
         )
+        system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
         try:
             history = await db.lang_messages.find(
@@ -5058,7 +5060,7 @@ async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_cu
     )
     if topic:
         system += f"\n\nThème demandé pour cette session : {topic}."
-    system += MODERATION_GUARD + IDENTITY_GUARD
+    system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
     history = await db.islam_messages.find(
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
