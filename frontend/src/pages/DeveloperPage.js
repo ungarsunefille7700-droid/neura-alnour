@@ -13,6 +13,17 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+const DEV_ROLES = [
+  { value: '', label: 'Assistant général' },
+  { value: 'frontend', label: 'Frontend senior' },
+  { value: 'backend', label: 'Backend senior' },
+  { value: 'fullstack', label: 'Fullstack senior' },
+  { value: 'architect', label: 'Architecte logiciel' },
+  { value: 'security', label: 'Expert sécurité' },
+  { value: 'database', label: 'Expert base de données' },
+  { value: 'mobile', label: 'Mobile senior' },
+];
+
 // Code block with a copy button (used to render fenced code from the AI).
 function CodeBlock({ children }) {
   const ref = useRef(null);
@@ -69,6 +80,7 @@ export default function DeveloperPage() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const [limitMsg, setLimitMsg] = useState(null);
+  const [role, setRole] = useState('');
   const bottomRef = useRef(null);
 
   const fetchStatus = useCallback(async () => {
@@ -109,7 +121,7 @@ export default function DeveloperPage() {
     setLoading(true);
     try {
       const r = await axios.post(`${API}/developer/chat`,
-        { content: text, session_id: sessionId },
+        { content: text, session_id: sessionId, role: role || null },
         { headers: getAuthHeader(), timeout: 120000 });
       setSessionId(r.data.session_id);
       setMessages(prev => [...prev, { role: 'assistant', content: r.data.response }]);
@@ -191,6 +203,24 @@ export default function DeveloperPage() {
               </Button>
             )}
           </div>
+        </div>
+
+        <div className="border-b border-border px-3 py-2 flex flex-wrap items-center justify-center gap-2 text-sm">
+          <span className="text-muted-foreground">Rôle :</span>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            disabled={!isPlus && !isUltra}
+            className="h-9 rounded-full border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
+            data-testid="developer-role-select"
+          >
+            {DEV_ROLES.map((item) => (
+              <option key={item.value || 'general'} value={item.value}>{item.label}</option>
+            ))}
+          </select>
+          {!isPlus && !isUltra && (
+            <span className="text-xs text-muted-foreground">Rôles experts réservés à Neura+ / Ultra.</span>
+          )}
         </div>
 
         {/* Messages */}
