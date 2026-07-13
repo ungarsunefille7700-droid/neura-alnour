@@ -147,6 +147,7 @@ export default function DeveloperPage() {
   const [sessionId, setSessionId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
+  const [logs, setLogs] = useState([]);
   const [limitMsg, setLimitMsg] = useState(null);
   const [role, setRole] = useState('');
   const [promptCategory, setPromptCategory] = useState(PROMPT_LIBRARY[0].category);
@@ -166,7 +167,14 @@ export default function DeveloperPage() {
     } catch (e) { /* ignore */ }
   }, [getAuthHeader]);
 
-  useEffect(() => { fetchStatus(); fetchHistory(); }, [fetchStatus, fetchHistory]);
+  const fetchLogs = useCallback(async () => {
+    try {
+      const r = await axios.get(`${API}/developer/logs`, { headers: getAuthHeader() });
+      setLogs(r.data || []);
+    } catch (e) { /* ignore */ }
+  }, [getAuthHeader]);
+
+  useEffect(() => { fetchStatus(); fetchHistory(); fetchLogs(); }, [fetchStatus, fetchHistory, fetchLogs]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
 
   const loadSession = async (sid) => {
@@ -198,6 +206,7 @@ export default function DeveloperPage() {
         setStatus(s => ({ ...(s || {}), used: r.data.quota.used, remaining: r.data.quota.remaining, reset_at: r.data.quota.reset_at }));
       }
       fetchHistory();
+      fetchLogs();
     } catch (err) {
       if (err.response?.status === 429) {
         const d = err.response.data?.detail || {};
@@ -236,6 +245,18 @@ export default function DeveloperPage() {
               {h.title || 'Sans titre'}
             </button>
           ))}
+        </div>
+        <div className="border-t border-border pt-3">
+          <div className="text-xs font-medium text-muted-foreground mb-2">Journal développeur</div>
+          <div className="space-y-1 max-h-32 overflow-y-auto">
+            {logs.length === 0 && <p className="text-xs text-muted-foreground">Aucune action.</p>}
+            {logs.slice(0, 6).map((log) => (
+              <div key={log.id} className="text-xs rounded-md bg-muted/60 px-2 py-1">
+                <p className="font-medium">{log.action}</p>
+                <p className="text-muted-foreground truncate">{new Date(log.created_at).toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </aside>
 

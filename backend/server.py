@@ -4569,6 +4569,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
         "role": "user", "content": message.content, "created_at": now_iso,
     })
+    await _dev_action_log(user, "chat_request", {"session_id": session_id, "tier": tier_name, "role": message.role or "general"})
 
     # Optional web search (Tavily) -> prepend results as context for the code task.
     sources = []
@@ -4651,6 +4652,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
         "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    await _dev_action_log(user, "chat_response", {"session_id": session_id, "model": dev_model, "tier": tier_name})
     await db.dev_sessions.update_one(
         {"session_id": session_id, "user_id": user["id"]},
         {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
@@ -4712,6 +4714,13 @@ async def developer_session_messages(session_id: str, user: dict = Depends(get_c
     return msgs
 
 
+@api_router.get("/developer/logs")
+async def developer_action_logs(user: dict = Depends(get_current_user)):
+    return await db.dev_action_logs.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(80)
+
+
 # ============== DEVELOPER WORKSPACE (premium: files, versions, rollback, diff, syntax) ==============
 # Safe "agent" features on a web app: files live in the DB per-user (never the server FS),
 # and nothing is ever executed (syntax check is a static parse only).
@@ -4731,6 +4740,21 @@ class DevDiffReq(BaseModel):
 class DevSyntaxReq(BaseModel):
     path: str
     content: str
+
+
+async def _dev_action_log(user: dict, action: str, metadata: Optional[dict] = None):
+    safe_metadata = {}
+    for key, value in (metadata or {}).items():
+        if value is not None:
+            safe_metadata[key] = str(value)[:500]
+    await db.dev_action_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "action": action,
+        "metadata": safe_metadata,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def _require_dev_workspace(user: dict):
@@ -4776,6 +4800,7 @@ async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
         {"$set": {"user_id": user["id"], "path": file.path, "content": file.content, "updated_at": now}},
         upsert=True,
     )
+    await _dev_action_log(user, "file_save", {"path": file.path, "mode": "update" if existing else "create"})
     return {"ok": True, "path": file.path, "updated_at": now}
 
 
@@ -4789,6 +4814,7 @@ async def dev_file_delete(path: str, user: dict = Depends(get_current_user)):
             "content": existing["content"], "saved_at": datetime.now(timezone.utc).isoformat(),
         })
     await db.dev_files.delete_one({"user_id": user["id"], "path": path})
+    await _dev_action_log(user, "file_delete", {"path": path})
     return {"ok": True}
 
 
@@ -4819,6 +4845,7 @@ async def dev_file_rollback(req: DevRollbackReq, user: dict = Depends(get_curren
         {"user_id": user["id"], "path": req.path},
         {"$set": {"content": ver["content"], "updated_at": now}}, upsert=True,
     )
+    await _dev_action_log(user, "file_rollback", {"path": req.path, "version_id": req.version_id})
     return {"ok": True, "restored_from": ver["saved_at"]}
 
 
@@ -4834,6 +4861,7 @@ async def dev_file_diff(req: DevDiffReq, user: dict = Depends(get_current_user))
         fromfile=f"a/{req.path}", tofile=f"b/{req.path}", lineterm=""))
     added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    await _dev_action_log(user, "file_diff", {"path": req.path, "added": added, "removed": removed, "is_new": cur is None})
     return {"path": req.path, "diff": "\n".join(diff_lines),
             "added": added, "removed": removed, "is_new": cur is None}
 
