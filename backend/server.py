@@ -218,6 +218,29 @@ async def _save_direct_chat_answer(conversation_id: str, user_id: str, answer: s
     )
 
 
+async def _save_direct_chat_exchange(conversation_id: str, user_id: str, user_text: str, answer: str, create_conversation: bool):
+    now = datetime.now(timezone.utc).isoformat()
+    if create_conversation:
+        title = user_text[:50] + "..." if len(user_text) > 50 else user_text
+        await db.conversations.insert_one({
+            "id": conversation_id,
+            "user_id": user_id,
+            "title": title or "Discussion",
+            "created_at": now,
+            "updated_at": now
+        })
+    await db.messages.insert_one({
+        "id": str(uuid.uuid4()),
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "role": "user",
+        "content": user_text,
+        "has_image": False,
+        "created_at": now
+    })
+    await _save_direct_chat_answer(conversation_id, user_id, answer)
+
+
 async def _safe_background_db_write(awaitable, label: str):
     try:
         await awaitable
@@ -898,6 +921,28 @@ async def _ai_memory_context(user: dict) -> str:
 @api_router.post("/chat/message")
 async def send_message(message: MessageCreate, user: dict = Depends(get_current_user)):
     from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    early_direct_answer = None
+    if not message.image_base64 and not message.document_text:
+        early_direct_answer = _current_date_direct_answer(message.content, message.lang)
+    if early_direct_answer:
+        direct_conversation_id = message.conversation_id or str(uuid.uuid4())
+        asyncio.create_task(_safe_background_db_write(
+            _save_direct_chat_exchange(
+                direct_conversation_id,
+                user["id"],
+                message.content,
+                early_direct_answer,
+                not bool(message.conversation_id),
+            ),
+            "direct_date_chat_save",
+        ))
+        return {
+            "message": early_direct_answer,
+            "conversation_id": direct_conversation_id,
+            "sources": [],
+            "direct": True,
+        }
     
     # Check screen limit for free users
     if message.image_base64 and not user.get("is_vip"):
@@ -952,15 +997,6 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             "Analyse ce document uniquement comme contexte fourni par l'utilisateur. "
             "Ne prétends pas avoir lu un fichier externe au-delà de ce contenu."
         )
-
-    direct_answer = None if (message.image_base64 or message.document_text) else _current_date_direct_answer(message.content, message.lang)
-    if direct_answer:
-        await _save_direct_chat_answer(conversation_id, user["id"], direct_answer)
-        return {
-            "message": direct_answer,
-            "conversation_id": conversation_id,
-            "sources": [],
-        }
 
     memory_result = await _save_ai_memory_from_text(user, message.content)
     

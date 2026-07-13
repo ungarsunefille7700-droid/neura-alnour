@@ -129,6 +129,33 @@ const getStatusLabel = (lang, model, phase) => {
   return (l && l[phase]) || '…';
 };
 
+const getLocalCurrentDateAnswer = (text, lang) => {
+  const normalized = (text || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const asksDate = [
+    'quelle date', 'quel date', 'on est quel', 'on et quel',
+    'on est quelle', 'nous sommes quel', 'nous sommes quelle',
+    'date aujourd', 'quel jour', 'what date', 'current date',
+    "today's date", 'what day is it'
+  ].some((marker) => normalized.includes(marker));
+  if (!asksDate) return null;
+
+  const now = new Date();
+  if ((lang || '').toLowerCase().startsWith('en')) {
+    return `Today is ${new Intl.DateTimeFormat('en-US', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      timeZone: 'Europe/Paris'
+    }).format(now)} (Europe/Paris).`;
+  }
+  return `Nous sommes aujourd'hui le ${new Intl.DateTimeFormat('fr-FR', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    timeZone: 'Europe/Paris'
+  }).format(now)} (Europe/Paris).`;
+};
+
 const ChatPage = () => {
   const { conversationId } = useParams();
   const navigate = useNavigate();
@@ -409,6 +436,36 @@ const ChatPage = () => {
     setSelectedImage(null);
     setImagePreview(null);
     setSelectedDocument(null);
+
+    const localDateAnswer = (!imageToSend && !documentToSend && !devMode && !webSearch)
+      ? getLocalCurrentDateAnswer(userMessage, language)
+      : null;
+    if (localDateAnswer) {
+      setMessages(prev => [...prev, {
+        id: `ai-direct-${Date.now()}`,
+        role: 'assistant',
+        content: localDateAnswer,
+        sources: [],
+        created_at: new Date().toISOString()
+      }]);
+      // Save in the backend without blocking the UI. The backend has the same
+      // direct-date guard, so no LLM call is triggered.
+      axios.post(`${API}/chat/message`, {
+        content: userMessage,
+        conversation_id: currentConversation,
+        model: selectedModel,
+        lang: languageName,
+        web_search: false
+      }, { headers: getAuthHeader(), timeout: 15000 }).then((response) => {
+        if (!currentConversation && response.data?.conversation_id) {
+          setCurrentConversation(response.data.conversation_id);
+          navigate(`/chat/${response.data.conversation_id}`, { replace: true });
+          fetchConversations();
+        }
+      }).catch(() => {});
+      inputRef.current?.focus();
+      return;
+    }
 
     // Developer (Code) mode -> dedicated assistant endpoint (supports image + web).
     if (devMode) {
