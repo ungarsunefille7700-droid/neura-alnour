@@ -4728,6 +4728,7 @@ async def developer_action_logs(user: dict = Depends(get_current_user)):
 class DevFile(BaseModel):
     path: str
     content: str
+    diff_token: Optional[str] = None
 
 class DevRollbackReq(BaseModel):
     path: str
@@ -4740,6 +4741,10 @@ class DevDiffReq(BaseModel):
 class DevSyntaxReq(BaseModel):
     path: str
     content: str
+
+
+def _dev_content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 async def _dev_action_log(user: dict, action: str, metadata: Optional[dict] = None):
@@ -4789,6 +4794,30 @@ async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
     """Create/overwrite a file. The previous content is auto-saved to history (rollback)."""
     _require_dev_workspace(user)
     now = datetime.now(timezone.utc).isoformat()
+    approval = None
+    if file.diff_token:
+        approval = await db.dev_diff_approvals.find_one({
+            "token": file.diff_token,
+            "user_id": user["id"],
+            "path": file.path,
+            "content_hash": _dev_content_hash(file.content),
+        }, {"_id": 0})
+    if not approval:
+        await _dev_action_log(user, "file_save_blocked", {"path": file.path, "reason": "missing_valid_diff"})
+        raise HTTPException(
+            status_code=409,
+            detail="Validation Diff requise avant enregistrement.",
+        )
+    try:
+        expires_at = datetime.fromisoformat(approval["expires_at"])
+    except Exception:
+        expires_at = datetime.min.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        await _dev_action_log(user, "file_save_blocked", {"path": file.path, "reason": "expired_diff"})
+        raise HTTPException(
+            status_code=409,
+            detail="Validation Diff expirée. Relance Diff avant d'enregistrer.",
+        )
     existing = await db.dev_files.find_one({"user_id": user["id"], "path": file.path}, {"_id": 0})
     if existing and existing.get("content") != file.content:
         await db.dev_file_history.insert_one({
@@ -4800,6 +4829,7 @@ async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
         {"$set": {"user_id": user["id"], "path": file.path, "content": file.content, "updated_at": now}},
         upsert=True,
     )
+    await db.dev_diff_approvals.delete_one({"token": file.diff_token, "user_id": user["id"]})
     await _dev_action_log(user, "file_save", {"path": file.path, "mode": "update" if existing else "create"})
     return {"ok": True, "path": file.path, "updated_at": now}
 
@@ -4861,9 +4891,23 @@ async def dev_file_diff(req: DevDiffReq, user: dict = Depends(get_current_user))
         fromfile=f"a/{req.path}", tofile=f"b/{req.path}", lineterm=""))
     added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    token = str(uuid.uuid4())
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+    await db.dev_diff_approvals.insert_one({
+        "token": token,
+        "user_id": user["id"],
+        "path": req.path,
+        "content_hash": _dev_content_hash(req.new_content),
+        "added": added,
+        "removed": removed,
+        "is_new": cur is None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": expires_at,
+    })
     await _dev_action_log(user, "file_diff", {"path": req.path, "added": added, "removed": removed, "is_new": cur is None})
     return {"path": req.path, "diff": "\n".join(diff_lines),
-            "added": added, "removed": removed, "is_new": cur is None}
+            "added": added, "removed": removed, "is_new": cur is None,
+            "diff_token": token, "expires_at": expires_at}
 
 
 @api_router.post("/developer/syntax-check")
