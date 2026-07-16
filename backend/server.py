@@ -4747,6 +4747,36 @@ def _dev_content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _validate_dev_path(path: str) -> str:
+    normalized = (path or "").strip().replace("\\", "/")
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Chemin de fichier requis.")
+    if len(normalized) > 240:
+        raise HTTPException(status_code=400, detail="Chemin de fichier trop long.")
+    if "\x00" in normalized:
+        raise HTTPException(status_code=400, detail="Chemin de fichier invalide.")
+    if normalized.startswith("/") or normalized.startswith("//") or re.match(r"^[A-Za-z]:", normalized):
+        raise HTTPException(status_code=400, detail="Chemin absolu interdit.")
+
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) != len(normalized.split("/")) or any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="Chemin relatif dangereux interdit.")
+
+    sensitive_names = {
+        ".env", ".env.local", ".env.production", ".env.development", ".env.test",
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "known_hosts",
+    }
+    sensitive_suffixes = (".pem", ".key", ".p12", ".pfx", ".crt", ".cer")
+    for part in parts:
+        lower = part.lower()
+        if lower in sensitive_names or lower.startswith(".env.") or lower.endswith(sensitive_suffixes):
+            raise HTTPException(
+                status_code=400,
+                detail="Fichier sensible interdit dans l'espace developpeur.",
+            )
+    return "/".join(parts)
+
+
 async def _dev_action_log(user: dict, action: str, metadata: Optional[dict] = None):
     safe_metadata = {}
     for key, value in (metadata or {}).items():
@@ -4783,6 +4813,7 @@ async def dev_files_list(user: dict = Depends(get_current_user)):
 @api_router.get("/developer/files/content")
 async def dev_file_get(path: str, user: dict = Depends(get_current_user)):
     _require_dev_workspace(user)
+    path = _validate_dev_path(path)
     f = await db.dev_files.find_one({"user_id": user["id"], "path": path}, {"_id": 0})
     if not f:
         raise HTTPException(status_code=404, detail="Fichier introuvable")
@@ -4793,6 +4824,7 @@ async def dev_file_get(path: str, user: dict = Depends(get_current_user)):
 async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
     """Create/overwrite a file. The previous content is auto-saved to history (rollback)."""
     _require_dev_workspace(user)
+    file.path = _validate_dev_path(file.path)
     now = datetime.now(timezone.utc).isoformat()
     approval = None
     if file.diff_token:
@@ -4837,6 +4869,7 @@ async def dev_file_save(file: DevFile, user: dict = Depends(get_current_user)):
 @api_router.delete("/developer/files")
 async def dev_file_delete(path: str, user: dict = Depends(get_current_user)):
     _require_dev_workspace(user)
+    path = _validate_dev_path(path)
     existing = await db.dev_files.find_one({"user_id": user["id"], "path": path}, {"_id": 0})
     if existing:
         await db.dev_file_history.insert_one({
@@ -4851,6 +4884,7 @@ async def dev_file_delete(path: str, user: dict = Depends(get_current_user)):
 @api_router.get("/developer/files/history")
 async def dev_file_history(path: str, user: dict = Depends(get_current_user)):
     _require_dev_workspace(user)
+    path = _validate_dev_path(path)
     return await db.dev_file_history.find(
         {"user_id": user["id"], "path": path}, {"_id": 0}
     ).sort("saved_at", -1).to_list(50)
@@ -4860,6 +4894,7 @@ async def dev_file_history(path: str, user: dict = Depends(get_current_user)):
 async def dev_file_rollback(req: DevRollbackReq, user: dict = Depends(get_current_user)):
     """Restore a previous version (the current content is first saved to history)."""
     _require_dev_workspace(user)
+    req.path = _validate_dev_path(req.path)
     ver = await db.dev_file_history.find_one(
         {"user_id": user["id"], "path": req.path, "id": req.version_id}, {"_id": 0})
     if not ver:
@@ -4883,6 +4918,7 @@ async def dev_file_rollback(req: DevRollbackReq, user: dict = Depends(get_curren
 async def dev_file_diff(req: DevDiffReq, user: dict = Depends(get_current_user)):
     """Unified diff between the stored file and a proposed new content (before applying)."""
     _require_dev_workspace(user)
+    req.path = _validate_dev_path(req.path)
     import difflib
     cur = await db.dev_files.find_one({"user_id": user["id"], "path": req.path}, {"_id": 0})
     old = cur["content"] if cur else ""
@@ -4914,6 +4950,7 @@ async def dev_file_diff(req: DevDiffReq, user: dict = Depends(get_current_user))
 async def dev_syntax_check(req: DevSyntaxReq, user: dict = Depends(get_current_user)):
     """Static syntax validation only (NEVER executes code)."""
     _require_dev_workspace(user)
+    req.path = _validate_dev_path(req.path)
     p = req.path.lower()
     if p.endswith(".py"):
         import ast
