@@ -3340,6 +3340,8 @@ async def _run_multiplayer_game(code: str):
             await asyncio.sleep(2)
 
         reserve_index = total
+        tiebreak_rounds = 0
+        max_tiebreak_rounds = 2
         while True:
             room = await _room_by_code(code)
             ranked = _rank_multiplayer_players(room)
@@ -3350,7 +3352,7 @@ async def _run_multiplayer_game(code: str):
             questions = room.get("game", {}).get("questions", [])
             if len(tied_ids) <= 1:
                 break
-            if reserve_index >= len(questions):
+            if reserve_index >= len(questions) or tiebreak_rounds >= max_tiebreak_rounds:
                 # Deterministic final fallback after all decisive questions: best accuracy, then speed.
                 await db.multiplayer_rooms.update_one(
                     {"code": code, "players.user_id": ranked[0]["user_id"]},
@@ -3384,6 +3386,7 @@ async def _run_multiplayer_game(code: str):
             await _set_multiplayer_phase(code, "ranking")
             await asyncio.sleep(2)
             reserve_index += 1
+            tiebreak_rounds += 1
 
         await _finish_multiplayer_game(code)
     except asyncio.CancelledError:
