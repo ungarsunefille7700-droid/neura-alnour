@@ -21,35 +21,26 @@ const AuthCallback = () => {
   }, [location.hash]);
 
   const exchangeGoogleSession = useCallback(async (sessionId) => {
-    let lastError = null;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const controller = new AbortController();
-      const wakeTimer = window.setTimeout(() => {
-        setStatus('Serveur en réveil, connexion en cours...');
-      }, 4000);
-      const timeout = window.setTimeout(() => controller.abort(), 12000);
+    const controller = new AbortController();
+    const wakeTimer = window.setTimeout(() => {
+      setStatus('Serveur en réveil, connexion en cours...');
+    }, 4000);
+    const timeout = window.setTimeout(() => controller.abort(), 45000);
 
-      try {
-        setStatus(attempt === 1 ? 'Connexion en cours...' : `Nouvelle tentative ${attempt}/3...`);
-        const startedAt = performance.now();
-        const response = await axios.post(
-          `${API}/auth/google/session`,
-          { session_id: sessionId },
-          { signal: controller.signal, timeout: 13000 }
-        );
-        console.info(`Google auth completed in ${Math.round(performance.now() - startedAt)}ms`);
-        return response;
-      } catch (err) {
-        lastError = err;
-        if (attempt < 3) {
-          await new Promise((resolve) => window.setTimeout(resolve, 900));
-        }
-      } finally {
-        window.clearTimeout(wakeTimer);
-        window.clearTimeout(timeout);
-      }
+    try {
+      setStatus('Connexion en cours...');
+      const startedAt = performance.now();
+      const response = await axios.post(
+        `${API}/auth/google/session`,
+        { session_id: sessionId },
+        { signal: controller.signal, timeout: 46000 }
+      );
+      console.info(`Google auth completed in ${Math.round(performance.now() - startedAt)}ms`);
+      return response;
+    } finally {
+      window.clearTimeout(wakeTimer);
+      window.clearTimeout(timeout);
     }
-    throw lastError;
   }, []);
 
   const processGoogleAuth = useCallback(async () => {
