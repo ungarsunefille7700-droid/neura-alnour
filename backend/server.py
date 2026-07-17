@@ -142,8 +142,9 @@ Règles importantes:
 4. Réponds en français par défaut, mais adapte-toi à la langue de l'utilisateur
 5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
+7. Ne commence pas automatiquement chaque réponse par la basmala. Utilise-la seulement si le contexte religieux la rend pertinente.
 
-بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"""
+"""
 
 
 def current_ai_context() -> str:
@@ -1022,8 +1023,9 @@ Règles importantes:
 4. Réponds en français par défaut, mais adapte-toi à la langue de l'utilisateur
 5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
+7. Ne commence pas automatiquement chaque réponse par la basmala. Utilise-la seulement si le contexte religieux la rend pertinente.
 
-بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ""" + current_ai_context() + await _ai_memory_context(user)
+""" + current_ai_context() + await _ai_memory_context(user)
     system_message += document_context
     if memory_result and memory_result.get("blocked"):
         system_message += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
