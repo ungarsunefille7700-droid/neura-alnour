@@ -8,8 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
   ArrowLeft, BookOpen, Check, ChevronRight, FileText, GraduationCap, Heart,
-  HelpCircle, History, Loader2, MessageCircle, Search, Send, ShieldAlert,
-  Sparkles, Star
+  HelpCircle, History, Loader2, MessageCircle, Mic, Search, Send, ShieldAlert,
+  Sparkles, Star, Volume2, VolumeX
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -62,8 +62,11 @@ export default function IslamLearningPage() {
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(true);
   const bottomRef = useRef(null);
+  const recognitionRef = useRef(null);
   const headers = useMemo(() => getAuthHeader(), [getAuthHeader]);
   const isSignedIn = Boolean(user);
 
@@ -117,13 +120,70 @@ export default function IslamLearningPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy]);
 
+  useEffect(() => () => {
+    recognitionRef.current?.abort?.();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  }, []);
+
   const visibleTopics = topics.filter((topic) => {
     const term = search.trim().toLowerCase();
     if (!term) return true;
     return topic.title?.toLowerCase().includes(term) || topic.summary?.toLowerCase().includes(term);
   });
 
-  const sendMessage = async (text, topic = selectedTopic) => {
+  const speak = (text) => {
+    if (!('speechSynthesis' in window) || !text) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text.replace(/[#*_`>\[\]()]/g, ' '));
+    utterance.lang = 'fr-FR';
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const stopSpeaking = () => {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    setSpeaking(false);
+  };
+
+  const startVoiceInput = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition || busy || listening) {
+      if (!SpeechRecognition) {
+        setMessages((current) => [...current, {
+          role: 'assistant',
+          content: "Ton navigateur ne permet pas encore la reconnaissance vocale ici. Tu peux continuer par message écrit.",
+        }]);
+      }
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'fr-FR';
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    recognition.maxAlternatives = 3;
+    recognitionRef.current = recognition;
+    let finalText = '';
+    recognition.onstart = () => setListening(true);
+    recognition.onresult = (event) => {
+      finalText = Array.from(event.results)
+        .map((result) => result[0]?.transcript || '')
+        .join(' ')
+        .trim();
+      if (finalText) setInput(finalText);
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.onend = () => {
+      setListening(false);
+      if (finalText.trim()) sendMessage(finalText.trim(), selectedTopic, true);
+    };
+    recognition.start();
+  };
+
+  const sendMessage = async (text, topic = selectedTopic, voiceReply = false) => {
     const content = (text ?? input).trim();
     if (!content || busy) return;
     if (!isSignedIn) {
@@ -147,12 +207,16 @@ export default function IslamLearningPage() {
         { headers, timeout: 120000 }
       );
       setSessionId(response.data.session_id);
-      setMessages((current) => [...current, { role: 'assistant', content: response.data.response }]);
+      const assistantResponse = response.data.response;
+      setMessages((current) => [...current, { role: 'assistant', content: assistantResponse }]);
+      if (voiceReply) speak(assistantResponse);
+      return assistantResponse;
     } catch (error) {
       setMessages((current) => [
         ...current,
         { role: 'assistant', content: 'Le professeur est temporairement indisponible. Reessaie dans un instant.' },
       ]);
+      return null;
     } finally {
       setBusy(false);
     }
@@ -375,6 +439,15 @@ export default function IslamLearningPage() {
                     {progress.completed_topics?.includes(selectedTopic.id) ? 'Marquer a revoir' : 'Etape terminee'}
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  onClick={speaking ? stopSpeaking : startVoiceInput}
+                  disabled={busy || !isSignedIn}
+                  className={!selectedTopic && !messages.length ? 'ml-auto' : ''}
+                >
+                  {speaking ? <VolumeX className="w-4 h-4 mr-2" /> : <Mic className="w-4 h-4 mr-2" />}
+                  {speaking ? 'Arreter la voix' : listening ? 'Je t ecoute...' : 'Parler au professeur'}
+                </Button>
               </div>
 
               <div className="border border-border rounded-lg min-h-[420px] flex flex-col">
@@ -392,6 +465,13 @@ export default function IslamLearningPage() {
                         {message.role === 'assistant' ? (
                           <div className="prose prose-sm dark:prose-invert max-w-none">
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                            <button
+                              type="button"
+                              onClick={() => speak(message.content)}
+                              className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                            >
+                              <Volume2 className="w-3.5 h-3.5" /> Ecouter
+                            </button>
                           </div>
                         ) : <span className="whitespace-pre-wrap">{message.content}</span>}
                       </div>
@@ -425,6 +505,9 @@ export default function IslamLearningPage() {
                       placeholder="Pose ta question sur l'Islam..."
                       className="flex-1 resize-none rounded-lg border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary max-h-32"
                     />
+                    <Button type="button" variant="outline" onClick={startVoiceInput} disabled={busy || listening || !isSignedIn} size="icon" aria-label="Parler">
+                      {listening ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+                    </Button>
                     <Button type="submit" disabled={busy || !input.trim()} size="icon" aria-label="Envoyer">
                       {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                     </Button>
