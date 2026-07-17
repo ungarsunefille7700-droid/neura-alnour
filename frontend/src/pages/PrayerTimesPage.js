@@ -5,6 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { toast } from 'sonner';
+import {
+  getNotificationPreferences,
+  prayerReminderStorageKey,
+  saveNotificationPreferences,
+} from '@/utils/notificationPreferences';
 import { 
   Clock, 
   MapPin, 
@@ -31,7 +36,15 @@ const PrayerTimesPage = () => {
   const [location, setLocation] = useState(null);
   const [locationName, setLocationName] = useState('');
   const [currentTime, setCurrentTime] = useState(new Date());
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const initialNotificationPreferences = getNotificationPreferences();
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    initialNotificationPreferences.notifications &&
+    'Notification' in window &&
+    Notification.permission === 'granted'
+  );
+  const [prayerRemindersEnabled, setPrayerRemindersEnabled] = useState(
+    initialNotificationPreferences.prayerReminders
+  );
   const [qiblah, setQiblah] = useState(null);
 
   useEffect(() => {
@@ -121,12 +134,28 @@ const PrayerTimesPage = () => {
   };
 
   const enableNotifications = async () => {
-    if ('Notification' in window) {
-      const permission = await Notification.requestPermission();
-      if (permission === 'granted') {
-        setNotificationsEnabled(true);
-        toast.success('Notifications activées');
-      }
+    if (!('Notification' in window)) {
+      toast.error('Les notifications ne sont pas disponibles dans ce navigateur.');
+      return;
+    }
+    if (notificationsEnabled) {
+      setNotificationsEnabled(false);
+      setPrayerRemindersEnabled(false);
+      saveNotificationPreferences({ notifications: false, prayerReminders: false });
+      toast.success('Notifications désactivées');
+      return;
+    }
+
+    const permission = Notification.permission === 'granted'
+      ? 'granted'
+      : await Notification.requestPermission();
+    if (permission === 'granted') {
+      setNotificationsEnabled(true);
+      setPrayerRemindersEnabled(true);
+      saveNotificationPreferences({ notifications: true, prayerReminders: true });
+      toast.success('Notifications et rappels de prière activés');
+    } else {
+      toast.error("L'autorisation des notifications a été refusée.");
     }
   };
 
@@ -138,6 +167,57 @@ const PrayerTimesPage = () => {
     { name: 'Maghrib', arabic: 'المغرب', time: prayerTimes.maghrib, icon: Sunset, color: 'text-orange-500' },
     { name: 'Isha', arabic: 'العشاء', time: prayerTimes.isha, icon: Moon, color: 'text-purple-400' },
   ] : [];
+
+  useEffect(() => {
+    if (
+      !notificationsEnabled ||
+      !prayerRemindersEnabled ||
+      !prayerTimes ||
+      !('Notification' in window) ||
+      Notification.permission !== 'granted'
+    ) return undefined;
+
+    const timers = [];
+    const now = new Date();
+    const schedule = [
+      { name: 'Fajr', time: prayerTimes.fajr },
+      { name: 'Dhuhr', time: prayerTimes.dhuhr },
+      { name: 'Asr', time: prayerTimes.asr },
+      { name: 'Maghrib', time: prayerTimes.maghrib },
+      { name: 'Isha', time: prayerTimes.isha },
+    ];
+
+    schedule.forEach((prayer) => {
+      const [hours, minutes] = prayer.time.split(':').map(Number);
+      const prayerAt = new Date(now);
+      prayerAt.setHours(hours, minutes, 0, 0);
+      const reminderAt = new Date(prayerAt.getTime() - 5 * 60 * 1000);
+      const delay = reminderAt.getTime() - now.getTime();
+      const stillRelevant = prayerAt > now && delay > -5 * 60 * 1000;
+      if (!stillRelevant) return;
+
+      const notify = () => {
+        const preferences = getNotificationPreferences();
+        if (!preferences.notifications || !preferences.prayerReminders) return;
+        const sentKey = prayerReminderStorageKey(prayerAt, prayer.name);
+        if (window.localStorage.getItem(sentKey) === 'sent') return;
+        new Notification(`Prière de ${prayer.name} dans 5 minutes`, {
+          body: `Horaire prévu : ${prayer.time}`,
+          icon: '/favicon.ico',
+          tag: sentKey,
+        });
+        window.localStorage.setItem(sentKey, 'sent');
+      };
+
+      if (delay <= 0) {
+        notify();
+      } else {
+        timers.push(window.setTimeout(notify, delay));
+      }
+    });
+
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [notificationsEnabled, prayerRemindersEnabled, prayerTimes]);
 
   const getNextPrayer = () => {
     if (!prayers.length) return null;

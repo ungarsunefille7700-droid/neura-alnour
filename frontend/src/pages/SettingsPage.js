@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notificationPreferences';
 import { toast } from 'sonner';
 import { 
   Settings as SettingsIcon,
@@ -30,8 +31,42 @@ const SettingsPage = () => {
   const { language, setLanguage, languages } = useLanguage();
   const navigate = useNavigate();
   
-  const [notifications, setNotifications] = useState(true);
-  const [prayerReminders, setPrayerReminders] = useState(true);
+  const initialNotificationPreferences = getNotificationPreferences();
+  const [notifications, setNotifications] = useState(initialNotificationPreferences.notifications);
+  const [prayerReminders, setPrayerReminders] = useState(initialNotificationPreferences.prayerReminders);
+
+  const handleNotificationsChange = async (enabled) => {
+    if (enabled) {
+      if (!('Notification' in window)) {
+        toast.error('Les notifications ne sont pas disponibles dans ce navigateur.');
+        return;
+      }
+      const permission = Notification.permission === 'granted'
+        ? 'granted'
+        : await Notification.requestPermission();
+      if (permission !== 'granted') {
+        toast.error("L'autorisation des notifications a été refusée.");
+        return;
+      }
+    }
+
+    const nextPrayerReminders = enabled ? prayerReminders : false;
+    setNotifications(enabled);
+    setPrayerReminders(nextPrayerReminders);
+    saveNotificationPreferences({ notifications: enabled, prayerReminders: nextPrayerReminders });
+    toast.success(enabled ? 'Notifications activées' : 'Notifications désactivées');
+  };
+
+  const handlePrayerRemindersChange = async (enabled) => {
+    if (enabled && !notifications) {
+      await handleNotificationsChange(true);
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    }
+    setPrayerReminders(enabled);
+    saveNotificationPreferences({ notifications: enabled ? true : notifications, prayerReminders: enabled });
+    if (enabled) setNotifications(true);
+    toast.success(enabled ? 'Rappels de prière activés' : 'Rappels de prière désactivés');
+  };
 
   const handleLogout = () => {
     logout();
@@ -156,7 +191,7 @@ const SettingsPage = () => {
                 <Switch
                   id="notifications-toggle"
                   checked={notifications}
-                  onCheckedChange={setNotifications}
+                  onCheckedChange={handleNotificationsChange}
                   data-testid="notifications-toggle"
                 />
               </div>
@@ -168,7 +203,7 @@ const SettingsPage = () => {
                 <Switch
                   id="prayer-toggle"
                   checked={prayerReminders}
-                  onCheckedChange={setPrayerReminders}
+                  onCheckedChange={handlePrayerRemindersChange}
                   data-testid="prayer-toggle"
                 />
               </div>
