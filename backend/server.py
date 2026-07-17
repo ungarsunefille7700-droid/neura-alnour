@@ -2852,6 +2852,12 @@ class MultiplayerPlayerReport(BaseModel):
     reason: str = Field(..., min_length=3, max_length=120)
     details: Optional[str] = Field(default="", max_length=1000)
 
+class FounderReportStatusUpdate(BaseModel):
+    report_type: str
+    report_id: str
+    status: str
+    note: Optional[str] = Field(default="", max_length=500)
+
 class FounderSubscriptionGift(BaseModel):
     user_id: str
     plan: str = "neura_ultra"
@@ -4165,6 +4171,39 @@ async def founder_admin_question_reports(user: dict = Depends(get_current_user))
     for item in player_reports:
         item["report_type"] = "player"
     return sorted(question_reports + player_reports, key=lambda item: item.get("created_at", ""), reverse=True)[:200]
+
+
+@api_router.post("/founder-admin/reports/status")
+async def founder_admin_update_report_status(data: FounderReportStatusUpdate, user: dict = Depends(get_current_user)):
+    await _require_founder_admin(user)
+    report_type = data.report_type.strip().lower()
+    status = data.status.strip().lower()
+    if report_type not in {"question", "player"}:
+        raise HTTPException(status_code=400, detail="Type de signalement invalide.")
+    if status not in {"open", "resolved", "rejected"}:
+        raise HTTPException(status_code=400, detail="Statut de signalement invalide.")
+    collection = db.multiplayer_question_reports if report_type == "question" else db.multiplayer_player_reports
+    now = datetime.now(timezone.utc).isoformat()
+    result = await collection.update_one(
+        {"id": data.report_id},
+        {"$set": {
+            "status": status,
+            "admin_note": (data.note or "").strip(),
+            "reviewed_by": user["id"],
+            "reviewed_by_email": user.get("email"),
+            "reviewed_at": now,
+            "updated_at": now,
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Signalement introuvable.")
+    await _admin_log(
+        "report_status_update",
+        user,
+        None,
+        {"report_type": report_type, "report_id": data.report_id, "status": status},
+    )
+    return {"ok": True, "report_id": data.report_id, "report_type": report_type, "status": status}
 
 
 @api_router.get("/founder-admin/logs")

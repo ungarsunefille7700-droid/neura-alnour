@@ -112,6 +112,20 @@ export default function FounderAdminPage() {
     }
   };
 
+  const updateReportStatus = async (report, status) => {
+    try {
+      await axios.post(
+        `${API}/founder-admin/reports/status`,
+        { report_type: report.report_type, report_id: report.id, status },
+        { headers }
+      );
+      toast.success('Signalement mis a jour.');
+      await loadDashboard();
+    } catch (error) {
+      toast.error(error?.response?.data?.detail || 'Impossible de mettre a jour le signalement.');
+    }
+  };
+
   if (loading) {
     return (
       <main className="min-h-screen bg-background text-foreground flex items-center justify-center">
@@ -288,10 +302,39 @@ export default function FounderAdminPage() {
         {tab === 'reports' && (
           <div className="border-y border-border divide-y divide-border">
             {reports.map((report) => (
-              <div key={report.id} className="py-4">
-                <p className="font-medium">{report.reason}</p>
-                <p className="text-sm text-muted-foreground">{report.details || 'Aucun detail'} - question {report.question_id || 'inconnue'}</p>
-                <p className="text-xs text-muted-foreground">{report.user_email} - {report.created_at}</p>
+              <div key={report.id} className="py-4 flex flex-col md:flex-row md:items-start gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-medium">{report.reason}</p>
+                    <span className={`text-xs px-2 py-1 rounded-full ${
+                      report.status === 'open' ? 'bg-amber-500/15 text-amber-500'
+                        : report.status === 'resolved' ? 'bg-emerald-500/15 text-emerald-500'
+                          : 'bg-muted text-muted-foreground'
+                    }`}>
+                      {report.status || 'open'}
+                    </span>
+                    <span className="text-xs px-2 py-1 rounded-full bg-muted text-muted-foreground">
+                      {report.report_type === 'player' ? 'joueur' : 'question'}
+                    </span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {report.details || 'Aucun detail'} - {report.question_id ? `question ${report.question_id}` : `salle ${report.room_code || 'inconnue'}`}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {report.user_email || report.reporter_email || 'utilisateur inconnu'} - {report.created_at}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {report.status !== 'resolved' && (
+                    <Button size="sm" variant="outline" onClick={() => updateReportStatus(report, 'resolved')}>Resolu</Button>
+                  )}
+                  {report.status !== 'rejected' && (
+                    <Button size="sm" variant="outline" onClick={() => updateReportStatus(report, 'rejected')}>Rejeter</Button>
+                  )}
+                  {report.status !== 'open' && (
+                    <Button size="sm" variant="ghost" onClick={() => updateReportStatus(report, 'open')}>Rouvrir</Button>
+                  )}
+                </div>
               </div>
             ))}
             {!reports.length && <p className="py-8 text-center text-muted-foreground">Aucun signalement.</p>}
