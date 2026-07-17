@@ -79,10 +79,10 @@ const LandingPage = () => {
   ];
 
   return (
-    <div className="min-h-screen bg-background overflow-hidden">
+    <div className="min-h-screen bg-background overflow-x-hidden">
       {/* Navigation */}
       <nav className="fixed top-0 w-full z-50 glass">
-        <div className="max-w-[1800px] mx-auto px-4 lg:px-6 py-4 flex items-center justify-between">
+        <div className="max-w-[1800px] mx-auto px-4 lg:px-6 py-3 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-3 shrink-0 whitespace-nowrap">
             <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-primary-foreground" />
@@ -172,28 +172,28 @@ const LandingPage = () => {
       </nav>
 
       {/* Hero Section */}
-      <section className="pt-28 pb-14 md:pt-32 md:pb-20 px-4 sm:px-6 relative">
+      <section className="pt-24 pb-10 md:pt-28 md:pb-14 px-4 sm:px-6 relative">
         {/* Background decoration */}
         <div className="absolute inset-0 islamic-pattern pointer-events-none" />
         <div className="absolute top-20 right-10 w-72 h-72 bg-primary/10 rounded-full blur-3xl" />
         <div className="absolute bottom-20 left-10 w-96 h-96 bg-secondary/10 rounded-full blur-3xl" />
         
         <div className="max-w-7xl mx-auto text-center relative z-10">
-          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 text-primary mb-8">
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 text-primary mb-6">
             <Sparkles className="w-4 h-4" />
             <span className="text-sm font-medium">{t('landing.poweredBy')}</span>
           </div>
           
-          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
+          <h1 className="text-4xl sm:text-5xl xl:text-6xl font-bold tracking-tight mb-5">
             <span className="text-primary">NEURA</span> AL-NOUR
             <span className="font-arabic text-3xl sm:text-4xl lg:text-5xl ml-3 sm:ml-4 text-secondary">نور</span>
           </h1>
           
-          <p className="text-xl md:text-2xl text-muted-foreground max-w-3xl mx-auto mb-4">
+          <p className="text-lg md:text-xl text-muted-foreground max-w-3xl mx-auto mb-4">
             بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ
           </p>
           
-          <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10">
+          <p className="text-base md:text-lg text-muted-foreground max-w-2xl mx-auto mb-8">
             {t('landing.subtitle')}
           </p>
           
@@ -202,7 +202,7 @@ const LandingPage = () => {
               size="lg" 
               onClick={() => navigate(user ? '/chat' : '/auth')}
               data-testid="hero-cta-btn"
-              className="rounded-full px-8 h-14 text-lg shadow-lg shadow-primary/20 hover:scale-105 transition-transform"
+              className="rounded-full px-7 h-12 text-base shadow-lg shadow-primary/20 hover:scale-105 transition-transform"
             >
               {t('landing.heroCta')}
               <ChevronRight className="w-5 h-5 ml-2" />
@@ -212,7 +212,7 @@ const LandingPage = () => {
               size="lg"
               onClick={() => navigate('/quran')}
               data-testid="hero-quran-btn"
-              className="rounded-full px-8 h-14 text-lg border-2"
+              className="rounded-full px-7 h-12 text-base border-2"
             >
               <BookOpen className="w-5 h-5 mr-2" />
               {t('landing.exploreQuran')}
@@ -226,7 +226,7 @@ const LandingPage = () => {
       </section>
 
       {/* Features Section */}
-      <section className="py-24 px-6 relative">
+      <section className="py-16 md:py-20 px-4 sm:px-6 relative">
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-semibold mb-4">
@@ -257,7 +257,7 @@ const LandingPage = () => {
       </section>
 
       {/* Pricing Section */}
-      <section className="py-24 px-6 bg-muted/30">
+      <section className="py-16 md:py-20 px-4 sm:px-6 bg-muted/30">
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-semibold mb-4">
@@ -313,7 +313,7 @@ const LandingPage = () => {
       </section>
 
       {/* CTA Section */}
-      <section className="py-24 px-6">
+      <section className="py-16 md:py-20 px-4 sm:px-6">
         <div className="max-w-4xl mx-auto text-center">
           <div className="glass rounded-3xl p-6 sm:p-8 md:p-12 relative overflow-hidden">
             <div className="absolute inset-0 islamic-pattern opacity-30" />
@@ -329,7 +329,7 @@ const LandingPage = () => {
                 size="lg"
                 onClick={() => navigate(user ? '/chat' : '/auth')}
                 data-testid="cta-final-btn"
-                className="rounded-full px-10 h-14 text-lg shadow-lg shadow-primary/20"
+                className="rounded-full px-8 h-12 text-base shadow-lg shadow-primary/20"
               >
                 Commencer Maintenant
                 <ChevronRight className="w-5 h-5 ml-2" />
