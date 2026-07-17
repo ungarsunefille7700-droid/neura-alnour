@@ -176,7 +176,7 @@ const LandingPage = () => {
         {/* Background decoration */}
         <div className="absolute inset-0 islamic-pattern pointer-events-none" />
         <div className="absolute top-20 right-10 w-72 h-72 bg-primary/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-20 left-10 w-96 h-96 bg-secondary/10 rounded-full blur-3xl" />
+        <div className="absolute bottom-16 left-0 w-64 h-64 sm:bottom-20 sm:left-10 sm:w-96 sm:h-96 bg-secondary/10 rounded-full blur-3xl" />
         
         <div className="max-w-7xl mx-auto text-center relative z-10">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 text-primary mb-6">
