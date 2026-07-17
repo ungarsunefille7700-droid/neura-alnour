@@ -34,6 +34,8 @@ import MultiplayerQuizPage from "@/pages/MultiplayerQuizPage";
 import FounderAdminPage from "@/pages/FounderAdminPage";
 import GamificationPage from "@/pages/GamificationPage";
 
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
@@ -103,6 +105,24 @@ function AppRouter() {
 
 function AppContent() {
   const { theme } = useTheme();
+
+  useEffect(() => {
+    // Wake the Render backend as soon as the application opens so Google OAuth
+    // does not have to wait for a cold server after the external redirect.
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 30000);
+
+    fetch(`${API}/health`, {
+      cache: 'no-store',
+      signal: controller.signal,
+      keepalive: true,
+    }).catch(() => {}).finally(() => window.clearTimeout(timeout));
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, []);
   
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
