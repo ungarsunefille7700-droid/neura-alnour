@@ -5617,18 +5617,17 @@ async def health_check():
 async def system_health():
     started = time.perf_counter()
     db_ok = True
-    db_error = None
     try:
         await db.command("ping")
     except Exception as error:
         db_ok = False
-        db_error = str(error)[:200]
+        logger.error("System health database ping failed: %s", str(error)[:200])
     return {
         "status": "healthy" if db_ok else "degraded",
         "app": "NEURA AL-NOUR",
         "version": app.version,
         "date": datetime.now(timezone.utc).isoformat(),
-        "database": {"ok": db_ok, "error": db_error},
+        "database": {"ok": db_ok},
         "response_ms": round((time.perf_counter() - started) * 1000),
     }
 
