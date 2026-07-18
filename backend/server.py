@@ -1914,11 +1914,12 @@ async def update_learn_progress(
 ):
     """Update user's learning progress"""
     progress = await db.learn_progress.find_one({"user_id": user["id"]})
+    was_completed = lesson_id in (progress or {}).get("completed_lessons", [])
     
     if not progress:
         progress = {
             "user_id": user["id"],
-            "completed_lessons": [],
+            "completed_lessons": [lesson_id] if completed else [],
             "current_lesson": lesson_id,
             "last_position": {lesson_id: section_index}
         }
@@ -1935,6 +1936,9 @@ async def update_learn_progress(
         {"$set": progress},
         upsert=True
     )
+
+    if completed and not was_completed:
+        await _record_gamification_event(user["id"], "course_completed", f"learn:{lesson_id}")
     
     return {"success": True, "progress": progress}
 
@@ -2699,6 +2703,14 @@ async def submit_session_answer(session_id: str, body: QuizSessionAnswer, user: 
     
     question = session["questions"][qi]
     is_correct = body.answer == question["correct_answer"]
+    existing_answers = session.get("answers", {})
+    if str(qi) in existing_answers:
+        saved_answer = existing_answers[str(qi)]
+        return {
+            "correct": saved_answer["is_correct"],
+            "correct_answer": question["correct_answer"],
+            "correct_option": question["options"][question["correct_answer"]]
+        }
     
     # Store answer in session
     await db.quiz_sessions.update_one(
@@ -2716,6 +2728,10 @@ async def submit_session_answer(session_id: str, body: QuizSessionAnswer, user: 
             "is_correct": is_correct,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
+        if is_correct:
+            await _record_gamification_event(user["id"], "exercise_passed", f"quiz:{session_id}:{qi}")
+        if len(existing_answers) + 1 >= len(session["questions"]):
+            await _record_gamification_event(user["id"], "quiz_completed", f"quiz:{session_id}")
     
     return {
         "correct": is_correct,
@@ -2761,6 +2777,9 @@ async def submit_quiz_answer(answer: QuizAnswerRequest, user: dict = Depends(get
             "is_correct": is_correct,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
+        await _record_gamification_event(user["id"], "quiz_completed", f"legacy-quiz:{uuid.uuid4()}")
+        if is_correct:
+            await _record_gamification_event(user["id"], "exercise_passed", f"legacy-answer:{uuid.uuid4()}")
     
     return {
         "correct": is_correct,
@@ -3811,23 +3830,67 @@ def _period_key(period: str) -> str:
     return "all"
 
 
+async def _record_gamification_event(user_id: str, metric: str, source_id: str) -> None:
+    event_key = f"{user_id}:{metric}:{source_id}"
+    event_id = hashlib.sha256(event_key.encode("utf-8")).hexdigest()
+    await db.gamification_events.update_one(
+        {"_id": event_id},
+        {"$setOnInsert": {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "metric": metric,
+            "source_id": source_id,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+
+
+async def _gamification_event_counts(user_id: str) -> dict:
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    rows = await db.gamification_events.aggregate([
+        {"$match": {"user_id": user_id, "occurred_at": {"$gte": month}}},
+        {"$group": {
+            "_id": "$metric",
+            "daily": {"$sum": {"$cond": [{"$gte": ["$occurred_at", today]}, 1, 0]}},
+            "weekly": {"$sum": {"$cond": [{"$gte": ["$occurred_at", week]}, 1, 0]}},
+            "monthly": {"$sum": 1},
+        }},
+    ]).to_list(20)
+    return {
+        row["_id"]: {
+            "daily": int(row.get("daily", 0)),
+            "weekly": int(row.get("weekly", 0)),
+            "monthly": int(row.get("monthly", 0)),
+        }
+        for row in rows
+    }
+
+
 async def _gamification_metrics(user: dict) -> dict:
-    today = _period_start("today").isoformat()
-    week = _period_start("week").isoformat()
-    month = _period_start("month").isoformat()
-    quiz_daily = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": today}})
-    quiz_week = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": week}})
-    quiz_month = await db.quiz_history.count_documents({"user_id": user["id"], "created_at": {"$gte": month}})
+    event_counts = await _gamification_event_counts(user["id"])
+    empty_counts = {"daily": 0, "weekly": 0, "monthly": 0}
+    quiz_counts = event_counts.get("quiz_completed", empty_counts)
+    course_counts = event_counts.get("course_completed", empty_counts)
+    exercise_counts = event_counts.get("exercise_passed", empty_counts)
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
     multi_daily = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": today}})
     multi_week = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": week}})
     multi_month = await db.multiplayer_history.count_documents({"user_id": user["id"], "played_at": {"$gte": month}})
-    islam_progress = await get_islam_learning_progress(user)
-    learn_progress = await get_learn_progress(user)
-    completed_courses = len(set(islam_progress.get("completed_topics", [])) | set(learn_progress.get("completed_lessons", [])))
     return {
-        "quiz_completed": {"daily": quiz_daily + multi_daily, "weekly": quiz_week + multi_week, "monthly": quiz_month + multi_month},
-        "course_completed": {"daily": completed_courses, "weekly": completed_courses, "monthly": completed_courses},
-        "exercise_passed": {"daily": int(islam_progress.get("exercises_passed", 0)), "weekly": int(islam_progress.get("exercises_passed", 0)), "monthly": int(islam_progress.get("exercises_passed", 0))},
+        "quiz_completed": {
+            "daily": quiz_counts["daily"] + multi_daily,
+            "weekly": quiz_counts["weekly"] + multi_week,
+            "monthly": quiz_counts["monthly"] + multi_month,
+        },
+        "course_completed": course_counts,
+        "exercise_passed": exercise_counts,
         "quran_pages": {"daily": 0, "weekly": 0, "monthly": 0},
     }
 
@@ -5389,6 +5452,10 @@ async def set_islam_learning_progress(
     topic = data.topic.strip()
     if not topic:
         raise HTTPException(status_code=400, detail="Thème requis")
+    existing_progress = await db.islam_learning_progress.find_one(
+        {"user_id": user["id"]}, {"completed_topics": 1}
+    )
+    was_completed = topic in (existing_progress or {}).get("completed_topics", [])
 
     topic_update = (
         {"$addToSet": {"completed_topics": topic}}
@@ -5404,6 +5471,8 @@ async def set_islam_learning_progress(
     await db.islam_learning_progress.update_one(
         {"user_id": user["id"]}, topic_update, upsert=True
     )
+    if data.completed and not was_completed:
+        await _record_gamification_event(user["id"], "course_completed", f"islam:{topic}")
     return await get_islam_learning_progress(user)
 
 
