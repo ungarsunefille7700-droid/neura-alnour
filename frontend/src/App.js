@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-route
 import { Toaster } from "@/components/ui/sonner";
 import AppErrorBoundary from "@/components/AppErrorBoundary";
 import PrayerNotificationManager from "@/components/PrayerNotificationManager";
+import { prewarmBackend } from "@/utils/backendWarmup";
 
 // Context
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
@@ -34,8 +35,6 @@ import RemindersPage from "@/pages/RemindersPage";
 import MultiplayerQuizPage from "@/pages/MultiplayerQuizPage";
 import FounderAdminPage from "@/pages/FounderAdminPage";
 import GamificationPage from "@/pages/GamificationPage";
-
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -109,21 +108,9 @@ function AppContent() {
   const { theme } = useTheme();
 
   useEffect(() => {
-    // Wake the Render backend as soon as the application opens so Google OAuth
-    // does not have to wait for a cold server after the external redirect.
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 30000);
-
-    fetch(`${API}/health`, {
-      cache: 'no-store',
-      signal: controller.signal,
-      keepalive: true,
-    }).catch(() => {}).finally(() => window.clearTimeout(timeout));
-
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
+    // Keep this request alive during the external Google redirect. Aborting it
+    // on unmount leaves a sleeping Render instance cold for the callback.
+    prewarmBackend();
   }, []);
   
   useEffect(() => {

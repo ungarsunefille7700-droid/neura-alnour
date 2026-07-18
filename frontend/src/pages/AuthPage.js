@@ -8,11 +8,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { waitForBackendWarmup } from '@/utils/backendWarmup';
 import { toast } from 'sonner';
 import { Sparkles, Mail, Lock, User, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
-
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const AuthPage = () => {
   const [tab, setTab] = useState('login');
@@ -33,10 +32,12 @@ const AuthPage = () => {
   const [registerPassword, setRegisterPassword] = useState('');
 
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-  const handleGoogleLogin = () => {
+  const handleGoogleLogin = async () => {
     const redirectUrl = window.location.origin + '/auth/callback';
-    // Keep the free Render instance warm while the user completes Google OAuth.
-    fetch(`${API}/health`, { cache: 'no-store', keepalive: true }).catch(() => {});
+    setLoading(true);
+    // Reuse the wake-up started on application load. After 8 seconds the user
+    // continues to Google while the keepalive request finishes in background.
+    await waitForBackendWarmup(8000);
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
 
