@@ -2945,7 +2945,9 @@ class MultiplayerConnectionManager:
 multiplayer_connections = MultiplayerConnectionManager()
 
 CONTACT_SHARING_PATTERN = re.compile(
-    r"(https?://|www\.|[\w.+-]+@[\w-]+\.[\w.-]+|\+?\d[\d\s().-]{7,}\d)",
+    r"(https?://|www\.|[\w.+-]+@[\w-]+\.[\w.-]+|@\w{2,}|"
+    r"(?:discord|telegram|whatsapp|snapchat|instagram|tiktok|signal)\s*[:@-]?\s*\w+|"
+    r"\+?\d[\d\s().-]{7,}\d)",
     re.IGNORECASE,
 )
 
@@ -4312,7 +4314,7 @@ async def send_multiplayer_reaction(code: str, data: MultiplayerReaction, user: 
     await multiplayer_connections.broadcast(code.strip().upper(), {
         "type": "reaction",
         "user_id": user["id"],
-        "name": user.get("name") or "Joueur",
+        "name": _safe_public_display_name(user.get("name")),
         "reaction": data.reaction,
         "label": MULTIPLAYER_REACTIONS[data.reaction],
     })
