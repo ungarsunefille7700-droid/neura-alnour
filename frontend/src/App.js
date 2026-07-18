@@ -8,7 +8,7 @@ import PrayerNotificationManager from "@/components/PrayerNotificationManager";
 // Context
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
-import { LanguageProvider } from "@/contexts/LanguageContext";
+import { LanguageProvider, useLanguage } from "@/contexts/LanguageContext";
 
 // Pages
 import LandingPage from "@/pages/LandingPage";
@@ -40,6 +40,7 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
+  const { t } = useLanguage();
   const location = useLocation();
   
   // Skip if user passed from AuthCallback
@@ -50,7 +51,7 @@ const ProtectedRoute = ({ children }) => {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="animate-pulse text-primary text-xl">Chargement...</div>
+        <div className="animate-pulse text-primary text-xl">{t('common.loading')}</div>
       </div>
     );
   }

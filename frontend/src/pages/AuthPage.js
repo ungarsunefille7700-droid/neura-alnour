@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { toast } from 'sonner';
 import { Sparkles, Mail, Lock, User, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -19,6 +20,7 @@ const AuthPage = () => {
   const [showPassword, setShowPassword] = useState(false);
   const { login, register } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { t } = useLanguage();
   const navigate = useNavigate();
 
   // Login form
@@ -84,7 +86,7 @@ const AuthPage = () => {
       <header className="p-4 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors">
           <ArrowLeft className="w-5 h-5" />
-          <span>Retour</span>
+          <span>{t('common.back')}</span>
         </Link>
         <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted transition-colors">
           {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -155,7 +157,7 @@ const AuthPage = () => {
                     disabled={loading}
                     data-testid="login-submit-btn"
                   >
-                    {loading ? 'Connexion...' : 'Se connecter'}
+                    {loading ? t('common.loading') : t('common.login')}
                   </Button>
                   
                   {/* Divider */}
