@@ -218,7 +218,7 @@ export default function LanguageTutorPage() {
       ]);
       // In call mode: speak the reply, then listen again.
       if (callModeRef.current) {
-        speak(accumulated, () => { if (callModeRef.current) startListening(true); });
+        speak(accumulated, () => { if (callModeRef.current) startListening(); });
       }
     } catch (e) {
       if (!accumulated) {
@@ -326,7 +326,7 @@ export default function LanguageTutorPage() {
     } else {
       setCallMode(true);
       setMessages((p) => p.length ? p : [{ role: 'assistant', content: `📞 Appel démarré — parle-moi en ${langNative} (ou en français si tu bloques). Je t'écoute…` }]);
-      startListening(true);
+      startListening();
     }
   };
 
