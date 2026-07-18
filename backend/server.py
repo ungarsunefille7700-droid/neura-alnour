@@ -1169,10 +1169,13 @@ async def tavily_search(query: str, max_results: int = 5):
     if not api_key:
         return []
     now, _ = current_server_time()
-    dated_query = (
-        f"{query}\nDate actuelle : {now.strftime('%Y-%m-%d')}. "
-        "Privilégier les informations les plus récentes et les résultats finaux confirmés."
-    )
+    clean_query = " ".join((query or "").split())[:320]
+    query_lower = clean_query.lower()
+    sports_query = any(term in query_lower for term in (
+        "score", "match", "resultat", "résultat", "football", "sport",
+    ))
+    search_suffix = "score final résultat officiel confirmed final score" if sports_query else "information vérifiée"
+    dated_query = f"{clean_query} {search_suffix} date de référence {now.strftime('%Y-%m-%d')}"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
@@ -1180,8 +1183,10 @@ async def tavily_search(query: str, max_results: int = 5):
             json={
                 "query": dated_query,
                 "max_results": max_results,
-                "auto_parameters": True,
-                "include_answer": "advanced",
+                "topic": "general",
+                "search_depth": "basic",
+                "auto_parameters": False,
+                "include_answer": "basic",
                 "include_raw_content": False,
             },
         )
