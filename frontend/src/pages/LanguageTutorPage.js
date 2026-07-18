@@ -6,63 +6,12 @@ import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { LANGUAGES } from '@/i18n/languages';
+import { selectBestVoice, speechChunks, speechLang } from '@/utils/speech';
 import {
   Mic, Send, Phone, PhoneOff, Volume2, Square, GraduationCap, ArrowLeft, Loader2, Sparkles
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-
-// Best-effort BCP-47 code for browser speech (STT/TTS).
-function speechLang(code) {
-  const map = {
-    'ary': 'ar-MA', 'arq': 'ar-DZ', 'aeb': 'ar-TN', 'ar-MA': 'ar-MA', 'ar-TN': 'ar-TN',
-    'kab': 'ar-DZ', 'shy': 'ar-DZ', 'cnu': 'ar-DZ', 'mzb': 'ar-DZ', 'thv': 'ar-DZ', 'ber-DZ': 'ar-DZ',
-    'rif': 'ar-MA', 'shi': 'ar-MA', 'zgh': 'ar-MA', 'tzm': 'ar-MA', 'ber': 'ar-MA', 'jbn': 'ar-TN',
-    'ar': 'ar-SA', 'en': 'en-US', 'fr': 'fr-FR', 'zh': 'zh-CN', 'pt': 'pt-PT',
-  };
-  return map[code] || code.split('-')[0];
-}
-
-function selectBestVoice(voices, locale) {
-  const target = locale.toLowerCase();
-  const language = target.split('-')[0];
-  const qualityPattern = /natural|neural|enhanced|premium|online|google|microsoft|siri/i;
-  return voices
-    .filter((voice) => voice.lang && voice.lang.toLowerCase().split('-')[0] === language)
-    .sort((a, b) => {
-      const score = (voice) => {
-        const voiceLang = voice.lang.toLowerCase();
-        return (voiceLang === target ? 100 : 0)
-          + (qualityPattern.test(voice.name) ? 25 : 0)
-          + (!voice.localService ? 10 : 0)
-          + (voice.default ? 5 : 0);
-      };
-      return score(b) - score(a);
-    })[0];
-}
-
-function speechChunks(text, maxLength = 220) {
-  const clean = text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/[*_#`>\[\]]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!clean) return [];
-  const sentences = clean.match(/[^.!?。！？]+[.!?。！？]?/g) || [clean];
-  const chunks = [];
-  let current = '';
-  sentences.forEach((sentence) => {
-    const next = `${current} ${sentence.trim()}`.trim();
-    if (current && next.length > maxLength) {
-      chunks.push(current);
-      current = sentence.trim();
-    } else {
-      current = next;
-    }
-  });
-  if (current) chunks.push(current);
-  return chunks;
-}
 
 const LEVELS = [
   { key: 'débutant', label: 'Débutant' },
@@ -406,7 +355,7 @@ export default function LanguageTutorPage() {
             {callMode ? <><PhoneOff className="w-4 h-4" /> Raccrocher</> : <><Phone className="w-4 h-4" /> Appeler</>}
           </Button>
           {sttSupported && (
-            <Button type="button" onClick={() => (listening ? stopListening() : startListening(false))}
+            <Button type="button" onClick={() => (listening ? stopListening() : startListening())}
               variant={listening ? 'default' : 'outline'} className="rounded-full h-11 w-11 p-0" title="Parler (voix)">
               {listening ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </Button>
