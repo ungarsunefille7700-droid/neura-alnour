@@ -28,7 +28,7 @@ import {
 const SettingsPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { user, logout } = useAuth();
-  const { language, setLanguage, languages } = useLanguage();
+  const { language, setLanguage, languages, t } = useLanguage();
   const navigate = useNavigate();
   
   const initialNotificationPreferences = getNotificationPreferences();
@@ -87,7 +87,7 @@ const SettingsPage = () => {
             </Link>
             <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
               <ArrowLeft className="w-4 h-4 mr-2" />
-              Retour
+              {t('common.back')}
             </Button>
           </div>
           
@@ -104,7 +104,7 @@ const SettingsPage = () => {
           {/* Hero */}
           <div className="text-center mb-8">
             <SettingsIcon className="w-16 h-16 text-primary mx-auto mb-4" />
-            <h1 className="text-4xl font-bold mb-2">Paramètres</h1>
+            <h1 className="text-4xl font-bold mb-2">{t('settings.title')}</h1>
             <p className="text-muted-foreground">Personnalisez votre expérience</p>
           </div>
 
@@ -135,7 +135,7 @@ const SettingsPage = () => {
           <Card className="p-6 mb-6">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
               <Sun className="w-5 h-5 text-primary" />
-              Apparence
+              {t('settings.theme')}
             </h3>
             <div className="flex items-center justify-between">
               <div>
@@ -155,12 +155,12 @@ const SettingsPage = () => {
           <Card className="p-6 mb-6">
             <h3 className="font-semibold mb-4 flex items-center gap-2">
               <Globe className="w-5 h-5 text-primary" />
-              Langue
+              {t('settings.language')}
             </h3>
             <div className="flex items-center justify-between gap-4">
               <div>
-                <Label htmlFor="language-select" className="font-medium">Langue de l'application</Label>
-                <p className="text-sm text-muted-foreground">L'assistant répondra dans cette langue</p>
+                <Label htmlFor="language-select" className="font-medium">{t('settings.language')}</Label>
+                <p className="text-sm text-muted-foreground">{t('settings.languageDesc')}</p>
               </div>
               <select
                 id="language-select"
@@ -220,7 +220,7 @@ const SettingsPage = () => {
               <div className="flex items-center gap-3">
                 <CreditCard className="w-5 h-5 text-primary" />
                 <div>
-                  <p className="font-medium">Abonnement</p>
+                  <p className="font-medium">{t('nav.subscription')}</p>
                   <p className="text-sm text-muted-foreground">Gérer votre plan</p>
                 </div>
               </div>
@@ -250,7 +250,7 @@ const SettingsPage = () => {
             data-testid="logout-btn"
           >
             <LogOut className="w-4 h-4 mr-2" />
-            Se déconnecter
+            {t('common.logout')}
           </Button>
 
           {/* Footer Info */}

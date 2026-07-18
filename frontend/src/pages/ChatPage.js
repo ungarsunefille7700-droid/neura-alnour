@@ -161,7 +161,7 @@ const ChatPage = () => {
   const navigate = useNavigate();
   const { user, getAuthHeader, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
-  const { languageName, language } = useLanguage();
+  const { languageName, language, t } = useLanguage();
   
   const [conversations, setConversations] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -678,7 +678,7 @@ const ChatPage = () => {
               data-testid="new-chat-btn"
             >
               <Plus className="w-4 h-4 mr-2" />
-              Nouvelle Discussion
+              {t('chat.newConversation')}
             </Button>
           </div>
 
@@ -911,7 +911,7 @@ const ChatPage = () => {
                 <div className="glass rounded-2xl rounded-bl-md p-4">
                   <div className="flex items-center gap-2 text-primary">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span className="text-sm">NEURA réfléchit...</span>
+                    <span className="text-sm">{t('chat.thinking')}</span>
                   </div>
                 </div>
               </div>
@@ -968,7 +968,7 @@ const ChatPage = () => {
             )}
             
             <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">Modèle :</span>
+              <span className="text-xs text-muted-foreground">{t('chat.model')}</span>
               <select
                 value={selectedModel}
                 onChange={(e) => { setSelectedModel(e.target.value); localStorage.setItem('neura_model', e.target.value); }}
@@ -984,10 +984,10 @@ const ChatPage = () => {
                 onClick={() => { const v = !webSearch; setWebSearch(v); localStorage.setItem('neura_websearch', v ? '1' : '0'); }}
                 className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${webSearch ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
                 data-testid="web-search-toggle"
-                title="Recherche web"
+                title={t('chat.web')}
               >
                 <Globe className="w-3 h-3" />
-                Web
+                {t('chat.web')}
               </button>
               <button
                 type="button"
@@ -997,7 +997,7 @@ const ChatPage = () => {
                 title="Mode Développeur (génération de code)"
               >
                 <Code2 className="w-3 h-3" />
-                Code
+                {t('chat.code')}
               </button>
             </div>
 
@@ -1109,7 +1109,7 @@ const ChatPage = () => {
                   ref={inputRef}
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  placeholder={selectedImage || selectedDocument ? "Ajoutez un message (optionnel)..." : "Posez votre question..."}
+                  placeholder={selectedImage || selectedDocument ? "Ajoutez un message (optionnel)..." : t('chat.placeholder')}
                   className="pr-4 h-12 rounded-full bg-muted border-0"
                   disabled={loading}
                   data-testid="chat-input"
@@ -1126,7 +1126,7 @@ const ChatPage = () => {
               </Button>
             </div>
             <p className="text-xs text-center text-muted-foreground mt-3">
-              NEURA AL-NOUR est une IA. Consultez un imam pour les questions complexes.
+              {t('chat.disclaimer')}
             </p>
           </form>
         </div>
