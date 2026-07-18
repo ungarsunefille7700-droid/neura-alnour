@@ -144,16 +144,20 @@ const getLocalCurrentDateAnswer = (text, lang) => {
   if (!asksDate) return null;
 
   const now = new Date();
-  if ((lang || '').toLowerCase().startsWith('en')) {
+  const responseLanguage = (lang || 'fr').toLowerCase();
+  if (responseLanguage.startsWith('en')) {
     return `Today is ${new Intl.DateTimeFormat('en-US', {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
       timeZone: 'Europe/Paris'
     }).format(now)} (Europe/Paris).`;
   }
-  return `Nous sommes aujourd'hui le ${new Intl.DateTimeFormat('fr-FR', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    timeZone: 'Europe/Paris'
-  }).format(now)} (Europe/Paris).`;
+  if (responseLanguage.startsWith('fr')) {
+    return `Nous sommes aujourd'hui le ${new Intl.DateTimeFormat('fr-FR', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      timeZone: 'Europe/Paris'
+    }).format(now)} (Europe/Paris).`;
+  }
+  return null;
 };
 
 const ChatPage = () => {
