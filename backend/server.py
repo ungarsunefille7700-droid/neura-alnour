@@ -200,9 +200,15 @@ def _current_date_direct_answer(user_text: str, lang: Optional[str] = None) -> O
         "juillet", "aout", "septembre", "octobre", "novembre", "decembre",
     ]
     date_fr = f"{weekdays[now.weekday()]} {now.day} {months[now.month - 1]} {now.year}"
-    if lang and str(lang).lower().startswith("en"):
+    response_language = str(lang or "French").strip().lower()
+    if response_language.startswith("en"):
         return f"Today is {now.strftime('%A, %B %d, %Y')} ({timezone_label})."
-    return f"Nous sommes aujourd'hui le {date_fr} ({timezone_label})."
+    if response_language.startswith("fr"):
+        return f"Nous sommes aujourd'hui le {date_fr} ({timezone_label})."
+
+    # For every other selected language, let the configured model translate the
+    # dynamic server date instead of incorrectly returning the French shortcut.
+    return None
 
 
 async def _save_direct_chat_answer(conversation_id: str, user_id: str, answer: str):
