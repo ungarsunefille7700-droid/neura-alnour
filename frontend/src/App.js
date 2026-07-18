@@ -3,6 +3,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import AppErrorBoundary from "@/components/AppErrorBoundary";
+import PrayerNotificationManager from "@/components/PrayerNotificationManager";
 
 // Context
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
@@ -130,6 +131,7 @@ function AppContent() {
   
   return (
     <div className="min-h-screen bg-background page-enter">
+      <PrayerNotificationManager />
       <AppErrorBoundary>
         <AppRouter />
       </AppErrorBoundary>
