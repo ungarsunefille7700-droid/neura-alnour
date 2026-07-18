@@ -381,12 +381,16 @@ export default function IslamLearningPage() {
                   const completed = progress.completed_topics?.includes(topic.id);
                   const favorite = progress.favorite_topics?.includes(topic.id);
                   return (
-                    <button
+                    <div
                       key={topic.id}
-                      onClick={() => startTopic(topic)}
-                      className="text-left border border-border rounded-lg p-4 hover:border-primary/60 hover:bg-muted/40 transition-colors"
+                      className="relative border border-border rounded-lg hover:border-primary/60 hover:bg-muted/40 transition-colors"
                     >
-                      <div className="flex items-start gap-3">
+                      <button
+                        type="button"
+                        onClick={() => startTopic(topic)}
+                        className="w-full text-left p-4 pr-20"
+                      >
+                        <div className="flex items-start gap-3">
                         <div className="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
                           {completed ? <Check className="w-5 h-5" /> : <Icon className="w-5 h-5" />}
                         </div>
@@ -396,12 +400,19 @@ export default function IslamLearningPage() {
                           <p className="text-sm text-muted-foreground mt-1">{topic.summary || topic.subtitle}</p>
                           {topic.source_note && <p className="text-xs text-primary mt-2">Source : {topic.source_note}</p>}
                         </div>
-                        <button onClick={(event) => toggleFavorite(topic, event)} className={`ml-auto mt-1 ${favorite ? 'text-yellow-500' : 'text-muted-foreground'}`} aria-label="Favori">
-                          <Star className="w-4 h-4" />
-                        </button>
-                        <ChevronRight className="w-4 h-4 mt-2 text-muted-foreground shrink-0" />
-                      </div>
-                    </button>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => toggleFavorite(topic, event)}
+                        className={`absolute right-10 top-4 p-1 ${favorite ? 'text-yellow-500' : 'text-muted-foreground'}`}
+                        aria-label="Favori"
+                        aria-pressed={Boolean(favorite)}
+                      >
+                        <Star className="w-4 h-4" />
+                      </button>
+                      <ChevronRight className="absolute right-4 top-5 w-4 h-4 text-muted-foreground pointer-events-none" />
+                    </div>
                   );
                 })}
               </div>
