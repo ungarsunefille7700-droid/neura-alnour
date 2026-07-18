@@ -622,10 +622,10 @@ const ChatPage = () => {
   };
 
   const navItems = [
-    { icon: BookOpen, label: 'Coran', path: '/quran' },
-    { icon: Clock, label: 'Prières', path: '/prayer-times' },
-    { icon: Heart, label: 'Douas', path: '/duas' },
-    { icon: Brain, label: 'Quiz', path: '/quiz' },
+    { icon: BookOpen, label: t('nav.quran'), path: '/quran' },
+    { icon: Clock, label: t('nav.prayers'), path: '/prayer-times' },
+    { icon: Heart, label: t('nav.duas'), path: '/duas' },
+    { icon: Brain, label: t('nav.quiz'), path: '/quiz' },
     { icon: Moon, label: 'Ramadan', path: '/ramadan' },
   ];
 
@@ -759,7 +759,7 @@ const ChatPage = () => {
                 ) : (
                   <Link to="/subscription" className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs hover:bg-primary/10 hover:text-primary transition-colors" data-testid="upgrade-link">
                     <Star className="w-3 h-3" />
-                    Passer Premium
+                    {t('common.upgrade')}
                   </Link>
                 )}
               </div>
