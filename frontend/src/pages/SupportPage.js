@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { 
   Heart,
   Sun,
@@ -13,6 +14,7 @@ import {
 
 const SupportPage = () => {
   const { theme, toggleTheme } = useTheme();
+  const { t } = useLanguage();
 
   const handlePayPalDonate = () => {
     // PayPal donation link with the specified email
@@ -130,7 +132,7 @@ const SupportPage = () => {
           {/* Back link */}
           <div className="text-center mt-8">
             <Link to="/" className="text-primary hover:underline">
-              ← Retour à l'accueil
+              ← {t('common.back')}
             </Link>
           </div>
         </div>

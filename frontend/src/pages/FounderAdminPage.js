@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const PERIODS = [
@@ -29,6 +30,7 @@ function Stat({ label, value }) {
 
 export default function FounderAdminPage() {
   const { getAuthHeader, user } = useAuth();
+  const { t } = useLanguage();
   const navigate = useNavigate();
   const [tab, setTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
@@ -129,7 +131,7 @@ export default function FounderAdminPage() {
   if (loading) {
     return (
       <main className="min-h-screen bg-background text-foreground flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-primary mr-3" /> Chargement du panel...
+        <Loader2 className="w-6 h-6 animate-spin text-primary mr-3" /> {t('common.loading')}
       </main>
     );
   }
@@ -138,7 +140,7 @@ export default function FounderAdminPage() {
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border sticky top-0 z-30 bg-background/95">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
-          <button onClick={() => navigate('/quiz/multiplayer')} className="p-2 rounded-md hover:bg-muted" aria-label="Retour">
+          <button onClick={() => navigate('/quiz/multiplayer')} className="p-2 rounded-md hover:bg-muted" aria-label={t('common.back')}>
             <ArrowLeft className="w-5 h-5" />
           </button>
           <Crown className="w-5 h-5 text-yellow-500" />
@@ -200,7 +202,7 @@ export default function FounderAdminPage() {
                   <input
                     value={search}
                     onChange={(event) => searchUsers(event.target.value)}
-                    placeholder="Rechercher pseudo, nom, email ou ID..."
+                    placeholder={t('common.search')}
                     className="w-full h-11 rounded-md bg-muted border border-border pl-10 pr-3 outline-none focus:ring-2 focus:ring-primary"
                   />
                 </div>

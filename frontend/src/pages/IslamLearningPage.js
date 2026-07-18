@@ -4,6 +4,7 @@ import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import {
@@ -48,6 +49,7 @@ function chapterIcon(level) {
 export default function IslamLearningPage() {
   const navigate = useNavigate();
   const { user, getAuthHeader } = useAuth();
+  const { t } = useLanguage();
   const [view, setView] = useState('parcours');
   const [level, setLevel] = useState('debutant');
   const [topics, setTopics] = useState(FALLBACK_TOPICS);
@@ -301,7 +303,7 @@ export default function IslamLearningPage() {
     <div className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border bg-background/95 sticky top-0 z-40">
         <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
-          <button onClick={() => navigate('/')} className="p-2 rounded-lg hover:bg-muted" aria-label="Retour">
+          <button onClick={() => navigate('/')} className="p-2 rounded-lg hover:bg-muted" aria-label={t('common.back')}>
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex items-center gap-2">
@@ -331,12 +333,12 @@ export default function IslamLearningPage() {
           {!isSignedIn && (
             <div className="mt-4 rounded-lg border border-primary/25 bg-primary/5 p-4 text-sm text-muted-foreground">
               Les cours d'islam sont accessibles gratuitement. Connecte-toi gratuitement pour activer le professeur IA, les notes, les favoris et la sauvegarde de progression.
-              <Link to="/auth" className="ml-2 font-medium text-primary hover:underline">Se connecter</Link>
+              <Link to="/auth" className="ml-2 font-medium text-primary hover:underline">{t('common.login')}</Link>
             </div>
           )}
           <div className="mt-5 max-w-xl">
             <div className="flex justify-between text-sm mb-2">
-              <span>{loadingProgress ? 'Chargement...' : `${completedCount} / ${topics.length} chapitres termines`}</span>
+              <span>{loadingProgress ? t('common.loading') : `${completedCount} / ${topics.length} chapitres termines`}</span>
               <span>{progressPercent}%</span>
             </div>
             <Progress value={progressPercent} className="h-2" />
@@ -366,7 +368,7 @@ export default function IslamLearningPage() {
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Rechercher un cours, chapitre ou sujet..."
+                placeholder={t('common.search')}
                 className="w-full h-11 rounded-md bg-muted border border-border pl-10 pr-3 outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
@@ -508,7 +510,7 @@ export default function IslamLearningPage() {
                     <Button type="button" variant="outline" onClick={startVoiceInput} disabled={busy || listening || !isSignedIn} size="icon" aria-label="Parler">
                       {listening ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                     </Button>
-                    <Button type="submit" disabled={busy || !input.trim()} size="icon" aria-label="Envoyer">
+                    <Button type="submit" disabled={busy || !input.trim()} size="icon" aria-label={t('common.send')}>
                       {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                     </Button>
                   </form>

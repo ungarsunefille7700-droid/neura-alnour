@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { toast } from 'sonner';
 import { 
   CreditCard, 
@@ -27,6 +28,7 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const SubscriptionPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { user, getAuthHeader, fetchUser } = useAuth();
+  const { t } = useLanguage();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   
@@ -115,17 +117,16 @@ const SubscriptionPage = () => {
   const plans = [
     {
       id: 'free',
-      name: 'Gratuit',
+      name: 'Free',
       icon: Sparkles,
       price: { monthly: 0, yearly: 0 },
-      description: 'Module islamique complet',
+      description: 'Découvrez ce que l’IA peut faire',
       features: [
-        'Messages texte illimités',
-        'Coran complet + audio',
-        'Heures de prière + Adhan',
-        'Invocations (Douas)',
-        'Quiz islamique illimité',
-        'Module Ramadan & Aïd'
+        'Modèle de base Gemini',
+        'Messages texte illimités et historique limité à 10 conversations',
+        '3 créations d’images offertes',
+        'Mémoire développeur limitée',
+        'Module islamique complet et gratuit'
       ],
       highlight: false,
       current: user?.subscription === 'free'
@@ -278,7 +279,7 @@ const SubscriptionPage = () => {
           {user && (
             <Button variant="ghost" onClick={() => navigate('/chat')} className="mb-4">
               <ArrowLeft className="w-4 h-4 mr-2" />
-              Retour au chat
+              {t('common.back')}
             </Button>
           )}
 
@@ -388,9 +389,10 @@ const SubscriptionPage = () => {
                     variant="outline" 
                     className="w-full rounded-full"
                     onClick={() => navigate(user ? '/chat' : '/auth')}
+                    disabled={plan.current}
                     data-testid={`plan-btn-${plan.id}`}
                   >
-                    {user ? 'Accéder' : 'Commencer'}
+                    {plan.current ? 'Votre forfait actuel' : (user ? 'Accéder' : 'Commencer')}
                   </Button>
                 ) : plan.current || user?.is_vip ? (
                   <Button 

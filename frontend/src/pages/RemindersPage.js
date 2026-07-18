@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Clock3, Heart, Play, RotateCcw, Search, Video } from 'lucide-react';
 import { REMINDERS } from '@/data/reminders';
+import { useLanguage } from '@/contexts/LanguageContext';
 
 const FAVORITES_KEY = 'neura_reminder_favorites';
 const HISTORY_KEY = 'neura_reminder_history';
@@ -17,6 +18,7 @@ function readStoredList(key) {
 
 export default function RemindersPage() {
   const navigate = useNavigate();
+  const { t } = useLanguage();
   const [selected, setSelected] = useState(REMINDERS[0]);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('Tous');
@@ -69,7 +71,7 @@ export default function RemindersPage() {
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border bg-background/95 sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
-          <button onClick={() => navigate('/')} className="p-2 rounded-lg hover:bg-muted" aria-label="Retour">
+          <button onClick={() => navigate('/')} className="p-2 rounded-lg hover:bg-muted" aria-label={t('common.back')}>
             <ArrowLeft className="w-5 h-5" />
           </button>
           <Video className="w-5 h-5 text-primary" />
@@ -128,7 +130,7 @@ export default function RemindersPage() {
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Rechercher un rappel…"
+              placeholder={t('common.search')}
               className="w-full h-10 rounded-md bg-muted border border-border pl-10 pr-3 outline-none focus:ring-2 focus:ring-primary"
             />
           </label>

@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLanguage } from '@/contexts/LanguageContext';
 import { toast } from 'sonner';
 import { 
   BookOpen,
@@ -38,6 +39,7 @@ const categoryIcons = {
 const LearnPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { user, getAuthHeader } = useAuth();
+  const { t } = useLanguage();
   const [lessons, setLessons] = useState([]);
   const [currentLesson, setCurrentLesson] = useState(null);
   const [currentSection, setCurrentSection] = useState(0);
@@ -152,7 +154,7 @@ const LearnPage = () => {
               className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
             >
               <ChevronLeft className="w-5 h-5" />
-              <span>Retour</span>
+              <span>{t('common.back')}</span>
             </button>
             
             <div className="flex items-center gap-2">
