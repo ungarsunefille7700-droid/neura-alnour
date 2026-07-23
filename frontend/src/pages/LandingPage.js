@@ -82,10 +82,19 @@ const LandingPage = () => {
       highlight: true
     },
     {
-      name: "Pro",
-      price: "14,99€",
+      name: "Plus",
+      price: "22€",
       period: "/mois",
-      features: ["Priorité serveur", "50+ récitateurs", "Mode mémorisation", "Coaching spirituel"],
+      description: "Pour une utilisation intensive",
+      features: [
+        "Tout du plan Mongo",
+        "Accès maximal aux modèles avancés",
+        "Quotas IA trois fois supérieurs à Mongo",
+        "Jusqu’à 80 captures d’écran toutes les 3 h",
+        "Analyse d’images fortement prolongée",
+        "Jusqu’à 50 générations d’images par 24 h",
+        "Mémoire et contexte maximaux"
+      ],
       highlight: false
     }
   ];
@@ -296,9 +305,12 @@ const LandingPage = () => {
                   <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium mb-4">
                     <Star className="w-3 h-3" /> Populaire
                   </span>
-                )}
-                <h3 className="text-xl font-semibold mb-2">{plan.name}</h3>
-                <div className="mb-6">
+                    )}
+                    <h3 className="text-xl font-semibold mb-2">{plan.name}</h3>
+                    {plan.description && (
+                      <p className="text-sm text-muted-foreground mb-3">{plan.description}</p>
+                    )}
+                    <div className="mb-6">
                   <span className="text-4xl font-bold">{plan.price}</span>
                   <span className="text-muted-foreground">{plan.period}</span>
                 </div>

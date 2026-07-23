@@ -131,7 +131,7 @@ class TestSubscriptionPlans:
         expected_prices = {
             "free": (0, 0),
             "mongo": (8.99, 89.99),
-            "pro": (14.99, 89.99),
+            "pro": (22.0, 89.99),
             "developer": (19.99, 119.99),
             "neura_plus": (119.99, 1199.99),
             "neura_ultra": (299.99, 2999.99),

@@ -37,7 +37,9 @@ import {
   Star,
   Wand2,
   Globe,
+  Camera,
   Code2,
+  Briefcase,
   Copy,
   Check
 } from 'lucide-react';
@@ -129,6 +131,14 @@ const getStatusLabel = (lang, model, phase) => {
   return (l && l[phase]) || '…';
 };
 
+const WORK_STATUS = {
+  analyzing: 'Analyse de la tâche…',
+  reading_files: 'Lecture des fichiers du projet…',
+  searching: 'Recherche des informations nécessaires…',
+  generating: 'Exécution et création des livrables…',
+  saving: 'Enregistrement du travail…',
+};
+
 const quotaNoticeContent = (message) => {
   const reset = formatQuotaReset(message.reset_at) || 'l’heure indiquée par le serveur';
   if (message.quota_type === 'advanced_fallback') {
@@ -177,6 +187,14 @@ const getLocalCurrentDateAnswer = (text, lang) => {
   return null;
 };
 
+const isImageGenerationIntent = (text) => {
+  const normalized = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return [
+    'cree-moi une image', 'cree une image', 'genere une image',
+    'genere-moi une image', 'cree une illustration', 'genere une illustration'
+  ].some((marker) => normalized.includes(marker));
+};
+
 const ChatPage = () => {
   const { conversationId } = useParams();
   const navigate = useNavigate();
@@ -198,8 +216,15 @@ const ChatPage = () => {
   const [selectedModel, setSelectedModel] = useState(getStoredModelKey);
   const [modelOptions, setModelOptions] = useState([]);
   const [activeModel, setActiveModel] = useState(null);
-  const [webSearch, setWebSearch] = useState(() => localStorage.getItem('neura_websearch') === '1');
-  const [devMode, setDevMode] = useState(() => localStorage.getItem('neura_devmode') === '1');
+  const [selectedIntelligenceMode, setSelectedIntelligenceMode] = useState('auto');
+  const [intelligenceModes, setIntelligenceModes] = useState([]);
+  const [workAvailable, setWorkAvailable] = useState(false);
+  const [conversationMode, setConversationMode] = useState('chat');
+  const [workQuota, setWorkQuota] = useState(null);
+  const [webMode, setWebMode] = useState(() => localStorage.getItem('neura_websearch') === '1' ? 'forced' : 'auto');
+  const [devMode, setDevMode] = useState(false);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [imageCreationMode, setImageCreationMode] = useState(false);
   const [devSessionId, setDevSessionId] = useState(null);
   const [devStatus, setDevStatus] = useState(null);
   const [devRole, setDevRole] = useState('');
@@ -216,7 +241,13 @@ const ChatPage = () => {
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const photoInputRef = useRef(null);
+  const documentInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const toolsMenuRef = useRef(null);
+  const webSearch = webMode === 'forced';
+  const cameraAvailable = typeof navigator !== 'undefined'
+    && Boolean(navigator.mediaDevices?.getUserMedia);
   const textQuotaBlocked = Boolean(currentConversation && conversationQuota?.applies && conversationQuota?.blocked);
   const captureQuotaBlocked = Boolean(currentConversation && captureQuota?.applies && captureQuota?.blocked);
   const conversationBlocked = textQuotaBlocked || (!isMongoPlan && captureQuotaBlocked);
@@ -227,6 +258,22 @@ const ChatPage = () => {
   }, []);
 
   useEffect(() => {
+    if (!toolsMenuOpen) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!toolsMenuRef.current?.contains(event.target)) setToolsMenuOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setToolsMenuOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [toolsMenuOpen]);
+
+  useEffect(() => {
     if (conversationId) {
       setCurrentConversation(conversationId);
       fetchMessages(conversationId);
@@ -234,6 +281,7 @@ const ChatPage = () => {
       setMessages([]);
       setCurrentConversation(null);
       setConversationQuota(null);
+      setWorkQuota(null);
       setActiveCaptureId(null);
       setCaptureQuota(null);
     }
@@ -302,6 +350,18 @@ const ChatPage = () => {
       return response.data;
     } catch (error) {
       console.error('Error fetching chat image quota:', error);
+      return null;
+    }
+  };
+
+  const fetchWorkQuota = async () => {
+    if (!workAvailable) return null;
+    try {
+      const response = await axios.get(`${API}/chat/work/quota`, { headers: getAuthHeader() });
+      setWorkQuota(response.data);
+      return response.data;
+    } catch (error) {
+      setWorkQuota(null);
       return null;
     }
   };
@@ -379,18 +439,27 @@ const ChatPage = () => {
       setSelectedModel(model.selection_key);
       localStorage.setItem('neura_model', model.selection_key);
     }
+    if (model.requested_mode) {
+      setSelectedIntelligenceMode(model.requested_mode);
+    }
   };
 
-  const fetchModelState = async (convId, requestedModel) => {
+  const fetchModelState = async (convId, requestedModel, requestedMode) => {
     try {
       const params = {};
       if (convId) params.conversation_id = convId;
       if (requestedModel) params.model = requestedModel;
+      if (requestedMode) params.intelligence_mode = requestedMode;
       const response = await axios.get(`${API}/chat/models`, {
         headers: getAuthHeader(),
         params
       });
       if (Array.isArray(response.data?.options)) setModelOptions(response.data.options);
+      setIntelligenceModes(Array.isArray(response.data?.intelligence_modes) ? response.data.intelligence_modes : []);
+      setWorkAvailable(Boolean(response.data?.work_available));
+      if (convId && response.data?.conversation_type) {
+        setConversationMode(response.data.conversation_type);
+      }
       applyServerModel(response.data?.active_model);
       return response.data;
     } catch (error) {
@@ -402,7 +471,12 @@ const ChatPage = () => {
   const handleModelChange = (nextModel) => {
     setSelectedModel(nextModel);
     localStorage.setItem('neura_model', nextModel);
-    fetchModelState(currentConversation, nextModel);
+    fetchModelState(currentConversation, nextModel, selectedIntelligenceMode);
+  };
+
+  const handleIntelligenceModeChange = (nextMode) => {
+    setSelectedIntelligenceMode(nextMode);
+    fetchModelState(currentConversation, selectedModel, nextMode);
   };
 
   const fetchMessages = async (convId) => {
@@ -413,6 +487,8 @@ const ChatPage = () => {
       ]);
       setMessages(messagesResponse.data);
       setConversationQuota(quotaResponse.data);
+      setConversationMode(quotaResponse.data?.conversation_type || 'chat');
+      setWorkQuota(quotaResponse.data?.work_quota || null);
       applyServerModel(quotaResponse.data?.active_model);
       setCaptureQuota(quotaResponse.data?.capture || null);
       setActiveCaptureId(
@@ -427,11 +503,12 @@ const ChatPage = () => {
 
   const sendMessageStream = async (userMessage, tempId, requestId) => {
     setStreaming(true);
-    setStreamPhase('searching');
+    setStreamPhase('writing');
     setStreamContent('');
     setStreamSources([]);
     let acc = '';
     let sources = [];
+    let webMeta = null;
     let convId = currentConversation;
     let quotaLimited = false;
     try {
@@ -443,8 +520,10 @@ const ChatPage = () => {
           conversation_id: currentConversation,
           request_id: requestId,
           model: selectedModel,
+          intelligence_mode: selectedIntelligenceMode,
           lang: languageName,
-          web_search: true
+          web_search: webSearch,
+          web_mode: webMode
         })
       });
       if (!response.ok || !response.body) throw new Error('stream failed');
@@ -479,6 +558,7 @@ const ChatPage = () => {
             if (Array.isArray(evt.sources)) sources = evt.sources;
             if (evt.conversation_id) convId = evt.conversation_id;
             if (evt.quota) setConversationQuota(evt.quota);
+            webMeta = evt.web_search || null;
             applyServerModel(evt.active_model || evt.model);
           } else if (evt.type === 'quota_limit') {
             quotaLimited = true;
@@ -505,6 +585,7 @@ const ChatPage = () => {
         role: 'assistant',
         content: acc,
         sources,
+        web_search: webMeta,
         created_at: new Date().toISOString()
       };
       setMessages(prev => [...prev, aiMessage]);
@@ -515,9 +596,114 @@ const ChatPage = () => {
       }
       if (convId) fetchMessages(convId);
     } catch (error) {
-      toast.error('Erreur lors de la recherche web');
+      toast.error('Erreur lors de la réponse IA');
       setMessages(prev => prev.filter(m => m.id !== tempId));
     } finally {
+      if (webMode === 'forced') {
+        setWebMode('auto');
+        localStorage.removeItem('neura_websearch');
+      }
+      setStreaming(false);
+      setStreamPhase(null);
+      setStreamContent('');
+      setStreamSources([]);
+      inputRef.current?.focus();
+    }
+  };
+
+  const sendWorkTask = async (userMessage, tempId, requestId, imageToSend, documentToSend) => {
+    setStreaming(true);
+    setStreamPhase('analyzing');
+    setStreamContent('');
+    setStreamSources([]);
+    let convId = currentConversation;
+    let answer = '';
+    let sources = [];
+    let webMeta = null;
+    let quotaLimited = false;
+    try {
+      const response = await fetch(`${API}/chat/work`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+        body: JSON.stringify({
+          content: userMessage || (documentToSend ? 'Analyse ce document.' : 'Analyse cette image.'),
+          conversation_id: currentConversation,
+          request_id: requestId,
+          image_base64: imageToSend || null,
+          document_name: documentToSend?.name || null,
+          document_text: documentToSend?.content || null,
+          model: selectedModel,
+          intelligence_mode: selectedIntelligenceMode,
+          lang: languageName,
+          web_search: webSearch,
+          web_mode: webMode
+        })
+      });
+      if (!response.ok || !response.body) throw new Error('work stream failed');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(5).trim()); } catch (err) { continue; }
+          if (evt.type === 'phase') {
+            setStreamPhase(evt.phase);
+          } else if (evt.type === 'model') {
+            applyServerModel(evt.model);
+          } else if (evt.type === 'quota') {
+            setWorkQuota(evt.work_quota || null);
+          } else if (evt.type === 'quota_limit') {
+            quotaLimited = true;
+            setWorkQuota(evt.work_quota || null);
+            toast.error('Limite du mode Work atteinte. Le mode Chat reste disponible.');
+          } else if (evt.type === 'done') {
+            answer = evt.response || evt.message || '';
+            sources = Array.isArray(evt.sources) ? evt.sources : [];
+            convId = evt.conversation_id || convId;
+            setWorkQuota(evt.work_quota || null);
+            webMeta = evt.web_search || null;
+            applyServerModel(evt.active_model || evt.model);
+          } else if (evt.type === 'error') {
+            throw new Error(evt.detail || 'work error');
+          }
+        }
+      }
+      if (quotaLimited) {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+        return;
+      }
+      if (!answer) throw new Error('empty work response');
+      setMessages(prev => [...prev, {
+        id: `work-${Date.now()}`,
+        role: 'assistant',
+        content: answer,
+        sources,
+        web_search: webMeta,
+        conversation_type: 'work',
+        created_at: new Date().toISOString()
+      }]);
+      if (!currentConversation && convId) {
+        setCurrentConversation(convId);
+        navigate(`/chat/${convId}`, { replace: true });
+        fetchConversations();
+      }
+      if (convId) fetchMessages(convId);
+    } catch (error) {
+      toast.error(error.message || 'Le mode Work est temporairement indisponible.');
+      setMessages(prev => prev.filter(m => m.id !== tempId));
+    } finally {
+      if (webMode === 'forced') {
+        setWebMode('auto');
+        localStorage.removeItem('neura_websearch');
+      }
       setStreaming(false);
       setStreamPhase(null);
       setStreamContent('');
@@ -557,6 +743,10 @@ const ChatPage = () => {
         setMessages(prev => prev.filter(m => m.id !== tempId));
       }
     } finally {
+      if (webMode === 'forced') {
+        setWebMode('auto');
+        localStorage.removeItem('neura_websearch');
+      }
       setLoading(false);
       inputRef.current?.focus();
     }
@@ -565,6 +755,16 @@ const ChatPage = () => {
   const sendMessage = async (e) => {
     e.preventDefault();
     if ((!inputMessage.trim() && !selectedImage && !selectedDocument) || loading || streaming) return;
+    if (
+      conversationMode === 'chat'
+      && !selectedImage
+      && !selectedDocument
+      && (imageCreationMode || isImageGenerationIntent(inputMessage))
+    ) {
+      setImageCreationMode(false);
+      await generateImage();
+      return;
+    }
     if (conversationBlocked) {
       toast.error('Cette conversation a atteint sa limite gratuite. Commencez une nouvelle conversation ou consultez les offres.');
       return;
@@ -593,6 +793,17 @@ const ChatPage = () => {
     setImagePreview(null);
     setSelectedDocument(null);
 
+    if (conversationMode === 'work') {
+      await sendWorkTask(
+        userMessage,
+        tempUserMsg.id,
+        requestId,
+        imageToSend,
+        documentToSend
+      );
+      return;
+    }
+
     const localDateAnswer = (!imageToSend && !documentToSend && !devMode && !webSearch)
       ? getLocalCurrentDateAnswer(userMessage, language)
       : null;
@@ -611,8 +822,10 @@ const ChatPage = () => {
         conversation_id: currentConversation,
         request_id: requestId,
         model: selectedModel,
+        intelligence_mode: selectedIntelligenceMode,
         lang: languageName,
-        web_search: false
+        web_search: false,
+        web_mode: 'auto'
       }, { headers: getAuthHeader(), timeout: 15000 }).then((response) => {
         applyServerModel(response.data?.active_model);
         if (!currentConversation && response.data?.conversation_id) {
@@ -625,14 +838,28 @@ const ChatPage = () => {
       return;
     }
 
-    // Developer (Code) mode -> dedicated assistant endpoint (supports image + web).
-    if (devMode) {
+    let developerRequest = false;
+    try {
+      const intent = await axios.post(
+        `${API}/developer/intent`,
+        { content: userMessage, document_name: documentToSend?.name || null },
+        { headers: getAuthHeader(), timeout: 10000 }
+      );
+      developerRequest = Boolean(intent.data?.use_developer);
+    } catch (error) {
+      developerRequest = false;
+    }
+    setDevMode(developerRequest);
+    if (developerRequest) {
+      axios.get(`${API}/developer/status`, { headers: getAuthHeader() })
+        .then(response => setDevStatus(response.data))
+        .catch(() => {});
       await sendDevMessage(userMessage, tempUserMsg.id, imageToSend, documentToSend);
       return;
     }
 
-    // Web search uses the SSE streaming endpoint (text only).
-    if (webSearch && !imageToSend && !documentToSend && !activeCaptureId) {
+    // Text chat always uses SSE so the server can activate Web automatically.
+    if (!imageToSend && !documentToSend && !activeCaptureId) {
       await sendMessageStream(userMessage, tempUserMsg.id, requestId);
       return;
     }
@@ -649,8 +876,10 @@ const ChatPage = () => {
         document_name: documentToSend?.name || null,
         document_text: documentToSend?.content || null,
         model: selectedModel,
+        intelligence_mode: selectedIntelligenceMode,
         lang: languageName,
-        web_search: webSearch
+        web_search: webSearch,
+        web_mode: webMode
       }, {
         headers: getAuthHeader(),
         timeout: 120000 // 2 minute timeout for image/document analysis
@@ -662,6 +891,7 @@ const ChatPage = () => {
         role: 'assistant',
         content: response.data.message,
         sources: response.data.sources || [],
+        web_search: response.data.web_search || null,
         created_at: new Date().toISOString()
       };
       setMessages(prev => [...prev, aiMessage]);
@@ -706,6 +936,10 @@ const ChatPage = () => {
       // Remove temp message on error
       setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id));
     } finally {
+      if (webMode === 'forced') {
+        setWebMode('auto');
+        localStorage.removeItem('neura_websearch');
+      }
       setLoading(false);
       inputRef.current?.focus();
     }
@@ -777,31 +1011,57 @@ const ChatPage = () => {
   const removeSelectedImage = () => {
     setSelectedImage(null);
     setImagePreview(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    if (photoInputRef.current) photoInputRef.current.value = '';
+    if (cameraInputRef.current) cameraInputRef.current.value = '';
   };
 
   const removeSelectedDocument = () => {
     setSelectedDocument(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    if (documentInputRef.current) documentInputRef.current.value = '';
   };
 
-  const startNewChat = () => {
+  const activateForcedWebSearch = () => {
+    setWebMode('forced');
+    localStorage.setItem('neura_websearch', '1');
+    setToolsMenuOpen(false);
+    inputRef.current?.focus();
+  };
+
+  const activateImageCreation = () => {
+    setToolsMenuOpen(false);
+    if (inputMessage.trim()) {
+      generateImage();
+      return;
+    }
+    setImageCreationMode(true);
+    inputRef.current?.focus();
+  };
+
+  const startNewChat = (requestedMode = 'chat') => {
+    const nextMode = typeof requestedMode === 'string' ? requestedMode : 'chat';
     setCurrentConversation(null);
     setMessages([]);
     setConversationQuota(null);
+    setWorkQuota(null);
     setActiveModel(null);
     setActiveCaptureId(null);
     setCaptureQuota(null);
     setSelectedImage(null);
     setImagePreview(null);
     setSelectedDocument(null);
-    fetchModelState(null, selectedModel);
+    setImageCreationMode(false);
+    setToolsMenuOpen(false);
+    setSelectedIntelligenceMode('auto');
+    setConversationMode(nextMode);
+    fetchModelState(null, selectedModel, 'auto');
+    if (nextMode === 'work') fetchWorkQuota();
     navigate('/chat');
     setSidebarOpen(false);
+  };
+
+  const handleConversationModeChange = (nextMode) => {
+    if (!workAvailable || !['chat', 'work'].includes(nextMode) || nextMode === conversationMode) return;
+    startNewChat(nextMode);
   };
 
   const deleteConversation = async (convId, e) => {
@@ -902,7 +1162,9 @@ const ChatPage = () => {
                   `}
                   data-testid={`conversation-${conv.id}`}
                 >
-                  <MessageSquare className="w-4 h-4 flex-shrink-0" />
+                  {conv.conversation_type === 'work'
+                    ? <Briefcase className="w-4 h-4 flex-shrink-0" />
+                    : <MessageSquare className="w-4 h-4 flex-shrink-0" />}
                   <span className="flex-1 truncate text-sm">{conv.title}</span>
                   <button
                     onClick={(e) => deleteConversation(conv.id, e)}
@@ -957,7 +1219,7 @@ const ChatPage = () => {
                     <Zap className="w-3 h-3" />
                     {user.subscription === 'comme_toi' ? 'Comme Toi' : 
                      user.subscription === 'mongo' ? 'Mongo' : 
-                     user.subscription === 'pro' ? 'Pro' : 
+                     user.subscription === 'pro' ? 'Plus' :
                      user.subscription === 'developer' ? 'Développeur' : user.subscription}
                   </span>
                 ) : (
@@ -1001,6 +1263,26 @@ const ChatPage = () => {
             <span className="font-bold">NEURA AL-NOUR</span>
           </div>
         </header>
+
+        {workAvailable && (
+          <div className="flex min-h-11 items-center justify-center border-b border-border px-4">
+            <select
+              value={conversationMode}
+              onChange={(event) => handleConversationModeChange(event.target.value)}
+              className="rounded-full border border-border bg-muted px-4 py-1.5 text-sm font-medium outline-none"
+              data-testid="conversation-mode-selector"
+              aria-label="Mode de conversation"
+            >
+              <option value="chat">Chat</option>
+              <option value="work">Work</option>
+            </select>
+            {conversationMode === 'work' && workQuota && !workQuota.unlimited && (
+              <span className="ml-2 text-xs text-muted-foreground" data-testid="work-quota">
+                {workQuota.remaining}/{workQuota.limit} unités
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Messages Area */}
         <ScrollArea className="flex-1 p-4">
@@ -1111,6 +1393,13 @@ const ChatPage = () => {
                           )}
                         </div>
                       )}
+                      {msg.role === 'assistant' && msg.web_search?.performed && (
+                        <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-xs text-primary" data-testid="web-search-used">
+                          <Globe className="h-3 w-3" />
+                          Recherche Web
+                          {msg.web_search.reason === 'manual_activation' ? ' · activée manuellement' : ' · automatique'}
+                        </div>
+                      )}
                       {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && renderSources(msg.sources)}
                     </div>
                   </div>
@@ -1127,7 +1416,11 @@ const ChatPage = () => {
                   {streamPhase && !streamContent && (
                     <div className="flex items-center gap-2 text-primary text-sm">
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      <span data-testid="search-status">{getStatusLabel(language, selectedModel, streamPhase)}</span>
+                      <span data-testid={conversationMode === 'work' ? 'work-status' : 'search-status'}>
+                        {conversationMode === 'work'
+                          ? WORK_STATUS[streamPhase] || 'Travail en cours…'
+                          : getStatusLabel(language, selectedModel, streamPhase)}
+                      </span>
                     </div>
                   )}
                   {streamContent && (
@@ -1224,6 +1517,7 @@ const ChatPage = () => {
                 data-provider={activeModel?.provider || ''}
                 data-model-id={activeModel?.model_id || ''}
                 data-level={activeModel?.stage || ''}
+                data-selection-reason={activeModel?.selection_reason || ''}
                 disabled={!modelOptions.length}
               >
                 {modelOptions.length ? modelOptions.map((option) => {
@@ -1237,26 +1531,26 @@ const ChatPage = () => {
                   <option value={selectedModel}>Modèle indisponible</option>
                 )}
               </select>
-              <button
-                type="button"
-                onClick={() => { const v = !webSearch; setWebSearch(v); localStorage.setItem('neura_websearch', v ? '1' : '0'); }}
-                className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${webSearch ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
-                data-testid="web-search-toggle"
-                title={t('chat.web')}
-              >
-                <Globe className="w-3 h-3" />
-                {t('chat.web')}
-              </button>
-              <button
-                type="button"
-                onClick={() => { const v = !devMode; setDevMode(v); localStorage.setItem('neura_devmode', v ? '1' : '0'); if (v) { axios.get(`${API}/developer/status`, { headers: getAuthHeader() }).then(r => setDevStatus(r.data)).catch(() => {}); } }}
-                className={`text-xs rounded-full px-3 py-1 flex items-center gap-1 transition-colors ${devMode ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
-                data-testid="dev-mode-toggle"
-                title="Mode Développeur (génération de code)"
-              >
-                <Code2 className="w-3 h-3" />
-                {t('chat.code')}
-              </button>
+              {intelligenceModes.length > 0 && (
+                <select
+                  value={selectedIntelligenceMode}
+                  onChange={(e) => handleIntelligenceModeChange(e.target.value)}
+                  className="text-xs rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
+                  data-testid="intelligence-mode-selector"
+                  aria-label="Niveau d’intelligence"
+                >
+                  {intelligenceModes.map((mode) => {
+                    const unavailable = mode.key !== 'auto'
+                      && activeModel?.levels_available
+                      && activeModel.levels_available[mode.key] === false;
+                    return (
+                      <option key={mode.key} value={mode.key} disabled={unavailable}>
+                        {mode.label}{unavailable ? ' · Indisponible' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
             </div>
 
             {devMode && (
@@ -1309,59 +1603,139 @@ const ChatPage = () => {
 
             <DevWorkspace open={wsOpen} onClose={() => setWsOpen(false)} lastAiCode={extractAiCode(messages)} />
 
+            {webMode === 'forced' && (
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs text-primary" data-testid="web-search-active">
+                <Globe className="h-3 w-3" />
+                Recherche Web activée pour la prochaine demande
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWebMode('auto');
+                    localStorage.removeItem('neura_websearch');
+                  }}
+                  aria-label="Désactiver la recherche Web"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+            {imageCreationMode && (
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs text-primary" data-testid="image-creation-active">
+                <Wand2 className="h-3 w-3" />
+                Décrivez l’image à créer
+                <button type="button" onClick={() => setImageCreationMode(false)} aria-label="Annuler la création d’image">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+
             <div className="relative flex items-center gap-2">
-              {/* Hidden file input */}
               <input
                 type="file"
-                ref={fileInputRef}
+                ref={photoInputRef}
                 onChange={handleImageSelect}
-                accept="image/*,.txt,.md,.csv,.json,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.php,.sql,.yml,.yaml,.toml,.ini,.log"
+                accept="image/*"
                 className="hidden"
-                data-testid="image-input"
+                data-testid="photo-input"
               />
-              
-              {/* Image upload button */}
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-12 w-12 rounded-full"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={loading || generatingImage || conversationBlocked}
-                title={imageUploadBlocked && formatQuotaReset(chatImageQuota?.reset_at)
-                  ? `Captures renouvelées le ${formatQuotaReset(chatImageQuota.reset_at)}. Les documents texte restent disponibles.`
-                  : 'Ajouter une image ou un document'}
-                data-testid="add-image-btn"
-              >
-                <ImageIcon className="w-5 h-5" />
-              </Button>
+              <input
+                type="file"
+                ref={cameraInputRef}
+                onChange={handleImageSelect}
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                data-testid="camera-input"
+              />
+              <input
+                type="file"
+                ref={documentInputRef}
+                onChange={handleImageSelect}
+                accept=".txt,.md,.csv,.json,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.php,.sql,.yml,.yaml,.toml,.ini,.log"
+                className="hidden"
+                data-testid="document-input"
+              />
 
-              {/* Image generation button */}
-              <div className="relative">
+              <div className="relative" ref={toolsMenuRef}>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
                   className="h-12 w-12 rounded-full"
-                  onClick={generateImage}
-                  disabled={loading || generatingImage || !inputMessage.trim()}
-                  title={imageGenRemaining && !imageGenRemaining.unlimited 
-                    ? `Générer une image (${imageGenRemaining.remaining}/${imageGenRemaining.limit} restantes)`
-                    : 'Générer une image'}
-                  data-testid="generate-image-btn"
+                  onClick={() => setToolsMenuOpen((open) => !open)}
+                  disabled={loading || generatingImage || conversationBlocked}
+                  title="Ajouter ou utiliser un outil"
+                  aria-expanded={toolsMenuOpen}
+                  aria-controls="chat-tools-menu"
+                  data-testid="tools-menu-button"
                 >
-                  {generatingImage 
-                    ? <Loader2 className="w-5 h-5 animate-spin" /> 
-                    : <Wand2 className="w-5 h-5" />
-                  }
+                  <Plus className="w-5 h-5" />
                 </Button>
-                {imageGenRemaining && !imageGenRemaining.unlimited && (
-                  <span 
-                    className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs flex items-center justify-center font-medium"
-                    data-testid="image-gen-counter"
+                {toolsMenuOpen && (
+                  <div
+                    id="chat-tools-menu"
+                    className="absolute bottom-14 left-0 z-30 min-w-52 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-lg"
+                    data-testid="tools-menu"
                   >
-                    {imageGenRemaining.remaining}
-                  </span>
+                    {cameraAvailable && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setToolsMenuOpen(false);
+                          cameraInputRef.current?.click();
+                        }}
+                        disabled={imageUploadBlocked}
+                        className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                        data-testid="tools-camera"
+                      >
+                        <Camera className="h-4 w-4" /> Caméra
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setToolsMenuOpen(false);
+                        photoInputRef.current?.click();
+                      }}
+                      disabled={imageUploadBlocked}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                      data-testid="tools-photos"
+                    >
+                      <ImageIcon className="h-4 w-4" /> Photos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setToolsMenuOpen(false);
+                        documentInputRef.current?.click();
+                      }}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
+                      data-testid="tools-files"
+                    >
+                      <FileText className="h-4 w-4" /> Fichiers
+                    </button>
+                    <button
+                      type="button"
+                      onClick={activateForcedWebSearch}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
+                      data-testid="tools-web"
+                    >
+                      <Globe className="h-4 w-4" /> Recherche Web
+                    </button>
+                    <button
+                      type="button"
+                      onClick={activateImageCreation}
+                      disabled={Boolean(imageGenRemaining && !imageGenRemaining.unlimited && imageGenRemaining.remaining <= 0)}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                      data-testid="tools-create-image"
+                    >
+                      <Wand2 className="h-4 w-4" />
+                      Créer une image
+                      {imageGenRemaining && !imageGenRemaining.unlimited && (
+                        <span className="ml-auto text-xs text-muted-foreground">{imageGenRemaining.remaining}</span>
+                      )}
+                    </button>
+                  </div>
                 )}
               </div>
               
@@ -1374,7 +1748,11 @@ const ChatPage = () => {
                     ? 'Limite atteinte pour cette conversation'
                     : selectedImage || selectedDocument
                       ? "Ajoutez un message (optionnel)..."
-                      : t('chat.placeholder')}
+                      : imageCreationMode
+                        ? "Décrivez l’image à créer..."
+                        : conversationMode === 'work'
+                          ? "Décrivez la tâche à exécuter..."
+                          : t('chat.placeholder')}
                   className="pr-4 h-12 rounded-full bg-muted border-0"
                   disabled={loading || conversationBlocked}
                   data-testid="chat-input"

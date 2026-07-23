@@ -21,9 +21,19 @@ class UpdateResult:
 
 def _value(doc, expression):
     if isinstance(expression, str) and expression.startswith("$"):
-        return doc.get(expression[1:], 0)
+        value = doc
+        for part in expression[1:].split("."):
+            if isinstance(value, list):
+                value = [item.get(part) for item in value if isinstance(item, dict)]
+            elif isinstance(value, dict):
+                value = value.get(part, 0)
+            else:
+                return 0
+        return value
     if isinstance(expression, dict) and "$add" in expression:
         return sum(_value(doc, part) for part in expression["$add"])
+    if isinstance(expression, dict) and "$size" in expression:
+        return len(_value(doc, expression["$size"]))
     return expression
 
 
@@ -37,7 +47,7 @@ def _matches(doc, query):
             if operator == "$lt" and not left < right:
                 return False
             continue
-        actual = doc.get(key)
+        actual = _value(doc, f"${key}")
         if isinstance(expected, dict):
             for operator, value in expected.items():
                 if operator == "$ne":
@@ -102,6 +112,19 @@ class FakeCollection:
             document.setdefault(key, [])
             if value not in document[key]:
                 document[key].append(deepcopy(value))
+        for key, value in update.get("$push", {}).items():
+            document.setdefault(key, [])
+            document[key].append(deepcopy(value))
+        for key, condition in update.get("$pull", {}).items():
+            values = document.get(key, [])
+            if isinstance(condition, dict) and "accepted_at" in condition:
+                cutoff = condition["accepted_at"].get("$lte")
+                document[key] = [
+                    item for item in values
+                    if not (item.get("accepted_at") is not None and item.get("accepted_at") <= cutoff)
+                ]
+            else:
+                document[key] = [item for item in values if item != condition]
         self.docs[existing_key] = document
         return UpdateResult(0 if inserted else 1, existing_key if inserted else None)
 
@@ -123,6 +146,8 @@ class FakeDB:
         self.free_image_quotas = FakeCollection()
         self.free_image_captures = FakeCollection()
         self.mongo_image_generation_quotas = FakeCollection()
+        self.plus_image_generation_quotas = FakeCollection()
+        self.plus_work_quotas = FakeCollection()
         self.messages = FakeCollection()
         self.chat_request_results = FakeCollection()
         self.conversations = FakeCollection()
@@ -141,6 +166,12 @@ def quota_db(monkeypatch):
     monkeypatch.setattr(server, "MONGO_IMAGE_MAX_UPLOADS", 5)
     monkeypatch.setattr(server, "MONGO_IMAGE_ANALYSIS_BUDGET_UNITS", 20)
     monkeypatch.setattr(server, "MONGO_IMAGE_GENERATION_LIMIT", 3)
+    monkeypatch.setattr(server, "PLUS_TEXT_ADVANCED_BUDGET_UNITS", 60)
+    monkeypatch.setattr(server, "PLUS_TEXT_MEDIUM_BUDGET_UNITS", 30)
+    monkeypatch.setattr(server, "PLUS_IMAGE_MAX_UPLOADS", 8)
+    monkeypatch.setattr(server, "PLUS_IMAGE_ANALYSIS_BUDGET_UNITS", 60)
+    monkeypatch.setattr(server, "PLUS_IMAGE_GENERATION_LIMIT", 5)
+    monkeypatch.setattr(server, "PLUS_WORK_BUDGET_UNITS", 10)
     return fake
 
 
@@ -156,9 +187,13 @@ def mongo_user():
     return {"id": "mongo-user", "email": "mongo@example.com", "subscription": "mongo", "is_vip": False}
 
 
+def plus_user():
+    return {"id": "plus-user", "email": "plus@example.com", "subscription": "pro", "is_vip": False}
+
+
 def test_multi_provider_router_and_paid_behavior_are_preserved():
     free = free_user()
-    standard_paid = {"id": "pro", "email": "pro@example.com", "subscription": "pro", "is_vip": False}
+    standard_paid = {"id": "developer", "email": "developer@example.com", "subscription": "developer", "is_vip": False}
     neura_plus = {"id": "plus", "email": "plus@example.com", "subscription": "neura_plus", "is_vip": False}
 
     assert server._chat_profile_for_user(free, "chatgpt", "advanced")["provider"] == "openai"
@@ -174,6 +209,14 @@ def test_multi_provider_router_and_paid_behavior_are_preserved():
     assert server._chat_profile_for_user(mongo_user(), "gemini", "medium")["model_id"] == "gemini-2.0-flash-lite"
     assert server._chat_profile_for_user(mongo_user(), "gemini", "economic")["model_id"] == "gemini-2.0-flash-lite"
     assert server._chat_profile_for_user(mongo_user(), "grok", "advanced")["provider"] == "gemini"
+    assert server._chat_profile_for_user(plus_user(), "chatgpt", "advanced")["model_id"] == "gpt-4o"
+    assert server._chat_profile_for_user(plus_user(), "chatgpt", "medium")["model_id"] == "gpt-4o-mini"
+    assert server._chat_profile_for_user(plus_user(), "chatgpt", "economic")["model_id"] == "gpt-4.1-nano"
+    assert server._chat_profile_for_user(plus_user(), "claude", "advanced")["model_id"] == "claude-sonnet-4-5"
+    assert server._chat_profile_for_user(plus_user(), "claude", "medium")["model_id"] == "claude-haiku-4-5"
+    assert server._chat_profile_for_user(plus_user(), "claude", "economic")["model_id"] == "claude-3-5-haiku-20241022"
+    assert server._chat_profile_for_user(plus_user(), "gemini", "medium")["model_id"] == "gemini-2.0-flash"
+    assert server._chat_profile_for_user(plus_user(), "gemini", "economic")["model_id"] == "gemini-2.0-flash-lite"
     assert server._chat_profile_for_user(standard_paid, "claude", "advanced")["provider"] == "gemini"
     assert server._chat_profile_for_user(neura_plus, "claude", "advanced")["provider"] == "anthropic"
 
@@ -187,7 +230,11 @@ def test_model_metadata_comes_from_the_real_router_and_hides_grok():
         "Claude Sonnet 4.5 — IA avancée",
         "Gemini 2.5 Flash — IA avancée",
     ]
-    assert server._resolved_model_public(user, "chatgpt", "medium") == {
+    resolved = server._resolved_model_public(user, "chatgpt", "medium")
+    assert {
+        key: resolved[key]
+        for key in ("selection_key", "provider", "model_id", "display_name", "stage", "level_label", "label")
+    } == {
         "selection_key": "chatgpt",
         "provider": "openai",
         "model_id": "gpt-4o-mini",
@@ -258,13 +305,97 @@ def test_active_model_tracks_mongo_fallback_reset_and_legacy_history(quota_db):
     assert quota_db.conversations.docs["legacy-grok"]["selected_model"] == "grok"
 
 
-def test_every_paid_plan_bypasses_the_free_quota(quota_db):
-    for subscription in ("comme_toi", "pro", "developer", "neura_plus", "neura_ultra"):
+def test_non_plus_paid_plans_bypass_the_free_quota(quota_db):
+    for subscription in ("comme_toi", "developer", "neura_plus", "neura_ultra"):
         user = {"id": subscription, "email": f"{subscription}@example.com", "subscription": subscription, "is_vip": False}
         result = run(server._reserve_text_quota(user, "conversation", 999999))
-        assert result["stage"] == "paid"
+        assert result["stage"] in ("paid", "advanced", "medium", "economic")
         assert result["quota"]["unlimited"] is True
     assert quota_db.free_chat_quotas.docs == {}
+
+
+def test_plus_text_budgets_are_three_times_mongo_and_never_block(quota_db):
+    user = plus_user()
+    assert server._text_quota_config("plus")["advanced_budget"] == (
+        server.MONGO_TEXT_ADVANCED_BUDGET_UNITS * 3
+    )
+    assert server._text_quota_config("plus")["medium_budget"] == (
+        server.MONGO_TEXT_MEDIUM_BUDGET_UNITS * 3
+    )
+
+    high = run(server._reserve_text_quota(
+        user, "plus-quota", 50, "high", "Analyse approfondie de cette architecture"
+    ))
+    assert high["stage"] == "advanced"
+    fallback = run(server._reserve_text_quota(
+        user, "plus-quota", 20, "high", "Continue l'analyse approfondie"
+    ))
+    assert fallback["stage"] == "medium"
+    assert fallback["selection_reason"] == "quota"
+    instant = run(server._reserve_text_quota(
+        user, "plus-quota", 40, "medium", "Explique encore"
+    ))
+    assert instant["stage"] == "economic"
+    assert instant["quota"]["blocked"] is False
+    for _ in range(3):
+        continued = run(server._reserve_text_quota(
+            user, "plus-quota", 100, "instant", "Salut"
+        ))
+        assert continued["stage"] == "economic"
+        assert continued["quota"]["blocked"] is False
+
+
+def test_plus_and_superior_plans_receive_the_maximum_context_without_changing_mongo():
+    superior = {
+        "id": "ultra",
+        "email": "ultra@example.com",
+        "subscription": "neura_ultra",
+        "is_vip": False,
+    }
+    assert server._chat_history_limit(free_user()) == 50
+    assert server._chat_history_limit(mongo_user()) == server.MONGO_CHAT_HISTORY_MESSAGES
+    assert server._chat_history_limit(plus_user()) == server.PLUS_CHAT_HISTORY_MESSAGES
+    assert server._chat_history_limit(superior) == server.PLUS_CHAT_HISTORY_MESSAGES
+    assert server.PLUS_CHAT_HISTORY_MESSAGES > server.MONGO_CHAT_HISTORY_MESSAGES
+
+
+def test_plus_manual_and_auto_modes_use_real_same_provider_profiles(quota_db):
+    user = plus_user()
+    simple = run(server._reserve_text_quota(user, "auto-simple", 5, "auto", "Bonjour"))
+    medium = run(server._reserve_text_quota(
+        user, "auto-medium", 5, "auto", "Explique clairement le fonctionnement de cette API"
+    ))
+    high = run(server._reserve_text_quota(
+        user, "auto-high", 5, "auto", "Fais un audit complet de sécurité et de l'architecture"
+    ))
+    assert (simple["stage"], medium["stage"], high["stage"]) == (
+        "economic", "medium", "advanced"
+    )
+
+    for selection, expected in (
+        ("chatgpt", ("openai", "gpt-4o", "gpt-4o-mini", "gpt-4.1-nano")),
+        ("claude", ("anthropic", "claude-sonnet-4-5", "claude-haiku-4-5", "claude-3-5-haiku-20241022")),
+        ("gemini", ("gemini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite")),
+    ):
+        provider, advanced_id, medium_id, instant_id = expected
+        assert server._chat_profile_for_user(user, selection, "advanced")["provider"] == provider
+        assert server._chat_profile_for_user(user, selection, "advanced")["model_id"] == advanced_id
+        assert server._chat_profile_for_user(user, selection, "medium")["model_id"] == medium_id
+        assert server._chat_profile_for_user(user, selection, "economic")["model_id"] == instant_id
+
+    model = server._resolved_model_public(
+        user,
+        "claude",
+        "medium",
+        requested_mode="auto",
+        selection_reason="auto",
+        levels_available={"high": True, "medium": True, "instant": True},
+    )
+    assert model["provider"] == "anthropic"
+    assert model["model_id"] == "claude-haiku-4-5"
+    assert model["level_label"] == "IA moyenne"
+    assert model["requested_mode"] == "auto"
+    assert model["label"] == "Claude Haiku 4.5 — Anthropic — IA moyenne · Auto"
 
 
 def test_mongo_text_quota_falls_back_without_blocking_and_renews(quota_db):
@@ -333,6 +464,59 @@ def test_mongo_image_generation_quota_is_separate_and_releasable(quota_db):
     run(server._release_mongo_generation(user["id"]))
     available = run(server._reserve_mongo_generation(user["id"]))
     assert available["allowed"] is True
+
+
+def test_plus_capture_quota_is_rolling_account_wide_and_analysis_is_per_capture(quota_db):
+    user = plus_user()
+    payload = base64.b64encode(b"valid-image").decode()
+    accepted = [
+        run(server._accept_free_capture(user, f"conversation-{index}", f"plus-capture-{index}", payload))
+        for index in range(server.PLUS_IMAGE_MAX_UPLOADS)
+    ]
+    blocked = run(server._accept_free_capture(
+        user, "conversation-blocked", "plus-capture-blocked", payload
+    ))
+    assert all(item["accepted"] for item in accepted)
+    assert blocked["accepted"] is False
+    assert blocked["image_quota"]["limit"] == server.PLUS_IMAGE_MAX_UPLOADS
+    assert blocked["image_quota"]["rolling_window"] is True
+    assert blocked["image_quota"]["reset_at"] is not None
+
+    first_capture = accepted[0]["capture"]
+    assert first_capture["analysis_budget"] == server.PLUS_IMAGE_ANALYSIS_BUDGET_UNITS
+    first_analysis = run(server._reserve_capture_analysis(
+        user, "conversation-0", first_capture, 40
+    ))
+    second_analysis = run(server._reserve_capture_analysis(
+        user, "conversation-0", first_capture, 30
+    ))
+    assert first_analysis["allowed"] is True
+    assert second_analysis["allowed"] is False
+
+    quota_key = server._image_quota_key(user["id"], "plus")
+    quota_db.free_image_quotas.docs[quota_key]["events"][0]["accepted_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=server.PLUS_IMAGE_WINDOW_HOURS, seconds=1)
+    )
+    cleaned = run(server._get_image_quota_doc(user["id"], False, "plus"))
+    assert len(cleaned["events"]) == server.PLUS_IMAGE_MAX_UPLOADS - 1
+    replacement = run(server._accept_free_capture(
+        user, "conversation-new", "plus-capture-new", payload
+    ))
+    assert replacement["accepted"] is True
+
+
+def test_plus_image_generation_has_its_own_fifty_per_day_bucket(quota_db):
+    user = plus_user()
+    reservations = [
+        run(server._reserve_plus_generation(user["id"]))
+        for _ in range(server.PLUS_IMAGE_GENERATION_LIMIT)
+    ]
+    blocked = run(server._reserve_plus_generation(user["id"]))
+    assert all(item["allowed"] for item in reservations)
+    assert blocked["allowed"] is False
+    assert blocked["quota"]["limit"] == server.PLUS_IMAGE_GENERATION_LIMIT
+    run(server._release_plus_generation(user["id"]))
+    assert run(server._reserve_plus_generation(user["id"]))["allowed"] is True
 
 
 def test_text_quota_is_independent_per_conversation_and_notices_are_unique(quota_db):
@@ -482,3 +666,100 @@ def test_request_idempotency_reuses_the_same_server_record(quota_db):
     assert first["new"] is True
     assert second["new"] is False
     assert first["record"]["_id"] == second["record"]["_id"]
+
+
+def test_work_access_is_server_side_and_superior_plans_are_not_downgraded(quota_db):
+    with pytest.raises(HTTPException) as free_error:
+        run(server._reserve_work_quota(free_user(), 1))
+    assert free_error.value.status_code == 403
+
+    superior = {
+        "id": "neura-plus",
+        "email": "neura-plus@example.com",
+        "subscription": "neura_plus",
+        "is_vip": False,
+    }
+    result = run(server._reserve_work_quota(superior, 6))
+    assert result["allowed"] is True
+    assert result["quota"]["unlimited"] is True
+    assert quota_db.plus_work_quotas.docs == {}
+
+
+def test_plus_work_quota_is_weighted_shared_and_renews_after_five_hours(quota_db):
+    user = plus_user()
+    first = run(server._reserve_work_quota(user, 6))
+    second = run(server._reserve_work_quota(user, 3))
+    blocked = run(server._reserve_work_quota(user, 3))
+    assert first["allowed"] and second["allowed"]
+    assert blocked["allowed"] is False
+    assert blocked["quota"]["used"] == 9
+    assert blocked["quota"]["remaining"] == 1
+
+    key = server._work_quota_key(user["id"])
+    document = quota_db.plus_work_quotas.docs[key]
+    assert document["reset_at"] - document["period_started_at"] == timedelta(
+        hours=server.PLUS_WORK_WINDOW_HOURS
+    )
+    unchanged = run(server._get_work_quota_doc(user["id"], False))
+    assert unchanged["used"] == 9
+
+    document["reset_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    renewed = run(server._reserve_work_quota(user, 3))
+    assert renewed["allowed"] is True
+    assert renewed["quota"]["used"] == 3
+    assert renewed["quota"]["remaining"] == 7
+
+
+def test_work_consumption_uses_task_shape_tools_files_and_output():
+    assert server._estimate_work_units("Corrige ce titre") == 1
+    assert server._estimate_work_units(
+        "Analyse ce document et propose une correction", has_document=True
+    ) == 3
+    assert server._estimate_work_units(
+        "Crée une application complète frontend et backend avec base de données"
+    ) == 6
+    light = server._actual_work_units(
+        "Corrige ce titre", "Titre corrigé", stage="economic"
+    )
+    heavy = server._actual_work_units(
+        "Audit complet",
+        "x" * 10000,
+        stage="advanced",
+        source_count=5,
+        project_file_count=30,
+        has_document=True,
+    )
+    assert light == 1
+    assert heavy == 6
+
+
+def test_web_search_modes_are_decided_on_the_server():
+    forced = server._web_search_decision("Explique la photosynthèse", "forced")
+    explicit = server._web_search_decision("Regarde sur Internet le dernier score", "auto")
+    current = server._web_search_decision("Quel est le prix actuel de ce produit ?", "auto")
+    disabled = server._web_search_decision(
+        "Réponds sans utiliser le Web au sujet des actualités", "auto"
+    )
+    ordinary = server._web_search_decision("Explique la photosynthèse", "auto")
+    assert forced == {
+        "mode": "forced",
+        "should_search": True,
+        "reason": "manual_activation",
+    }
+    assert explicit["should_search"] and explicit["reason"] == "explicit_request"
+    assert current["should_search"] and current["reason"] == "current_information"
+    assert disabled["should_search"] is False
+    assert disabled["reason"] == "disabled_by_user"
+    assert ordinary["should_search"] is False
+
+
+def test_code_intent_is_server_driven_without_routing_general_chat():
+    assert server._developer_intent_decision(
+        "Crée une API FastAPI avec deux routes"
+    )["use_developer"] is True
+    assert server._developer_intent_decision(
+        "Analyse ce fichier", "frontend/src/App.jsx"
+    )["reason"] == "technical_document"
+    assert server._developer_intent_decision(
+        "Comment préparer un repas simple ?"
+    )["use_developer"] is False

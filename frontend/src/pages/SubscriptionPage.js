@@ -158,21 +158,22 @@ const SubscriptionPage = () => {
     },
     {
       id: 'pro',
-      name: 'Pro',
+      name: 'Plus',
       icon: Crown,
-      price: { monthly: 14.99, yearly: 89.99 },
-      description: 'Pour les passionnés',
+      price: { monthly: 22, yearly: 89.99 },
+      description: 'Pour une utilisation intensive',
       features: [
         'Tout du plan Mongo',
-        'Priorité serveur',
-        'Réponses plus rapides',
-        '+50 récitateurs Coran',
-        'Mode mémorisation',
-        'Coaching spirituel',
-        'Thèmes premium'
+        'Accès maximal aux modèles avancés',
+        'Quotas IA trois fois supérieurs à Mongo',
+        'Jusqu’à 80 captures d’écran toutes les 3 h',
+        'Analyse d’images fortement prolongée',
+        'Jusqu’à 50 générations d’images par 24 h',
+        'Mémoire et contexte maximaux'
       ],
       highlight: false,
-      current: user?.subscription === 'pro'
+      current: user?.subscription === 'pro',
+      actionLabel: 'Choisir Plus'
     },
     {
       id: 'developer',
@@ -402,7 +403,7 @@ const SubscriptionPage = () => {
                     disabled={loading}
                     data-testid={`plan-btn-${plan.id}`}
                   >
-                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Souscrire'}
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : (plan.actionLabel || 'Souscrire')}
                   </Button>
                 )}
               </Card>

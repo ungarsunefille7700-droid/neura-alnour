@@ -25,6 +25,7 @@ import time
 import secrets
 import hashlib
 import re
+import unicodedata
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -91,6 +92,25 @@ MONGO_IMAGE_MAX_UPLOADS = int(os.environ.get("MONGO_IMAGE_MAX_UPLOADS", "50"))
 MONGO_IMAGE_ANALYSIS_BUDGET_UNITS = int(os.environ.get("MONGO_IMAGE_ANALYSIS_BUDGET_UNITS", "60000"))
 MONGO_IMAGE_GENERATION_WINDOW_HOURS = int(os.environ.get("MONGO_IMAGE_GENERATION_WINDOW_HOURS", "24"))
 MONGO_IMAGE_GENERATION_LIMIT = int(os.environ.get("MONGO_IMAGE_GENERATION_LIMIT", "20"))
+
+# Plus plan quotas. The persisted subscription slug remains "pro" so existing
+# subscribers keep their entitlement without a migration or silent rebilling.
+PLUS_TEXT_WINDOW_HOURS = int(os.environ.get("PLUS_TEXT_WINDOW_HOURS", "3"))
+PLUS_TEXT_ADVANCED_BUDGET_UNITS = int(os.environ.get("PLUS_TEXT_ADVANCED_BUDGET_UNITS", str(MONGO_TEXT_ADVANCED_BUDGET_UNITS * 3)))
+PLUS_TEXT_MEDIUM_BUDGET_UNITS = int(os.environ.get("PLUS_TEXT_MEDIUM_BUDGET_UNITS", str(MONGO_TEXT_MEDIUM_BUDGET_UNITS * 3)))
+PLUS_TEXT_ADVANCED_MAX_TOKENS = int(os.environ.get("PLUS_TEXT_ADVANCED_MAX_TOKENS", "4096"))
+PLUS_TEXT_MEDIUM_MAX_TOKENS = int(os.environ.get("PLUS_TEXT_MEDIUM_MAX_TOKENS", "2048"))
+PLUS_TEXT_INSTANT_MAX_TOKENS = int(os.environ.get("PLUS_TEXT_INSTANT_MAX_TOKENS", "768"))
+PLUS_CHAT_HISTORY_MESSAGES = int(os.environ.get("PLUS_CHAT_HISTORY_MESSAGES", str(MONGO_CHAT_HISTORY_MESSAGES * 2)))
+
+PLUS_IMAGE_WINDOW_HOURS = int(os.environ.get("PLUS_IMAGE_WINDOW_HOURS", "3"))
+PLUS_IMAGE_MAX_UPLOADS = int(os.environ.get("PLUS_IMAGE_MAX_UPLOADS", "80"))
+PLUS_IMAGE_ANALYSIS_BUDGET_UNITS = int(os.environ.get("PLUS_IMAGE_ANALYSIS_BUDGET_UNITS", str(MONGO_IMAGE_ANALYSIS_BUDGET_UNITS * 3)))
+PLUS_IMAGE_GENERATION_WINDOW_HOURS = int(os.environ.get("PLUS_IMAGE_GENERATION_WINDOW_HOURS", "24"))
+PLUS_IMAGE_GENERATION_LIMIT = int(os.environ.get("PLUS_IMAGE_GENERATION_LIMIT", "50"))
+
+PLUS_WORK_WINDOW_HOURS = int(os.environ.get("PLUS_WORK_WINDOW_HOURS", "5"))
+PLUS_WORK_BUDGET_UNITS = int(os.environ.get("PLUS_WORK_BUDGET_UNITS", "90"))
 
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
@@ -263,6 +283,7 @@ async def _save_direct_chat_exchange(
     answer: str,
     create_conversation: bool,
     selected_model: str,
+    selected_intelligence_mode: str = "auto",
 ):
     now = datetime.now(timezone.utc).isoformat()
     if create_conversation:
@@ -272,13 +293,19 @@ async def _save_direct_chat_exchange(
             "user_id": user_id,
             "title": title or "Discussion",
             "selected_model": selected_model,
+            "selected_intelligence_mode": selected_intelligence_mode,
+            "conversation_type": "chat",
             "created_at": now,
             "updated_at": now
         })
     else:
         await db.conversations.update_one(
             {"id": conversation_id, "user_id": user_id},
-            {"$set": {"selected_model": selected_model, "updated_at": now}},
+            {"$set": {
+                "selected_model": selected_model,
+                "selected_intelligence_mode": selected_intelligence_mode,
+                "updated_at": now,
+            }},
         )
     await db.messages.insert_one({
         "id": str(uuid.uuid4()),
@@ -319,6 +346,92 @@ def web_results_context(sources: list) -> str:
         "Ne complète pas un score, une date ou une actualité avec ta mémoire si les sources ne "
         "les confirment pas. Si elles sont insuffisantes ou contradictoires, dis-le explicitement."
     )
+
+
+def _web_search_decision(
+    content: str,
+    requested_mode: Optional[str] = "auto",
+    legacy_forced: bool = False,
+) -> dict:
+    """Resolve auto/forced/disabled from the full request, never from the UI alone."""
+    mode = str(requested_mode or "auto").strip().lower()
+    if mode not in ("auto", "forced", "disabled"):
+        mode = "auto"
+    normalized = unicodedata.normalize("NFKD", content or "")
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char)).lower()
+    normalized = " ".join(normalized.split())
+
+    disabled_markers = (
+        "ne recherche pas sur internet", "ne cherche pas sur internet",
+        "sans utiliser le web", "sans recherche web", "sans internet",
+        "do not search the web", "without web search", "no web search",
+    )
+    if mode == "disabled" or any(marker in normalized for marker in disabled_markers):
+        return {"mode": "disabled", "should_search": False, "reason": "disabled_by_user"}
+    if mode == "forced" or legacy_forced:
+        return {"mode": "forced", "should_search": True, "reason": "manual_activation"}
+
+    explicit_markers = (
+        "recherche sur le web", "recherche sur internet", "cherche sur le web",
+        "cherche sur internet", "regarde sur internet", "verifie sur internet",
+        "verifie cette information", "consulte le site", "consulte cette page",
+        "search the web", "look it up", "check online", "browse the web",
+    )
+    current_markers = (
+        "aujourd'hui", "actuel", "actuelle", "maintenant", "en ce moment",
+        "derniere actualite", "dernieres nouvelles", "recent", "recente",
+        "meteo", "score", "resultat du match", "classement", "horaire",
+        "prix", "disponibilite", "en stock", "reglementation", "loi en vigueur",
+        "version actuelle", "derniere version", "date de sortie", "programme",
+        "today", "current", "latest", "recent", "news", "weather", "score",
+        "schedule", "price", "availability", "in stock", "release date",
+    )
+    has_url = bool(re.search(r"https?://|www\.[a-z0-9.-]+\.[a-z]{2,}", normalized))
+    if any(marker in normalized for marker in explicit_markers):
+        return {"mode": "auto", "should_search": True, "reason": "explicit_request"}
+    if has_url:
+        return {"mode": "auto", "should_search": True, "reason": "source_reference"}
+    if any(marker in normalized for marker in current_markers):
+        return {"mode": "auto", "should_search": True, "reason": "current_information"}
+    return {"mode": "auto", "should_search": False, "reason": "not_needed"}
+
+
+def _web_search_public(decision: dict, *, performed: bool, sources: list) -> dict:
+    return {
+        "mode": decision["mode"],
+        "requested": bool(decision["should_search"]),
+        "performed": bool(performed),
+        "reason": decision["reason"],
+        "available": bool(os.environ.get("TAVILY_API_KEY")),
+        "sources": sources,
+    }
+
+
+def _developer_intent_decision(content: str, document_name: Optional[str] = None) -> dict:
+    normalized = unicodedata.normalize("NFKD", content or "")
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char)).lower()
+    technical_extension = bool(re.search(
+        r"\.(?:js|jsx|ts|tsx|py|java|php|sql|html|css|json|ya?ml|toml|ini|log)$",
+        str(document_name or "").strip(),
+        flags=re.IGNORECASE,
+    ))
+    code_block = "```" in (content or "")
+    code_markers = (
+        "ecris du code", "genere du code", "cree une application", "cree une api",
+        "cree un composant", "cree un script", "corrige ce bug", "debug",
+        "stack trace", "traceback", "erreur de compilation", "analyse ce code",
+        "refactor", "fonction javascript", "fonction python", "react component",
+        "typescript", "fastapi", "node.js", "fivem",
+    )
+    if technical_extension:
+        return {"use_developer": True, "reason": "technical_document"}
+    if code_block:
+        return {"use_developer": True, "reason": "code_block"}
+    if any(marker in normalized for marker in code_markers):
+        return {"use_developer": True, "reason": "developer_request"}
+    return {"use_developer": False, "reason": "general_chat"}
+
+
 MODEL_PROFILES = {
     "chatgpt": {
         "label": "ChatGPT",
@@ -329,8 +442,12 @@ MODEL_PROFILES = {
         "medium_model_id": os.environ.get("FREE_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
         "mongo_medium_provider": "openai",
         "mongo_medium_model_id": os.environ.get("MONGO_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
+        "plus_medium_provider": "openai",
+        "plus_medium_model_id": os.environ.get("PLUS_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
         "economic_provider": "openai",
         "economic_model_id": os.environ.get("MONGO_CHATGPT_ECONOMIC_MODEL", "gpt-4.1-nano"),
+        "plus_instant_provider": "openai",
+        "plus_instant_model_id": os.environ.get("PLUS_CHATGPT_INSTANT_MODEL", "gpt-4.1-nano"),
         "persona": (
             "STYLE DE RÉPONSE — Direct et structuré :\n"
             "- Va droit au but, oriente vers la solution.\n"
@@ -348,8 +465,12 @@ MODEL_PROFILES = {
         "medium_model_id": os.environ.get("FREE_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
         "mongo_medium_provider": "anthropic",
         "mongo_medium_model_id": os.environ.get("MONGO_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
+        "plus_medium_provider": "anthropic",
+        "plus_medium_model_id": os.environ.get("PLUS_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
         "economic_provider": "anthropic",
         "economic_model_id": os.environ.get("MONGO_CLAUDE_ECONOMIC_MODEL", "claude-3-5-haiku-20241022"),
+        "plus_instant_provider": "anthropic",
+        "plus_instant_model_id": os.environ.get("PLUS_CLAUDE_INSTANT_MODEL", "claude-3-5-haiku-20241022"),
         "persona": (
             "STYLE DE RÉPONSE — Réfléchi et nuancé :\n"
             "- Explique ton raisonnement, montre les nuances et les différents angles.\n"
@@ -367,8 +488,12 @@ MODEL_PROFILES = {
         "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
         "mongo_medium_provider": "gemini",
         "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "plus_medium_provider": "gemini",
+        "plus_medium_model_id": os.environ.get("PLUS_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash"),
         "economic_provider": "gemini",
         "economic_model_id": os.environ.get("MONGO_GEMINI_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
+        "plus_instant_provider": "gemini",
+        "plus_instant_model_id": os.environ.get("PLUS_GEMINI_INSTANT_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
             "STYLE DE RÉPONSE — Synthétique et factuel :\n"
             "- Réponses concises, allant à l'essentiel.\n"
@@ -419,6 +544,17 @@ MODEL_STAGE_LABELS = {
     "medium": "IA moyenne",
     "economic": "IA économique",
 }
+PLUS_MODEL_STAGE_LABELS = {
+    "advanced": "IA élevée",
+    "medium": "IA moyenne",
+    "economic": "IA instantanée",
+}
+PROVIDER_DISPLAY_NAMES = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "gemini": "Google Gemini",
+}
+INTELLIGENCE_MODES = ("auto", "high", "medium", "instant")
 
 
 def _normalize_model_key(requested_model: Optional[str]) -> str:
@@ -441,7 +577,19 @@ VIP_ADMINS = [
 SUBSCRIPTION_PLANS = {
     "free": {"name": "Gratuit", "price_monthly": 0, "price_yearly": 0, "features": ["quota_text", "limited_screens", "islamic_module", "quiz"]},
     "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["increased_ai_quotas", "longer_conversations", "captures_50_per_day", "extended_image_analysis", "extended_memory", "full_history", "detailed_responses", "export", "extended_image_generation"]},
-    "pro": {"name": "Pro", "price_monthly": 14.99, "price_yearly": 89.99, "features": ["priority", "fast_responses", "coaching", "premium_themes", "adhan_hd", "offline", "memorization", "stats"]},
+    "pro": {
+        "name": "Plus",
+        "price_monthly": 22.0,
+        "price_yearly": 89.99,
+        "features": [
+            "max_advanced_models",
+            "plus_ai_quotas",
+            "captures_80_per_3h",
+            "extended_image_analysis",
+            "images_50_per_day",
+            "max_memory_context",
+        ],
+    },
     "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
     "neura_plus": {"name": "Neura+", "price_monthly": 119.99, "price_yearly": 1199.99, "features": ["dev_workspace", "code_advanced", "multi_file", "project_analysis", "dev_memory", "audit", "priority"]},
     "neura_ultra": {"name": "Neura Ultra", "price_monthly": 299.99, "price_yearly": 2999.99, "features": ["dev_workspace", "code_max", "massive_generation", "full_project_analysis", "dev_agent", "security_audit", "max_memory", "experimental", "max_priority"]}
@@ -507,15 +655,34 @@ def _mongo_quota_applies(user: dict) -> bool:
     return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription") == "mongo"
 
 
+def _plus_quota_applies(user: dict) -> bool:
+    return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription") == "pro"
+
+
+def _has_plus_capabilities(user: dict) -> bool:
+    if user.get("is_vip") or is_vip_email(user.get("email")):
+        return True
+    return user.get("subscription") in ("pro", "neura_plus", "neura_ultra")
+
+
 def _quota_plan(user: dict) -> Optional[str]:
     if _free_quota_applies(user):
         return "free"
     if _mongo_quota_applies(user):
         return "mongo"
+    if _plus_quota_applies(user):
+        return "plus"
     return None
 
 
 def _text_quota_config(plan: str) -> dict:
+    if plan == "plus":
+        return {
+            "window_hours": PLUS_TEXT_WINDOW_HOURS,
+            "advanced_budget": PLUS_TEXT_ADVANCED_BUDGET_UNITS,
+            "medium_budget": PLUS_TEXT_MEDIUM_BUDGET_UNITS,
+            "economic_fallback": True,
+        }
     if plan == "mongo":
         return {
             "window_hours": MONGO_TEXT_WINDOW_HOURS,
@@ -532,6 +699,13 @@ def _text_quota_config(plan: str) -> dict:
 
 
 def _image_quota_config(plan: str) -> dict:
+    if plan == "plus":
+        return {
+            "window_hours": PLUS_IMAGE_WINDOW_HOURS,
+            "max_uploads": PLUS_IMAGE_MAX_UPLOADS,
+            "analysis_budget": PLUS_IMAGE_ANALYSIS_BUDGET_UNITS,
+            "max_bytes": FREE_IMAGE_MAX_BYTES,
+        }
     if plan == "mongo":
         return {
             "window_hours": MONGO_IMAGE_WINDOW_HOURS,
@@ -548,6 +722,8 @@ def _image_quota_config(plan: str) -> dict:
 
 
 def _chat_history_limit(user: dict) -> int:
+    if _has_plus_capabilities(user):
+        return PLUS_CHAT_HISTORY_MESSAGES
     return MONGO_CHAT_HISTORY_MESSAGES if _mongo_quota_applies(user) else 50
 
 
@@ -584,6 +760,23 @@ def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_sta
             )
         return profile
 
+    if _has_plus_capabilities(user):
+        profile["plus_labels"] = True
+        if quota_stage == "medium":
+            profile["provider"] = base.get("plus_medium_provider", base.get("medium_provider", base.get("provider", "gemini")))
+            profile["model_id"] = base.get("plus_medium_model_id", base.get("medium_model_id", base.get("model_id")))
+            profile["params"]["max_tokens"] = PLUS_TEXT_MEDIUM_MAX_TOKENS
+        elif quota_stage == "economic":
+            profile["provider"] = base.get("plus_instant_provider", base.get("economic_provider", base.get("provider", "gemini")))
+            profile["model_id"] = base.get("plus_instant_model_id", base.get("economic_model_id", base.get("model_id")))
+            profile["params"]["max_tokens"] = PLUS_TEXT_INSTANT_MAX_TOKENS
+        else:
+            profile["params"]["max_tokens"] = max(
+                int(profile["params"].get("max_tokens", 0)),
+                PLUS_TEXT_ADVANCED_MAX_TOKENS,
+            )
+        return profile
+
     # Preserve the pre-existing behavior of every non-developer paid plan.
     # Neura+/Ultra and VIP accounts keep the selected real provider.
     if not _is_premium_ai(user):
@@ -592,26 +785,52 @@ def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_sta
     return profile
 
 
-def _model_public(profile: dict, quota_stage: str) -> dict:
+def _model_public(
+    profile: dict,
+    quota_stage: str,
+    *,
+    requested_mode: Optional[str] = None,
+    selection_reason: Optional[str] = None,
+    levels_available: Optional[dict] = None,
+    reset_at: Optional[datetime] = None,
+) -> dict:
     stage = quota_stage if quota_stage in MODEL_STAGE_LABELS else "advanced"
     model_id = str(profile.get("model_id") or "")
     display_name = MODEL_DISPLAY_NAMES.get(model_id, model_id)
-    level_label = MODEL_STAGE_LABELS[stage]
+    level_label = (PLUS_MODEL_STAGE_LABELS if profile.get("plus_labels") else MODEL_STAGE_LABELS)[stage]
+    provider = profile.get("provider", "gemini")
     return {
         "selection_key": profile.get("selection_key", DEFAULT_MODEL),
-        "provider": profile.get("provider", "gemini"),
+        "requested_provider": MODEL_PROFILES.get(profile.get("selection_key"), {}).get("provider", provider),
+        "provider": provider,
+        "provider_display_name": PROVIDER_DISPLAY_NAMES.get(provider, provider),
         "model_id": model_id,
         "display_name": display_name,
         "stage": stage,
         "level_label": level_label,
-        "label": f"{display_name} — {level_label}",
+        "requested_mode": requested_mode,
+        "selection_reason": selection_reason,
+        "levels_available": levels_available,
+        "reset_at": reset_at if isinstance(reset_at, str) else _iso_utc(reset_at),
+        "label": (
+            f"{display_name} — {PROVIDER_DISPLAY_NAMES.get(provider, provider)} — {level_label}"
+            + (" · Auto" if requested_mode == "auto" else "")
+            if profile.get("plus_labels")
+            else f"{display_name} — {level_label}"
+        ),
     }
 
 
-def _resolved_model_public(user: dict, requested_model: Optional[str], quota_stage: str) -> dict:
+def _resolved_model_public(
+    user: dict,
+    requested_model: Optional[str],
+    quota_stage: str,
+    **metadata: Any,
+) -> dict:
     return _model_public(
         _chat_profile_for_user(user, requested_model, quota_stage),
         quota_stage,
+        **metadata,
     )
 
 
@@ -630,11 +849,12 @@ async def _active_model_for_conversation(
     conversation_id: Optional[str],
     requested_model: Optional[str] = None,
     conversation: Optional[dict] = None,
+    intelligence_mode: Optional[str] = None,
 ) -> dict:
     if conversation_id and conversation is None:
         conversation = await db.conversations.find_one(
             {"id": conversation_id, "user_id": user["id"]},
-            {"_id": 1, "selected_model": 1},
+            {"_id": 1, "selected_model": 1, "selected_intelligence_mode": 1},
         )
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation non trouvée")
@@ -643,6 +863,14 @@ async def _active_model_for_conversation(
     )
     stage = "advanced"
     plan = _quota_plan(user)
+    mode = _normalize_intelligence_mode(
+        intelligence_mode
+        if intelligence_mode is not None
+        else (conversation or {}).get("selected_intelligence_mode")
+    )
+    reason = "manual" if mode != "auto" else "auto"
+    levels_available = None
+    reset_at = None
     if plan and conversation_id:
         quota_doc = await _get_text_quota_doc(user["id"], conversation_id, False, plan)
         if quota_doc:
@@ -651,7 +879,36 @@ async def _active_model_for_conversation(
                 stage = stored_stage
             elif stored_stage == "blocked":
                 stage = "medium"
-    return _resolved_model_public(user, selection_key, stage)
+            if plan == "plus":
+                levels_available = _plus_available_levels(quota_doc)
+                reset_at = quota_doc.get("reset_at")
+                reason = quota_doc.get("last_selection_reason") or reason
+                if intelligence_mode is None:
+                    mode = _normalize_intelligence_mode(quota_doc.get("last_requested_mode") or mode)
+                if intelligence_mode is not None and mode != "auto":
+                    levels_available = _plus_available_levels(quota_doc)
+                    preferred = {"high": "advanced", "medium": "medium", "instant": "economic"}[mode]
+                    if preferred == "advanced" and not levels_available["high"]:
+                        stage = "medium" if levels_available["medium"] else "economic"
+                        reason = "quota"
+                    elif preferred == "medium" and not levels_available["medium"]:
+                        stage = "economic"
+                        reason = "quota"
+                    else:
+                        stage = preferred
+                        reason = "manual"
+    elif _has_plus_capabilities(user):
+        levels_available = {"high": True, "medium": True, "instant": True}
+        stage = {"high": "advanced", "medium": "medium", "instant": "economic"}.get(mode, "advanced")
+    return _resolved_model_public(
+        user,
+        selection_key,
+        stage,
+        requested_mode=mode if _has_plus_capabilities(user) else None,
+        selection_reason=reason if _has_plus_capabilities(user) else None,
+        levels_available=levels_available,
+        reset_at=reset_at,
+    )
 
 
 def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -673,6 +930,177 @@ def _weighted_text_units(*parts: Any) -> int:
     return max(1, (characters + 3) // 4)
 
 
+def _work_quota_key(user_id: str) -> str:
+    return f"plus-work:{user_id}"
+
+
+def _work_quota_public(
+    doc: Optional[dict],
+    *,
+    applies: bool,
+    unlimited: bool = False,
+) -> dict:
+    if unlimited:
+        return {
+            "applies": False,
+            "unlimited": True,
+            "blocked": False,
+            "used": 0,
+            "remaining": None,
+            "limit": None,
+            "reset_at": None,
+            "window_hours": PLUS_WORK_WINDOW_HOURS,
+        }
+    used = max(0, int((doc or {}).get("used", 0)))
+    return {
+        "applies": applies,
+        "unlimited": False,
+        "blocked": applies and used >= PLUS_WORK_BUDGET_UNITS,
+        "used": used,
+        "remaining": max(0, PLUS_WORK_BUDGET_UNITS - used),
+        "limit": PLUS_WORK_BUDGET_UNITS,
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+        "window_hours": PLUS_WORK_WINDOW_HOURS,
+    }
+
+
+def _estimate_work_units(
+    content: str,
+    *,
+    has_web: bool = False,
+    has_image: bool = False,
+    has_document: bool = False,
+    project_file_count: int = 0,
+) -> int:
+    """Reserve 1, 3 or 6 units from the actual task shape before execution."""
+    text = (content or "").strip().lower()
+    heavy_markers = (
+        "application complète", "application complete", "projet complet",
+        "architecture complète", "architecture complete", "audit complet",
+        "plusieurs fichiers", "frontend et backend", "base de données",
+        "base de donnees", "migration", "refactor", "déploiement", "deploiement",
+    )
+    if (
+        len(text) >= 1200
+        or project_file_count >= 10
+        or (has_document and has_web)
+        or any(marker in text for marker in heavy_markers)
+    ):
+        return 6
+    if len(text) >= 220 or has_web or has_image or has_document or project_file_count:
+        return 3
+    return 1
+
+
+def _actual_work_units(
+    content: str,
+    response: str,
+    *,
+    stage: str,
+    source_count: int = 0,
+    project_file_count: int = 0,
+    has_image: bool = False,
+    has_document: bool = False,
+) -> int:
+    """Adjust the reservation from generated content and tools actually used."""
+    token_units = max(1, (_weighted_text_units(content, response) + 2499) // 2500)
+    tool_units = min(2, max(0, int(source_count)))
+    file_units = min(2, max(0, (int(project_file_count) + 9) // 10))
+    media_units = int(bool(has_image)) + int(bool(has_document))
+    model_units = 1 if stage == "advanced" else 0
+    return max(1, min(6, token_units + tool_units + file_units + media_units + model_units))
+
+
+async def _get_work_quota_doc(user_id: str, create: bool = True) -> Optional[dict]:
+    key = _work_quota_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.plus_work_quotas.find_one({"_id": key})
+    reset_at = _aware_utc((doc or {}).get("reset_at"))
+    if doc and reset_at and reset_at <= now:
+        renewed = await db.plus_work_quotas.update_one(
+            {"_id": key, "reset_at": doc.get("reset_at")},
+            {
+                "$set": {
+                    "used": 0,
+                    "period_started_at": now,
+                    "reset_at": now + timedelta(hours=PLUS_WORK_WINDOW_HOURS),
+                    "updated_at": now,
+                }
+            },
+        )
+        if renewed.modified_count:
+            doc = await db.plus_work_quotas.find_one({"_id": key})
+        else:
+            doc = await db.plus_work_quotas.find_one({"_id": key})
+    if doc or not create:
+        return doc
+    reset_at = now + timedelta(hours=PLUS_WORK_WINDOW_HOURS)
+    try:
+        await db.plus_work_quotas.insert_one({
+            "_id": key,
+            "user_id": user_id,
+            "used": 0,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "created_at": now,
+            "updated_at": now,
+        })
+    except DuplicateKeyError:
+        pass
+    return await db.plus_work_quotas.find_one({"_id": key})
+
+
+async def _reserve_work_quota(user: dict, units: int) -> dict:
+    if not _has_plus_capabilities(user):
+        raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+    if not _plus_quota_applies(user):
+        return {
+            "allowed": True,
+            "reserved_units": 0,
+            "quota": _work_quota_public(None, applies=False, unlimited=True),
+        }
+    units = max(1, min(6, int(units)))
+    doc = await _get_work_quota_doc(user["id"], True)
+    result = await db.plus_work_quotas.update_one(
+        {
+            "_id": doc["_id"],
+            "$expr": {"$lte": [{"$add": ["$used", units]}, PLUS_WORK_BUDGET_UNITS]},
+        },
+        {"$inc": {"used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+    latest = await db.plus_work_quotas.find_one({"_id": doc["_id"]})
+    return {
+        "allowed": bool(result.modified_count),
+        "reserved_units": units if result.modified_count else 0,
+        "quota": _work_quota_public(latest, applies=True),
+    }
+
+
+async def _finish_work_quota(user: dict, reserved: int, actual: int) -> dict:
+    if not _plus_quota_applies(user):
+        return _work_quota_public(None, applies=False, unlimited=True)
+    adjustment = max(1, min(6, int(actual))) - max(0, int(reserved))
+    if adjustment:
+        await db.plus_work_quotas.update_one(
+            {"_id": _work_quota_key(user["id"])},
+            {"$inc": {"used": adjustment}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+    doc = await db.plus_work_quotas.find_one({"_id": _work_quota_key(user["id"])})
+    return _work_quota_public(doc, applies=True)
+
+
+async def _release_work_quota(user: dict, reserved: int) -> None:
+    if not _plus_quota_applies(user) or reserved <= 0:
+        return
+    await db.plus_work_quotas.update_one(
+        {
+            "_id": _work_quota_key(user["id"]),
+            "used": {"$gte": int(reserved)},
+        },
+        {"$inc": {"used": -int(reserved)}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+
 def _text_quota_key(user_id: str, conversation_id: str, plan: str = "free") -> str:
     return f"{plan}-text:{user_id}:{conversation_id}"
 
@@ -691,7 +1119,7 @@ def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "f
     plan = (doc or {}).get("quota_plan", plan)
     config = _text_quota_config(plan)
     if not doc or not doc.get("period_started_at"):
-        return {
+        empty = {
             "applies": True,
             "unlimited": False,
             "plan": plan,
@@ -705,7 +1133,12 @@ def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "f
             "medium_budget": config["medium_budget"],
             "economic_used": 0,
         }
-    return {
+        if plan == "plus":
+            empty["levels_available"] = {"high": True, "medium": True, "instant": True}
+            empty["requested_mode"] = "auto"
+            empty["selection_reason"] = None
+        return empty
+    result = {
         "applies": True,
         "unlimited": False,
         "plan": plan,
@@ -719,6 +1152,11 @@ def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "f
         "medium_budget": config["medium_budget"],
         "economic_used": max(0, int(doc.get("economic_used", 0))),
     }
+    if plan == "plus":
+        result["levels_available"] = _plus_available_levels(doc)
+        result["requested_mode"] = doc.get("last_requested_mode", "auto")
+        result["selection_reason"] = doc.get("last_selection_reason")
+    return result
 
 
 def _image_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "free") -> dict:
@@ -726,7 +1164,19 @@ def _image_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "
         return {"applies": False, "unlimited": True, "remaining": None, "reset_at": None}
     plan = (doc or {}).get("quota_plan", plan)
     config = _image_quota_config(plan)
-    used = int((doc or {}).get("uploads_used", 0)) if (doc or {}).get("period_started_at") else 0
+    if plan == "plus":
+        events = (doc or {}).get("events", [])
+        used = len(events)
+        oldest = min(
+            (_aware_utc(event.get("accepted_at")) for event in events if event.get("accepted_at")),
+            default=None,
+        )
+        period_started_at = oldest
+        reset_at = oldest + timedelta(hours=config["window_hours"]) if oldest else None
+    else:
+        used = int((doc or {}).get("uploads_used", 0)) if (doc or {}).get("period_started_at") else 0
+        period_started_at = (doc or {}).get("period_started_at")
+        reset_at = (doc or {}).get("reset_at")
     return {
         "applies": True,
         "unlimited": False,
@@ -734,9 +1184,10 @@ def _image_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "
         "limit": config["max_uploads"],
         "used": used,
         "remaining": max(0, config["max_uploads"] - used),
-        "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
-        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+        "period_started_at": _iso_utc(period_started_at),
+        "reset_at": _iso_utc(reset_at),
         "max_bytes": config["max_bytes"],
+        "rolling_window": plan == "plus",
     }
 
 
@@ -797,6 +1248,12 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
     doc = await db.free_chat_quotas.find_one({"_id": key})
 
     if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        renewed_stage = "advanced"
+        if plan == "plus":
+            renewed_stage = {
+                "medium": "medium",
+                "instant": "economic",
+            }.get(_normalize_intelligence_mode(doc.get("last_requested_mode")), "advanced")
         await db.free_chat_quotas.update_one(
             {"_id": key, "reset_at": {"$lte": now}},
             {"$set": {
@@ -805,10 +1262,11 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
                 "advanced_used": 0,
                 "medium_used": 0,
                 "economic_used": 0,
-                "stage": "advanced",
+                "stage": renewed_stage,
                 "advanced_notice_sent": False,
                 "final_notice_sent": False,
                 "economic_notice_sent": False,
+                "last_selection_reason": "renewal" if plan == "plus" else None,
                 "updated_at": now,
             }},
         )
@@ -870,7 +1328,19 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
         return None
     reset_iso = _iso_utc(doc.get("reset_at"))
     plan = doc.get("quota_plan", "free")
-    if plan == "mongo" and kind == "advanced_fallback":
+    if plan == "plus" and kind == "advanced_fallback":
+        content = (
+            "Limite de l’IA élevée atteinte\n\n"
+            "Le quota d’IA élevée de cette conversation est épuisé. Elle continue avec l’IA moyenne "
+            f"du même fournisseur jusqu’au renouvellement à {reset_iso}."
+        )
+    elif plan == "plus" and kind == "economic_fallback":
+        content = (
+            "Quota de l’IA moyenne atteint\n\n"
+            "Cette conversation continue avec l’IA instantanée du même fournisseur jusqu’au "
+            f"renouvellement à {reset_iso}. Le texte reste disponible."
+        )
+    elif plan == "mongo" and kind == "advanced_fallback":
         content = (
             "Limite de l’IA avancée atteinte\n\n"
             "Votre quota d’IA avancée est épuisé pour cette conversation. Les réponses utilisent "
@@ -908,10 +1378,205 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
     )
 
 
-async def _reserve_text_quota(user: dict, conversation_id: str, units: int) -> dict:
+def _normalize_intelligence_mode(value: Optional[str]) -> str:
+    aliases = {
+        "auto": "auto",
+        "high": "high",
+        "advanced": "high",
+        "élevée": "high",
+        "elevee": "high",
+        "medium": "medium",
+        "moyenne": "medium",
+        "instant": "instant",
+        "instantanée": "instant",
+        "instantanee": "instant",
+        "economic": "instant",
+    }
+    return aliases.get(str(value or "auto").strip().lower(), "auto")
+
+
+def _plus_available_levels(doc: Optional[dict]) -> dict:
+    config = _text_quota_config("plus")
+    return {
+        "high": int((doc or {}).get("advanced_used", 0)) < config["advanced_budget"],
+        "medium": int((doc or {}).get("medium_used", 0)) < config["medium_budget"],
+        "instant": True,
+    }
+
+
+def _plus_auto_stage(
+    request_text: str,
+    *,
+    has_tools: bool = False,
+    has_image: bool = False,
+    has_document: bool = False,
+) -> str:
+    text = (request_text or "").strip().lower()
+    high_markers = (
+        "analyse approfondie", "architecture", "audit complet", "raisonnement détaillé",
+        "projet complet", "sécurité", "vulnérabil", "refactor", "débogue", "debug",
+        "implémente", "crée une application", "base de données", "plusieurs fichiers",
+    )
+    medium_markers = (
+        "explique", "compare", "résume", "analyse", "vérifie", "recherche",
+        "comment", "pourquoi", "étapes", "conseil", "corrige",
+    )
+    if has_tools or has_document or len(text) >= 1200 or any(marker in text for marker in high_markers):
+        return "advanced"
+    if has_image or len(text) >= 280 or any(marker in text for marker in medium_markers):
+        return "medium"
+    return "economic"
+
+
+async def _reserve_plus_text_quota(
+    user: dict,
+    conversation_id: str,
+    units: int,
+    requested_mode: str,
+    request_text: str,
+    *,
+    has_tools: bool,
+    has_image: bool,
+    has_document: bool,
+) -> dict:
+    config = _text_quota_config("plus")
+    units = max(1, int(units))
+    mode = _normalize_intelligence_mode(requested_mode)
+    doc = await _get_text_quota_doc(user["id"], conversation_id, True, "plus")
+    preferred = {
+        "high": "advanced",
+        "medium": "medium",
+        "instant": "economic",
+    }.get(
+        mode,
+        _plus_auto_stage(
+            request_text,
+            has_tools=has_tools,
+            has_image=has_image,
+            has_document=has_document,
+        ),
+    )
+    reason = "auto" if mode == "auto" else "manual"
+    candidates = {
+        "advanced": ("advanced", "medium", "economic"),
+        "medium": ("medium", "economic"),
+        "economic": ("economic",),
+    }[preferred]
+    notices = []
+
+    for stage in candidates:
+        if stage == "economic":
+            await db.free_chat_quotas.update_one(
+                {"_id": doc["_id"]},
+                {
+                    "$inc": {"economic_used": units},
+                    "$set": {
+                        "stage": "economic",
+                        "last_requested_mode": mode,
+                        "last_selection_reason": reason,
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                },
+            )
+            latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+            return {
+                "applies": True,
+                "stage": "economic",
+                "requested_mode": mode,
+                "selection_reason": reason,
+                "reserved_units": units,
+                "quota": _text_quota_public(latest, True, "plus"),
+                "notices": notices,
+            }
+
+        field = "advanced_used" if stage == "advanced" else "medium_used"
+        budget = config["advanced_budget"] if stage == "advanced" else config["medium_budget"]
+        result = await db.free_chat_quotas.update_one(
+            {
+                "_id": doc["_id"],
+                "$expr": {"$lte": [{"$add": [f"${field}", units]}, budget]},
+            },
+            {
+                "$inc": {field: units},
+                "$set": {
+                    "stage": stage,
+                    "last_requested_mode": mode,
+                    "last_selection_reason": reason,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            },
+        )
+        if result.modified_count:
+            latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+            return {
+                "applies": True,
+                "stage": stage,
+                "requested_mode": mode,
+                "selection_reason": reason,
+                "reserved_units": units,
+                "quota": _text_quota_public(latest, True, "plus"),
+                "notices": notices,
+            }
+
+        doc = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+        reason = "quota"
+        notice_kind = "advanced_fallback" if stage == "advanced" else "economic_fallback"
+        notice = await _maybe_text_notice(doc, notice_kind)
+        if notice:
+            notices.append(notice)
+
+    raise RuntimeError("Plus routing did not resolve an available text stage")
+
+
+async def _reserve_text_quota(
+    user: dict,
+    conversation_id: str,
+    units: int,
+    requested_mode: str = "auto",
+    request_text: str = "",
+    *,
+    has_tools: bool = False,
+    has_image: bool = False,
+    has_document: bool = False,
+) -> dict:
     plan = _quota_plan(user)
     if not plan:
+        if _has_plus_capabilities(user):
+            mode = _normalize_intelligence_mode(requested_mode)
+            stage = {
+                "high": "advanced",
+                "medium": "medium",
+                "instant": "economic",
+            }.get(
+                mode,
+                _plus_auto_stage(
+                    request_text,
+                    has_tools=has_tools,
+                    has_image=has_image,
+                    has_document=has_document,
+                ),
+            )
+            return {
+                "applies": False,
+                "stage": stage,
+                "requested_mode": mode,
+                "selection_reason": "auto" if mode == "auto" else "manual",
+                "reserved_units": 0,
+                "quota": _text_quota_public(None, False),
+                "notices": [],
+            }
         return {"applies": False, "stage": "paid", "reserved_units": 0, "quota": _text_quota_public(None, False), "notices": []}
+    if plan == "plus":
+        return await _reserve_plus_text_quota(
+            user,
+            conversation_id,
+            units,
+            requested_mode,
+            request_text,
+            has_tools=has_tools,
+            has_image=has_image,
+            has_document=has_document,
+        )
 
     config = _text_quota_config(plan)
     units = max(1, int(units))
@@ -993,14 +1658,26 @@ async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reser
     doc = await db.free_chat_quotas.find_one({"_id": key})
     notices = []
     if doc.get("stage") == "advanced" and int(doc.get("advanced_used", 0)) >= config["advanced_budget"]:
-        await db.free_chat_quotas.update_one({"_id": key, "stage": "advanced"}, {"$set": {"stage": "medium"}})
+        await db.free_chat_quotas.update_one(
+            {"_id": key, "stage": "advanced"},
+            {"$set": {
+                "stage": "medium",
+                "last_selection_reason": "quota" if plan == "plus" else None,
+            }},
+        )
         doc = await db.free_chat_quotas.find_one({"_id": key})
         notice = await _maybe_text_notice(doc, "advanced_fallback")
         if notice:
             notices.append(notice)
     if doc.get("stage") == "medium" and int(doc.get("medium_used", 0)) >= config["medium_budget"]:
         next_stage = "economic" if config["economic_fallback"] else "blocked"
-        await db.free_chat_quotas.update_one({"_id": key, "stage": "medium"}, {"$set": {"stage": next_stage}})
+        await db.free_chat_quotas.update_one(
+            {"_id": key, "stage": "medium"},
+            {"$set": {
+                "stage": next_stage,
+                "last_selection_reason": "quota" if plan == "plus" else None,
+            }},
+        )
         doc = await db.free_chat_quotas.find_one({"_id": key})
         notice = await _maybe_text_notice(doc, "economic_fallback" if next_stage == "economic" else "text_blocked")
         if notice:
@@ -1020,6 +1697,34 @@ async def _release_text_quota(user: dict, conversation_id: str, stage: str, rese
 
 
 async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "free") -> Optional[dict]:
+    if plan == "plus":
+        key = _image_quota_key(user_id, plan)
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=PLUS_IMAGE_WINDOW_HOURS)
+        await db.free_image_quotas.update_one(
+            {"_id": key},
+            {
+                "$pull": {"events": {"accepted_at": {"$lte": cutoff}}},
+                "$set": {"updated_at": now},
+            },
+        )
+        doc = await db.free_image_quotas.find_one({"_id": key})
+        if doc or not start_period:
+            return doc
+        await db.free_image_quotas.update_one(
+            {"_id": key},
+            {"$setOnInsert": {
+                "_id": key,
+                "user_id": user_id,
+                "quota_plan": "plus",
+                "events": [],
+                "created_at": now,
+                "updated_at": now,
+            }},
+            upsert=True,
+        )
+        return await db.free_image_quotas.find_one({"_id": key})
+
     key = _image_quota_key(user_id, plan)
     config = _image_quota_config(plan)
     capture_scope = {"user_id": user_id, "quota_plan": plan}
@@ -1116,6 +1821,24 @@ def _clean_image_payload(image_base64: str) -> tuple[str, int]:
 
 
 async def _maybe_image_upload_notice(user_id: str, conversation_id: str, doc: dict) -> Optional[dict]:
+    if doc.get("quota_plan") == "plus":
+        quota = _image_quota_public(doc, True, "plus")
+        reset_at = (
+            datetime.fromisoformat(quota["reset_at"].replace("Z", "+00:00"))
+            if quota.get("reset_at")
+            else None
+        )
+        return await _insert_quota_message(
+            user_id,
+            conversation_id,
+            f"image-upload-blocked:{doc['_id']}:{quota.get('reset_at')}",
+            "image_upload_blocked",
+            "Limite d’envoi de captures atteinte\n\n"
+            "Vous avez utilisé vos 80 captures d’écran ou images disponibles sur les trois "
+            f"dernières heures. Vous pourrez envoyer une nouvelle capture à {quota.get('reset_at')}.",
+            reset_at,
+        )
+
     result = await db.free_image_quotas.update_one(
         {"_id": doc["_id"], "upload_notice_sent": {"$ne": True}},
         {"$set": {"upload_notice_sent": True, "updated_at": datetime.now(timezone.utc)}},
@@ -1149,6 +1872,70 @@ async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str
         if existing.get("user_id") != user["id"] or existing.get("conversation_id") != conversation_id:
             raise HTTPException(status_code=409, detail="Cet identifiant de capture est déjà utilisé.")
         return {"accepted": True, "capture": existing, "duplicate": True, "image_quota": _image_quota_public(await _get_image_quota_doc(user["id"], False, plan), True, plan)}
+
+    if plan == "plus":
+        quota_doc = await _get_image_quota_doc(user["id"], True, plan)
+        now = datetime.now(timezone.utc)
+        event = {"capture_id": capture_id, "accepted_at": now}
+        result = await db.free_image_quotas.update_one(
+            {
+                "_id": quota_doc["_id"],
+                "events.capture_id": {"$ne": capture_id},
+                "$expr": {"$lt": [{"$size": "$events"}, config["max_uploads"]]},
+            },
+            {
+                "$push": {"events": event},
+                "$set": {"updated_at": now},
+            },
+        )
+        quota_doc = await db.free_image_quotas.find_one({"_id": quota_doc["_id"]})
+        duplicate_event = (
+            result.modified_count == 0
+            and any(item.get("capture_id") == capture_id for item in quota_doc.get("events", []))
+        )
+        if result.modified_count == 0 and not duplicate_event:
+            notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
+            return {
+                "accepted": False,
+                "code": "plus_image_upload_limit",
+                "notice": notice,
+                "image_quota": _image_quota_public(quota_doc, True, plan),
+            }
+
+        capture = {
+            "_id": _capture_key(user["id"], capture_id, plan),
+            "capture_id": capture_id,
+            "user_id": user["id"],
+            "conversation_id": conversation_id,
+            "quota_plan": plan,
+            "image_base64": clean_payload,
+            "byte_size": byte_size,
+            "analysis_budget": config["analysis_budget"],
+            "analysis_used": 0,
+            "analysis_notice_sent": False,
+            "period_started_at": now,
+            "reset_at": None,
+            "accepted_at": now,
+            "updated_at": now,
+        }
+        await db.free_image_captures.update_one(
+            {"_id": capture["_id"]},
+            {"$setOnInsert": capture},
+            upsert=True,
+        )
+        capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
+        upload_notice = (
+            await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
+            if len(quota_doc.get("events", [])) >= config["max_uploads"]
+            else None
+        )
+        return {
+            "accepted": True,
+            "capture": capture,
+            "duplicate": duplicate_event,
+            "image_quota": _image_quota_public(quota_doc, True, plan),
+            "notice": upload_notice,
+        }
 
     quota_doc = await _get_image_quota_doc(user["id"], True, plan)
     now = datetime.now(timezone.utc)
@@ -1220,7 +2007,11 @@ async def _maybe_capture_notice(capture: dict) -> Optional[dict]:
         return None
     reset_iso = _iso_utc(capture.get("reset_at"))
     plan = capture.get("quota_plan", "free")
-    suffix = "Les autres captures et les conversations textuelles restent disponibles." if plan == "mongo" else "Passez à une offre supérieure ou commencez une nouvelle conversation sans image."
+    suffix = (
+        "Les autres captures et les conversations textuelles restent disponibles."
+        if plan in ("mongo", "plus")
+        else "Passez à une offre supérieure ou commencez une nouvelle conversation sans image."
+    )
     return await _insert_quota_message(
         capture["user_id"],
         capture["conversation_id"],
@@ -1228,7 +2019,8 @@ async def _maybe_capture_notice(capture: dict) -> Optional[dict]:
         "image_analysis_blocked",
         "Limite d’analyse de cette image atteinte\n\n"
         "Cette conversation contient une capture d’écran dont le quota d’analyse est épuisé. "
-        f"Réessayez à {reset_iso}. {suffix}",
+        + (f"Réessayez à {reset_iso}. " if reset_iso else "")
+        + suffix,
         capture.get("reset_at"),
     )
 
@@ -1240,12 +2032,14 @@ async def _reserve_capture_analysis(user: dict, conversation_id: str, capture: d
     capture = await _get_free_capture(user, conversation_id, capture.get("capture_id"))
     units = max(1, int(units))
     now = datetime.now(timezone.utc)
+    query = {
+        "_id": capture["_id"],
+        "$expr": {"$lte": [{"$add": ["$analysis_used", units]}, config["analysis_budget"]]},
+    }
+    if plan != "plus":
+        query["reset_at"] = {"$gt": now}
     result = await db.free_image_captures.update_one(
-        {
-            "_id": capture["_id"],
-            "reset_at": {"$gt": now},
-            "$expr": {"$lte": [{"$add": ["$analysis_used", units]}, config["analysis_budget"]]},
-        },
+        query,
         {"$inc": {"analysis_used": units}, "$set": {"updated_at": now}},
     )
     capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
@@ -1417,8 +2211,31 @@ class MessageCreate(BaseModel):
     document_name: Optional[str] = None
     document_text: Optional[str] = None
     model: Optional[str] = None
+    intelligence_mode: Optional[str] = "auto"
+    conversation_type: Optional[str] = "chat"
     lang: Optional[str] = None
     web_search: Optional[bool] = False
+    web_mode: Optional[str] = "auto"
+
+
+class WorkMessageCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=30000)
+    conversation_id: Optional[str] = None
+    request_id: Optional[str] = None
+    image_base64: Optional[str] = None
+    document_name: Optional[str] = None
+    document_text: Optional[str] = None
+    model: Optional[str] = None
+    intelligence_mode: Optional[str] = "auto"
+    lang: Optional[str] = None
+    web_search: Optional[bool] = False
+    web_mode: Optional[str] = "auto"
+
+
+class DeveloperIntentRequest(BaseModel):
+    content: str = ""
+    document_name: Optional[str] = None
+
 
 class AiMemoryCreate(BaseModel):
     label: str = Field(..., min_length=2, max_length=80)
@@ -1834,9 +2651,10 @@ async def _save_ai_memory_from_text(user: dict, text: str) -> Optional[dict]:
 
 
 async def _ai_memory_context(user: dict) -> str:
+    memory_limit = 24 if _has_plus_capabilities(user) else 12
     memories = await db.ai_memories.find(
         {"user_id": user["id"]}, {"_id": 0, "label": 1, "value": 1}
-    ).sort("updated_at", -1).to_list(12)
+    ).sort("updated_at", -1).to_list(memory_limit)
     if not memories:
         return ""
     lines = [f"- {item.get('label', 'memoire')}: {item.get('value', '')}" for item in memories if item.get("value")]
@@ -1855,8 +2673,20 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     from emergentintegrations.llm.chat import LlmChat, UserMessage
 
     selected_model = _normalize_model_key(message.model)
+    requested_mode = (
+        _normalize_intelligence_mode(message.intelligence_mode)
+        if _has_plus_capabilities(user)
+        else "auto"
+    )
+    web_decision = _web_search_decision(
+        message.content, message.web_mode, bool(message.web_search)
+    )
     early_direct_answer = None
-    if not message.image_base64 and not message.document_text:
+    if (
+        not message.image_base64
+        and not message.document_text
+        and not web_decision["should_search"]
+    ):
         early_direct_answer = _current_date_direct_answer(message.content, message.lang)
     if early_direct_answer:
         direct_conversation_id = message.conversation_id or str(uuid.uuid4())
@@ -1868,13 +2698,28 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
                 early_direct_answer,
                 not bool(message.conversation_id),
                 selected_model,
+                requested_mode,
             ),
             "direct_date_chat_save",
         ))
         active_model = (
-            await _active_model_for_conversation(user, direct_conversation_id, selected_model)
+            await _active_model_for_conversation(
+                user,
+                direct_conversation_id,
+                selected_model,
+                intelligence_mode=requested_mode,
+            )
             if message.conversation_id
-            else _resolved_model_public(user, selected_model, "advanced")
+            else _resolved_model_public(
+                user,
+                selected_model,
+                "advanced",
+                requested_mode=requested_mode if _has_plus_capabilities(user) else None,
+                selection_reason="direct",
+                levels_available={"high": True, "medium": True, "instant": True}
+                if _has_plus_capabilities(user)
+                else None,
+            )
         )
         return {
             "message": early_direct_answer,
@@ -1895,18 +2740,29 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             "user_id": user["id"],
             "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
             "selected_model": selected_model,
+            "selected_intelligence_mode": requested_mode,
+            "conversation_type": "chat",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }}, upsert=True)
     else:
         owned_conversation = await db.conversations.find_one(
-            {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+            {"id": conversation_id, "user_id": user["id"]},
+            {"_id": 1, "conversation_type": 1},
         )
         if not owned_conversation:
             raise HTTPException(status_code=404, detail="Conversation non trouvée")
+        if owned_conversation.get("conversation_type", "chat") != "chat":
+            raise HTTPException(
+                status_code=409,
+                detail="Une conversation Work doit être poursuivie avec le mode Work.",
+            )
         await db.conversations.update_one(
             {"id": conversation_id, "user_id": user["id"]},
-            {"$set": {"selected_model": selected_model}},
+            {"$set": {
+                "selected_model": selected_model,
+                "selected_intelligence_mode": requested_mode,
+            }},
         )
 
     request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "message")
@@ -1994,7 +2850,15 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             message.document_text,
             *(item.get("content", "") for item in previous_history),
         ) + 1024
-        text_reservation = await _reserve_text_quota(user, conversation_id, reserve_units)
+        text_reservation = await _reserve_text_quota(
+            user,
+            conversation_id,
+            reserve_units,
+            requested_mode,
+            message.content,
+            has_tools=bool(web_decision["should_search"]),
+            has_document=bool(message.document_text),
+        )
         if text_reservation["stage"] == "blocked":
             await _fail_chat_request(request_record)
             raise HTTPException(status_code=429, detail={
@@ -2063,9 +2927,12 @@ Règles importantes:
         system_message += "\n\nConfirme brievement que cette preference a ete memorisee, sans en faire trop."
 
     sources = []
-    if message.web_search:
+    web_performed = False
+    if web_decision["should_search"]:
         try:
-            sources = await tavily_search(message.content, max_results=5)
+            if os.environ.get("TAVILY_API_KEY"):
+                web_performed = True
+                sources = await tavily_search(message.content, max_results=5)
         except Exception as exc:
             logger.error(f"Tavily (message/vision) error: {exc}")
             sources = []
@@ -2181,7 +3048,14 @@ Règles importantes:
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
     
     # Save AI response
-    routed_model = _model_public(routed_profile, routed_stage)
+    routed_model = _model_public(
+        routed_profile,
+        routed_stage,
+        requested_mode=text_reservation.get("requested_mode") if _has_plus_capabilities(user) else None,
+        selection_reason=text_reservation.get("selection_reason"),
+        levels_available=(text_reservation.get("quota") or {}).get("levels_available"),
+        reset_at=(text_reservation.get("quota") or {}).get("reset_at"),
+    )
     ai_msg_id = f"chat-assistant:{request_record['_id']}"
     assistant_message = {
         "id": ai_msg_id,
@@ -2190,6 +3064,10 @@ Règles importantes:
         "role": "assistant",
         "content": response,
         "model": routed_model,
+        "sources": sources,
+        "web_search": _web_search_public(
+            web_decision, performed=web_performed, sources=sources
+        ),
         "request_id": request_record.get("request_id"),
         "created_at": datetime.now(timezone.utc).isoformat()
     }
@@ -2231,11 +3109,12 @@ Règles importantes:
         {"id": conversation_id},
         {"$set": {
             "selected_model": selected_model,
+            "selected_intelligence_mode": requested_mode,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }}
     )
     active_model = await _active_model_for_conversation(
-        user, conversation_id, selected_model
+        user, conversation_id, selected_model, intelligence_mode=requested_mode
     )
     
     result = {
@@ -2252,6 +3131,9 @@ Règles importantes:
             visual_finish.get("capture") if capture else None,
             bool(quota_plan),
             quota_plan or "free",
+        ),
+        "web_search": _web_search_public(
+            web_decision, performed=web_performed, sources=sources
         ),
     }
     await _complete_chat_request(request_record, result)
@@ -2316,6 +3198,14 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         request_record = None
         selected_model = _normalize_model_key(message.model)
+        requested_mode = (
+            _normalize_intelligence_mode(message.intelligence_mode)
+            if _has_plus_capabilities(user)
+            else "auto"
+        )
+        web_decision = _web_search_decision(
+            message.content, message.web_mode, bool(message.web_search)
+        )
         text_reservation = {
             "applies": False,
             "stage": "paid",
@@ -2334,19 +3224,31 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     "user_id": user["id"],
                     "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
                     "selected_model": selected_model,
+                    "selected_intelligence_mode": requested_mode,
+                    "conversation_type": "chat",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }}, upsert=True)
             else:
                 owned_conversation = await db.conversations.find_one(
-                    {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+                    {"id": conversation_id, "user_id": user["id"]},
+                    {"_id": 1, "conversation_type": 1},
                 )
                 if not owned_conversation:
                     yield sse({"type": "error", "detail": "Conversation non trouvée."})
                     return
+                if owned_conversation.get("conversation_type", "chat") != "chat":
+                    yield sse({
+                        "type": "error",
+                        "detail": "Une conversation Work doit être poursuivie avec le mode Work.",
+                    })
+                    return
                 await db.conversations.update_one(
                     {"id": conversation_id, "user_id": user["id"]},
-                    {"$set": {"selected_model": selected_model}},
+                    {"$set": {
+                        "selected_model": selected_model,
+                        "selected_intelligence_mode": requested_mode,
+                    }},
                 )
 
             request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "stream")
@@ -2371,7 +3273,11 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 if item.get("request_id") != request_record.get("request_id")
             ]
 
-            direct_answer = _current_date_direct_answer(message.content, message.lang)
+            direct_answer = (
+                None
+                if web_decision["should_search"]
+                else _current_date_direct_answer(message.content, message.lang)
+            )
             if direct_answer:
                 user_doc = {
                     "id": f"chat-user:{request_record['_id']}",
@@ -2418,7 +3324,14 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 message.content,
                 *(item.get("content", "") for item in previous_history),
             ) + 1024
-            text_reservation = await _reserve_text_quota(user, conversation_id, reserve_units)
+            text_reservation = await _reserve_text_quota(
+                user,
+                conversation_id,
+                reserve_units,
+                requested_mode,
+                message.content,
+                has_tools=bool(web_decision["should_search"]),
+            )
             if text_reservation["stage"] == "blocked":
                 await _fail_chat_request(request_record)
                 yield sse({
@@ -2447,7 +3360,14 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             # Build the system prompt (model persona + precedence + active language)
             profile = _chat_profile_for_user(user, selected_model, text_reservation["stage"])
-            routed_model = _model_public(profile, text_reservation["stage"])
+            routed_model = _model_public(
+                profile,
+                text_reservation["stage"],
+                requested_mode=text_reservation.get("requested_mode") if _has_plus_capabilities(user) else None,
+                selection_reason=text_reservation.get("selection_reason"),
+                levels_available=(text_reservation.get("quota") or {}).get("levels_available"),
+                reset_at=(text_reservation.get("quota") or {}).get("reset_at"),
+            )
             yield sse({"type": "model", "model": routed_model})
             memory_result = await _save_ai_memory_from_text(user, message.content)
             memory_context = await _ai_memory_context(user)
@@ -2464,11 +3384,14 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             # Optional web search (real phase events)
             sources = []
+            web_performed = False
             user_text = message.content
-            if message.web_search:
+            if web_decision["should_search"]:
                 yield sse({"type": "phase", "phase": "searching"})
                 try:
-                    sources = await tavily_search(message.content, max_results=5)
+                    if os.environ.get("TAVILY_API_KEY"):
+                        web_performed = True
+                        sources = await tavily_search(message.content, max_results=5)
                 except Exception as e:
                     logger.error(f"Tavily error: {e}")
                     sources = []
@@ -2508,6 +3431,10 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "role": "assistant",
                 "content": answer,
                 "model": routed_model,
+                "sources": sources,
+                "web_search": _web_search_public(
+                    web_decision, performed=web_performed, sources=sources
+                ),
                 "request_id": request_record.get("request_id"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -2529,11 +3456,12 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 {"id": conversation_id},
                 {"$set": {
                     "selected_model": selected_model,
+                    "selected_intelligence_mode": requested_mode,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }},
             )
             active_model = await _active_model_for_conversation(
-                user, conversation_id, selected_model
+                user, conversation_id, selected_model, intelligence_mode=requested_mode
             )
 
             result = {
@@ -2544,6 +3472,9 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "active_model": active_model,
                 "quota": quota_finish["quota"],
                 "quota_notices": text_reservation.get("notices", []) + quota_finish.get("notices", []),
+                "web_search": _web_search_public(
+                    web_decision, performed=web_performed, sources=sources
+                ),
             }
             await _complete_chat_request(request_record, result)
             yield sse({"type": "done", **result})
@@ -2561,17 +3492,423 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@api_router.post("/chat/work")
+async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_current_user)):
+    """Run a real, separated multi-step Work task for Plus-capable accounts."""
+    if not _has_plus_capabilities(user):
+        raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+
+    from emergentintegrations.llm.chat import FileContent, LlmChat, UserMessage
+
+    def work_sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def event_generator():
+        reserved_work_units = 0
+        request_record = None
+        capture = None
+        capture_reserved = 0
+        conversation_id = message.conversation_id
+        try:
+            yield work_sse({"type": "phase", "phase": "analyzing", "label": "Analyse de la tâche"})
+
+            selected_model = _normalize_model_key(message.model)
+            requested_mode = _normalize_intelligence_mode(message.intelligence_mode)
+            web_decision = _web_search_decision(
+                message.content, message.web_mode, bool(message.web_search)
+            )
+            existing = None
+            if conversation_id:
+                existing = await db.conversations.find_one(
+                    {"id": conversation_id, "user_id": user["id"]},
+                    {"_id": 0, "conversation_type": 1, "selected_model": 1},
+                )
+                if not existing:
+                    yield work_sse({"type": "error", "status": 404, "detail": "Conversation non trouvée."})
+                    return
+                if existing.get("conversation_type", "chat") != "work":
+                    yield work_sse({
+                        "type": "error",
+                        "status": 409,
+                        "detail": "Une conversation Chat ne peut pas être transformée en conversation Work.",
+                    })
+                    return
+            else:
+                stable_request = (
+                    message.request_id
+                    if re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", message.request_id or "")
+                    else str(uuid.uuid4())
+                )
+                conversation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"neura-work:{user['id']}:{stable_request}"))
+
+            project_files = await db.dev_files.find(
+                {"user_id": user["id"]}, {"_id": 0, "path": 1, "content": 1, "updated_at": 1}
+            ).sort("path", 1).to_list(40)
+            estimate = _estimate_work_units(
+                message.content,
+                has_web=bool(web_decision["should_search"]),
+                has_image=bool(message.image_base64),
+                has_document=bool(message.document_text),
+                project_file_count=len(project_files),
+            )
+            reservation = await _reserve_work_quota(user, estimate)
+            if not reservation["allowed"]:
+                quota = reservation["quota"]
+                yield work_sse({
+                    "type": "quota_limit",
+                    "detail": (
+                        "Limite du mode Work atteinte\n\n"
+                        "Vous avez épuisé votre quota Work actuel. "
+                        f"Vous pourrez lancer une nouvelle tâche Work à {quota.get('reset_at')}. "
+                        "Le mode Chat reste disponible."
+                    ),
+                    "work_quota": quota,
+                })
+                return
+            reserved_work_units = reservation["reserved_units"]
+            yield work_sse({"type": "quota", "work_quota": reservation["quota"]})
+
+            request_gate = await _begin_chat_request(
+                user["id"], message.request_id, conversation_id, "work"
+            )
+            request_record = request_gate["record"]
+            if not request_gate["new"]:
+                if request_record.get("status") == "completed" and request_record.get("result"):
+                    await _release_work_quota(user, reserved_work_units)
+                    reserved_work_units = 0
+                    yield work_sse({"type": "done", **request_record["result"]})
+                    return
+                await _release_work_quota(user, reserved_work_units)
+                reserved_work_units = 0
+                yield work_sse({
+                    "type": "error",
+                    "status": 409,
+                    "detail": "Cette tâche Work est déjà en cours de traitement.",
+                })
+                return
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if not existing:
+                await db.conversations.update_one(
+                    {"id": conversation_id},
+                    {"$setOnInsert": {
+                        "id": conversation_id,
+                        "user_id": user["id"],
+                        "title": message.content[:50] + ("..." if len(message.content) > 50 else ""),
+                        "selected_model": selected_model,
+                        "selected_intelligence_mode": requested_mode,
+                        "conversation_type": "work",
+                        "created_at": now_iso,
+                        "updated_at": now_iso,
+                    }},
+                    upsert=True,
+                )
+
+            if message.image_base64 and _quota_plan(user):
+                capture_result = await _accept_free_capture(
+                    user, conversation_id, str(uuid.uuid4()), message.image_base64
+                )
+                if not capture_result["accepted"]:
+                    await _release_work_quota(user, reserved_work_units)
+                    reserved_work_units = 0
+                    await _fail_chat_request(request_record)
+                    yield work_sse({
+                        "type": "error",
+                        "status": 429,
+                        "detail": "Le quota de captures de votre abonnement est atteint.",
+                        "image_quota": capture_result.get("image_quota"),
+                    })
+                    return
+                capture = capture_result["capture"]
+                visual_units = _weighted_text_units(message.content) + 1024
+                capture_reservation = await _reserve_capture_analysis(
+                    user, conversation_id, capture, visual_units
+                )
+                if not capture_reservation["allowed"]:
+                    await _release_work_quota(user, reserved_work_units)
+                    reserved_work_units = 0
+                    await _fail_chat_request(request_record)
+                    yield work_sse({
+                        "type": "error",
+                        "status": 429,
+                        "detail": "Le quota d’analyse de cette capture est atteint.",
+                    })
+                    return
+                capture_reserved = capture_reservation["reserved_units"]
+
+            yield work_sse({
+                "type": "phase",
+                "phase": "reading_files",
+                "label": "Lecture des fichiers du projet",
+                "file_count": len(project_files),
+            })
+
+            history = await db.messages.find(
+                {"conversation_id": conversation_id}, {"_id": 0}
+            ).sort("created_at", 1).to_list(_chat_history_limit(user))
+
+            work_tier = (
+                "ultra"
+                if user.get("subscription") == "neura_ultra"
+                or user.get("is_vip")
+                or is_vip_email(user.get("email"))
+                else "plus"
+            )
+            system_prompt = _build_dev_system_prompt(work_tier) + current_ai_context()
+            if user.get("subscription") == "pro":
+                system_prompt = system_prompt.replace(
+                    "ABONNEMENT : Neura+", "ABONNEMENT : Plus"
+                )
+            system_prompt += (
+                "\n\nMODE WORK ACTIF : exécute la tâche comme un travail suivi en plusieurs étapes. "
+                "Analyse le besoin, utilise uniquement les fichiers réellement fournis ci-dessous, "
+                "indique les vérifications effectuées et produis des livrables concrets. "
+                "Tu peux proposer des fichiers complets et leurs chemins, mais ne prétends jamais "
+                "avoir écrit, exécuté ou déployé un fichier si aucun outil ne l'a réellement fait."
+            )
+            if message.lang:
+                system_prompt += f"\n\nLANGUE : réponds toujours en {message.lang}."
+            if project_files:
+                system_prompt += "\n\n=== FICHIERS REELS DU WORKSPACE UTILISATEUR ==="
+                for item in project_files:
+                    content = str(item.get("content", ""))
+                    if len(content) > 5000:
+                        content = content[:5000] + "\n... (contenu tronqué)"
+                    system_prompt += (
+                        f"\n\nFichier: {item.get('path', 'chemin inconnu')}\n"
+                        f"```\n{content}\n```"
+                    )
+            if message.document_text:
+                document_name = (message.document_name or "document").strip()[:120]
+                system_prompt += (
+                    f"\n\nDOCUMENT FOURNI ({document_name}) :\n"
+                    f"```text\n{message.document_text[:30000]}\n```"
+                )
+
+            sources = []
+            web_performed = False
+            if web_decision["should_search"]:
+                yield work_sse({
+                    "type": "phase",
+                    "phase": "searching",
+                    "label": "Recherche Web",
+                })
+                try:
+                    if os.environ.get("TAVILY_API_KEY"):
+                        web_performed = True
+                        sources = await tavily_search(message.content, max_results=8)
+                except Exception as exc:
+                    logger.error("Tavily (work) error: %s", str(exc)[:300])
+                    sources = []
+                system_prompt += web_results_context(sources)
+
+            stage = {
+                "high": "advanced",
+                "medium": "medium",
+                "instant": "economic",
+            }.get(
+                requested_mode,
+                _plus_auto_stage(
+                    message.content,
+                    has_tools=bool(web_decision["should_search"]),
+                    has_image=bool(message.image_base64),
+                    has_document=bool(message.document_text),
+                ),
+            )
+            routed_profile = _chat_profile_for_user(user, selected_model, stage)
+            public_model = _model_public(
+                routed_profile,
+                stage,
+                requested_mode=requested_mode,
+                selection_reason="auto" if requested_mode == "auto" else "manual",
+                levels_available={"high": True, "medium": True, "instant": True},
+            )
+
+            initial_messages = []
+            for item in history:
+                if item.get("role") in ("user", "assistant") and item.get("content"):
+                    initial_messages.append({
+                        "role": item["role"],
+                        "content": str(item["content"])[:20000],
+                    })
+
+            if message.image_base64:
+                image_data = message.image_base64.split(",", 1)[-1]
+                user_message = UserMessage(
+                    text=message.content,
+                    file_contents=[
+                        FileContent(content_type="image", file_content_base64=image_data)
+                    ],
+                )
+            else:
+                user_message = UserMessage(text=message.content)
+
+            yield work_sse({
+                "type": "model",
+                "model": public_model,
+            })
+            yield work_sse({
+                "type": "phase",
+                "phase": "generating",
+                "label": "Exécution et création des livrables",
+            })
+
+            chat = LlmChat(
+                api_key=AI_LLM_KEY,
+                session_id=f"work_{conversation_id}",
+                system_message=system_prompt + MODERATION_GUARD + IDENTITY_GUARD,
+                initial_messages=initial_messages,
+            ).with_model(
+                routed_profile["provider"], routed_profile["model_id"]
+            ).with_params(**routed_profile.get("params", {}))
+            answer = await chat.send_message(user_message)
+
+            yield work_sse({
+                "type": "phase",
+                "phase": "saving",
+                "label": "Enregistrement du travail",
+            })
+            message_now = datetime.now(timezone.utc).isoformat()
+            user_doc = {
+                "id": f"work-user:{request_record['_id']}",
+                "conversation_id": conversation_id,
+                "user_id": user["id"],
+                "role": "user",
+                "content": message.content,
+                "has_image": bool(message.image_base64),
+                "document_name": message.document_name,
+                "request_id": request_record.get("request_id"),
+                "conversation_type": "work",
+                "created_at": message_now,
+            }
+            assistant_doc = {
+                "id": f"work-assistant:{request_record['_id']}",
+                "conversation_id": conversation_id,
+                "user_id": user["id"],
+                "role": "assistant",
+                "content": answer,
+                "sources": sources,
+                "web_search": _web_search_public(
+                    web_decision, performed=web_performed, sources=sources
+                ),
+                "conversation_type": "work",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.messages.update_one(
+                {"id": user_doc["id"]}, {"$setOnInsert": user_doc}, upsert=True
+            )
+            await db.messages.update_one(
+                {"id": assistant_doc["id"]}, {"$setOnInsert": assistant_doc}, upsert=True
+            )
+            await db.conversations.update_one(
+                {"id": conversation_id, "user_id": user["id"], "conversation_type": "work"},
+                {"$set": {
+                    "selected_model": selected_model,
+                    "selected_intelligence_mode": requested_mode,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
+
+            actual_units = _actual_work_units(
+                message.content,
+                answer,
+                stage=stage,
+                source_count=len(sources),
+                project_file_count=len(project_files),
+                has_image=bool(message.image_base64),
+                has_document=bool(message.document_text),
+            )
+            work_quota = await _finish_work_quota(
+                user, reserved_work_units, actual_units
+            )
+            reserved_work_units = 0
+            if capture:
+                await _finish_capture_analysis(
+                    capture,
+                    capture_reserved,
+                    _weighted_text_units(message.content, answer) + 1024,
+                )
+                capture_reserved = 0
+
+            deliverables = sorted(set(
+                path.strip().strip("`")
+                for path in re.findall(
+                    r"(?:Fichier|File)\s*:\s*([^\n]+)", answer, flags=re.IGNORECASE
+                )
+                if path.strip()
+            ))
+            result = {
+                "response": answer,
+                "message": answer,
+                "conversation_id": conversation_id,
+                "conversation_type": "work",
+                "sources": sources,
+                "model": public_model,
+                "active_model": public_model,
+                "work_quota": work_quota,
+                "consumed_units": actual_units,
+                "deliverables": deliverables,
+                "progress": [
+                    {"key": "analyzing", "status": "completed"},
+                    {"key": "reading_files", "status": "completed", "count": len(project_files)},
+                    {
+                        "key": "searching",
+                        "status": "completed" if web_decision["should_search"] else "skipped",
+                        "count": len(sources),
+                    },
+                    {"key": "generating", "status": "completed"},
+                    {"key": "saving", "status": "completed"},
+                ],
+                "web_search": _web_search_public(
+                    web_decision, performed=web_performed, sources=sources
+                ),
+            }
+            await _complete_chat_request(request_record, result)
+            yield work_sse({"type": "done", **result})
+        except Exception as exc:
+            logger.error("Work task error: %s", str(exc)[:500])
+            if reserved_work_units:
+                await _release_work_quota(user, reserved_work_units)
+            if capture and capture_reserved:
+                await _release_capture_analysis(capture, capture_reserved)
+            if request_record:
+                await _fail_chat_request(request_record)
+            yield work_sse({
+                "type": "error",
+                "status": 503,
+                "detail": "Le mode Work est temporairement indisponible. Aucune unité n’a été consommée.",
+            })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@api_router.get("/chat/work/quota")
+async def get_work_quota(user: dict = Depends(get_current_user)):
+    if not _has_plus_capabilities(user):
+        raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+    if not _plus_quota_applies(user):
+        return _work_quota_public(None, applies=False, unlimited=True)
+    doc = await _get_work_quota_doc(user["id"], False)
+    return _work_quota_public(doc, applies=True)
+
+
 @api_router.get("/chat/models")
 async def get_chat_models(
     conversation_id: Optional[str] = None,
     model: Optional[str] = None,
+    intelligence_mode: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     conversation = None
     if conversation_id:
         conversation = await db.conversations.find_one(
             {"id": conversation_id, "user_id": user["id"]},
-            {"_id": 1, "selected_model": 1},
+            {
+                "_id": 1,
+                "selected_model": 1,
+                "selected_intelligence_mode": 1,
+                "conversation_type": 1,
+            },
         )
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation non trouvée")
@@ -2580,10 +3917,19 @@ async def get_chat_models(
         conversation_id,
         model,
         conversation,
+        intelligence_mode,
     )
     return {
         "options": _model_options_public(user),
         "active_model": active_model,
+        "intelligence_modes": [
+            {"key": "auto", "label": "Auto"},
+            {"key": "high", "label": "Élevée"},
+            {"key": "medium", "label": "Moyenne"},
+            {"key": "instant", "label": "Instantanée"},
+        ] if _has_plus_capabilities(user) else [],
+        "work_available": _has_plus_capabilities(user),
+        "conversation_type": (conversation or {}).get("conversation_type", "chat"),
     }
 
 
@@ -2627,14 +3973,37 @@ async def get_conversation_messages(conversation_id: str, user: dict = Depends(g
 async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_current_user)):
     conversation = await db.conversations.find_one(
         {"id": conversation_id, "user_id": user["id"]},
-        {"_id": 1, "selected_model": 1},
+        {"_id": 1, "selected_model": 1, "selected_intelligence_mode": 1, "conversation_type": 1},
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation non trouvée")
+    conversation_type = conversation.get("conversation_type", "chat")
+    if conversation_type == "work":
+        if not _has_plus_capabilities(user):
+            raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+        work_doc = (
+            await _get_work_quota_doc(user["id"], False)
+            if _plus_quota_applies(user)
+            else None
+        )
+        return {
+            **_text_quota_public(None, False),
+            "conversation_type": "work",
+            "work_quota": _work_quota_public(
+                work_doc,
+                applies=_plus_quota_applies(user),
+                unlimited=not _plus_quota_applies(user),
+            ),
+            "capture": None,
+            "active_model": await _active_model_for_conversation(
+                user, conversation_id, conversation=conversation
+            ),
+        }
     plan = _quota_plan(user)
     if not plan:
         return {
             **_text_quota_public(None, False),
+            "conversation_type": "chat",
             "capture": None,
             "active_model": await _active_model_for_conversation(
                 user, conversation_id, conversation=conversation
@@ -2651,6 +4020,7 @@ async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_
     )
     return {
         **_text_quota_public(doc, True, plan),
+        "conversation_type": "chat",
         "capture": _capture_quota_public(capture, True, plan),
         "active_model": await _active_model_for_conversation(
             user, conversation_id, conversation=conversation
@@ -2748,16 +4118,91 @@ async def _release_mongo_generation(user_id: str):
     )
 
 
+def _plus_generation_key(user_id: str) -> str:
+    return f"plus-image-generations:{user_id}"
+
+
+def _plus_generation_quota_public(doc: Optional[dict]) -> dict:
+    used = int((doc or {}).get("used", 0)) if (doc or {}).get("period_started_at") else 0
+    return {
+        "remaining": max(0, PLUS_IMAGE_GENERATION_LIMIT - used),
+        "limit": PLUS_IMAGE_GENERATION_LIMIT,
+        "used": used,
+        "unlimited": False,
+        "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+    }
+
+
+async def _get_plus_generation_quota_doc(user_id: str, start_period: bool) -> Optional[dict]:
+    key = _plus_generation_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.plus_image_generation_quotas.find_one({"_id": key})
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.plus_image_generation_quotas.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {"period_started_at": None, "reset_at": None, "used": 0, "updated_at": now}},
+        )
+        doc = await db.plus_image_generation_quotas.find_one({"_id": key})
+    if not start_period:
+        return doc
+
+    reset_at = now + timedelta(hours=PLUS_IMAGE_GENERATION_WINDOW_HOURS)
+    await db.plus_image_generation_quotas.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "used": 0,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    await db.plus_image_generation_quotas.update_one(
+        {"_id": key, "period_started_at": None},
+        {"$set": {"period_started_at": now, "reset_at": reset_at, "used": 0, "updated_at": now}},
+    )
+    return await db.plus_image_generation_quotas.find_one({"_id": key})
+
+
+async def _reserve_plus_generation(user_id: str) -> dict:
+    doc = await _get_plus_generation_quota_doc(user_id, True)
+    now = datetime.now(timezone.utc)
+    result = await db.plus_image_generation_quotas.update_one(
+        {
+            "_id": doc["_id"],
+            "reset_at": {"$gt": now},
+            "$expr": {"$lt": ["$used", PLUS_IMAGE_GENERATION_LIMIT]},
+        },
+        {"$inc": {"used": 1}, "$set": {"updated_at": now}},
+    )
+    latest = await db.plus_image_generation_quotas.find_one({"_id": doc["_id"]})
+    return {"allowed": bool(result.modified_count), "quota": _plus_generation_quota_public(latest)}
+
+
+async def _release_plus_generation(user_id: str):
+    await db.plus_image_generation_quotas.update_one(
+        {"_id": _plus_generation_key(user_id), "used": {"$gte": 1}},
+        {"$inc": {"used": -1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+
 @api_router.get("/images/remaining")
 async def get_remaining_generations(user: dict = Depends(get_current_user)):
     """Check how many free image generations the user has remaining"""
     subscription = user.get("subscription", "free")
-    is_vip = user.get("is_vip", False)
+    is_vip = bool(user.get("is_vip") or is_vip_email(user.get("email")))
     
     if subscription == "mongo" and not is_vip:
         return _mongo_generation_quota_public(await _get_mongo_generation_quota_doc(user["id"], False))
 
-    if is_vip or subscription in ("pro", "developer"):
+    if subscription == "pro" and not is_vip:
+        return _plus_generation_quota_public(await _get_plus_generation_quota_doc(user["id"], False))
+
+    if is_vip or subscription == "developer":
         return {"remaining": -1, "limit": -1, "unlimited": True}
     
     used = user.get("image_generations_count", 0)
@@ -2767,12 +4212,13 @@ async def get_remaining_generations(user: dict = Depends(get_current_user)):
 @api_router.post("/images/generate")
 async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get_current_user)):
     subscription = user.get("subscription", "free")
-    is_vip = user.get("is_vip", False)
+    is_vip = bool(user.get("is_vip") or is_vip_email(user.get("email")))
     
     if not request.prompt or not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Le prompt ne peut pas être vide")
 
     mongo_generation_reserved = False
+    plus_generation_reserved = False
     if subscription == "mongo" and not is_vip:
         generation_reservation = await _reserve_mongo_generation(user["id"])
         if not generation_reservation["allowed"]:
@@ -2782,6 +4228,15 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
                 detail=f"Quota Mongo de 20 générations atteint. Renouvellement à {reset_at}.",
             )
         mongo_generation_reserved = True
+    elif subscription == "pro" and not is_vip:
+        generation_reservation = await _reserve_plus_generation(user["id"])
+        if not generation_reservation["allowed"]:
+            reset_at = generation_reservation["quota"].get("reset_at")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Quota Plus de 50 générations atteint. Renouvellement à {reset_at}.",
+            )
+        plus_generation_reserved = True
     
     # VIP and pro/developer keep their existing unlimited entitlement.
     if not is_vip and subscription not in ("mongo", "pro", "developer"):
@@ -2832,16 +4287,24 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
                 result["generation_quota"] = _mongo_generation_quota_public(
                     await _get_mongo_generation_quota_doc(user["id"], False)
                 )
+            elif subscription == "pro" and not is_vip:
+                result["generation_quota"] = _plus_generation_quota_public(
+                    await _get_plus_generation_quota_doc(user["id"], False)
+                )
             return result
         else:
             raise HTTPException(status_code=500, detail="Aucune image générée")
     except HTTPException:
         if mongo_generation_reserved:
             await _release_mongo_generation(user["id"])
+        if plus_generation_reserved:
+            await _release_plus_generation(user["id"])
         raise
     except Exception as e:
         if mongo_generation_reserved:
             await _release_mongo_generation(user["id"])
+        if plus_generation_reserved:
+            await _release_plus_generation(user["id"])
         logger.error(f"Image generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
 
@@ -6022,6 +7485,18 @@ async def _dev_quota_state(user: dict):
         used, window_start = 0, now
     reset_at = (window_start + window).isoformat()
     return tier_name, tier, used, reset_at, window_start
+
+
+@api_router.post("/developer/intent")
+async def developer_intent(
+    request: DeveloperIntentRequest,
+    user: dict = Depends(get_current_user),
+):
+    decision = _developer_intent_decision(request.content, request.document_name)
+    return {
+        **decision,
+        "route": "developer" if decision["use_developer"] else "chat",
+    }
 
 
 @api_router.post("/developer/chat")
