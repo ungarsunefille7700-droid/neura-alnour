@@ -5,6 +5,7 @@ import json
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 import os
 import logging
 from pathlib import Path
@@ -61,6 +62,19 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 # through the Emergent proxy via the 'sk-emergent-' prefix, giving managed multi-model
 # access without the Gemini free-tier limits). Falls back to Gemini if not set.
 AI_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY') or GEMINI_API_KEY
+
+# Free chat quotas. Units are weighted usage units (estimated input/output tokens
+# because emergentintegrations does not expose provider usage metadata).
+FREE_TEXT_WINDOW_HOURS = int(os.environ.get("FREE_TEXT_WINDOW_HOURS", "5"))
+FREE_TEXT_ADVANCED_BUDGET_UNITS = int(os.environ.get("FREE_TEXT_ADVANCED_BUDGET_UNITS", "120000"))
+FREE_TEXT_MEDIUM_BUDGET_UNITS = int(os.environ.get("FREE_TEXT_MEDIUM_BUDGET_UNITS", "60000"))
+FREE_TEXT_MEDIUM_MAX_TOKENS = int(os.environ.get("FREE_TEXT_MEDIUM_MAX_TOKENS", "768"))
+
+FREE_IMAGE_WINDOW_HOURS = int(os.environ.get("FREE_IMAGE_WINDOW_HOURS", "24"))
+FREE_IMAGE_MAX_UPLOADS = int(os.environ.get("FREE_IMAGE_MAX_UPLOADS", "3"))
+FREE_IMAGE_ANALYSIS_BUDGET_UNITS = int(os.environ.get("FREE_IMAGE_ANALYSIS_BUDGET_UNITS", "30000"))
+# The application already enforced 5 MiB, which is stricter than the requested 20 MiB ceiling.
+FREE_IMAGE_MAX_BYTES = int(os.environ.get("FREE_IMAGE_MAX_BYTES", str(5 * 1024 * 1024)))
 
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
@@ -281,6 +295,9 @@ MODEL_PROFILES = {
         "label": "ChatGPT",
         "provider": "openai",
         "model_id": "gpt-4o",
+        "free_advanced_model_id": os.environ.get("FREE_CHATGPT_ADVANCED_MODEL", "gpt-4o"),
+        "medium_provider": "openai",
+        "medium_model_id": os.environ.get("FREE_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
         "persona": (
             "STYLE DE RÉPONSE — Direct et structuré :\n"
             "- Va droit au but, oriente vers la solution.\n"
@@ -293,6 +310,9 @@ MODEL_PROFILES = {
         "label": "Claude",
         "provider": "anthropic",
         "model_id": "claude-sonnet-4-5",
+        "free_advanced_model_id": os.environ.get("FREE_CLAUDE_ADVANCED_MODEL", "claude-sonnet-4-5"),
+        "medium_provider": "anthropic",
+        "medium_model_id": os.environ.get("FREE_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
         "persona": (
             "STYLE DE RÉPONSE — Réfléchi et nuancé :\n"
             "- Explique ton raisonnement, montre les nuances et les différents angles.\n"
@@ -305,6 +325,9 @@ MODEL_PROFILES = {
         "label": "Gemini",
         "provider": "gemini",
         "model_id": "gemini-2.5-flash",
+        "free_advanced_model_id": os.environ.get("FREE_GEMINI_ADVANCED_MODEL", "gemini-2.5-flash"),
+        "medium_provider": "gemini",
+        "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
             "STYLE DE RÉPONSE — Synthétique et factuel :\n"
             "- Réponses concises, allant à l'essentiel.\n"
@@ -317,6 +340,11 @@ MODEL_PROFILES = {
         "label": "Grok",
         "provider": "gemini",
         "model_id": "gemini-2.5-flash",
+        "free_advanced_model_id": os.environ.get("FREE_GROK_ADVANCED_MODEL", "gemini-2.5-flash"),
+        # The existing Grok selector is a Grok-style persona on Gemini. Keep that
+        # routing unchanged until a real xAI model is explicitly configured.
+        "medium_provider": "gemini",
+        "medium_model_id": os.environ.get("FREE_GROK_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
             "STYLE DE RÉPONSE — Cash et direct :\n"
             "- Ton franc et décontracté, sans langue de bois.\n"
@@ -337,7 +365,7 @@ VIP_ADMINS = [
 
 # Subscription Plans
 SUBSCRIPTION_PLANS = {
-    "free": {"name": "Gratuit", "price_monthly": 0, "price_yearly": 0, "features": ["unlimited_text", "islamic_module", "quiz"]},
+    "free": {"name": "Gratuit", "price_monthly": 0, "price_yearly": 0, "features": ["quota_text", "limited_screens", "islamic_module", "quiz"]},
     "comme_toi": {"name": "Comme Toi", "price_monthly": 4.99, "price_yearly": 49.99, "features": ["history_50", "image_1_day", "themes", "encrypted"]},
     "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["unlimited_screens", "unlimited_images", "full_history", "detailed_responses", "export"]},
     "pro": {"name": "Pro", "price_monthly": 14.99, "price_yearly": 89.99, "features": ["priority", "fast_responses", "coaching", "premium_themes", "adhan_hd", "offline", "memorization", "stats"]},
@@ -387,11 +415,625 @@ def _dev_is_unlimited(user: dict) -> bool:
     return bool(user.get("is_vip") or is_vip_email(user.get("email")))
 
 def _is_premium_ai(user: dict) -> bool:
-    """True if the user may use the real paid models (GPT-4o / Claude).
-    Free / standard plans stay on Gemini for cost control."""
+    """Resolve the legacy paid-model entitlement outside the free quota router.
+
+    Free text routing is handled separately by _chat_profile_for_user; standard
+    paid plans keep their pre-existing Gemini behavior.
+    """
     if user.get("is_vip") or is_vip_email(user.get("email")):
         return True
     return user.get("subscription") in ("neura_plus", "neura_ultra")
+
+
+def _free_quota_applies(user: dict) -> bool:
+    """Only the actual free plan is affected. Paid plans and VIP/founders are untouched."""
+    return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription", "free") == "free"
+
+
+def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_stage: str = "advanced") -> dict:
+    """Resolve the existing multi-provider router, then apply only the free fallback stage."""
+    base = MODEL_PROFILES.get(requested_model, MODEL_PROFILES[DEFAULT_MODEL])
+    profile = {**base, "params": dict(base.get("params", {}))}
+    if _free_quota_applies(user):
+        profile["model_id"] = base.get("free_advanced_model_id", base.get("model_id"))
+        if quota_stage == "medium":
+            profile["provider"] = base.get("medium_provider", base.get("provider", "gemini"))
+            profile["model_id"] = base.get("medium_model_id", base.get("model_id"))
+            profile["params"]["max_tokens"] = min(
+                int(profile["params"].get("max_tokens", FREE_TEXT_MEDIUM_MAX_TOKENS)),
+                FREE_TEXT_MEDIUM_MAX_TOKENS,
+            )
+        return profile
+
+    # Preserve the pre-existing behavior of every non-developer paid plan.
+    # Neura+/Ultra and VIP accounts keep the selected real provider.
+    if not _is_premium_ai(user):
+        profile["provider"] = "gemini"
+        profile["model_id"] = "gemini-2.5-flash"
+    return profile
+
+
+def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _iso_utc(value: Optional[datetime]) -> Optional[str]:
+    aware = _aware_utc(value)
+    return aware.isoformat().replace("+00:00", "Z") if aware else None
+
+
+def _weighted_text_units(*parts: Any) -> int:
+    """Estimate provider usage when the integration does not return token accounting."""
+    characters = sum(len(str(part or "")) for part in parts)
+    return max(1, (characters + 3) // 4)
+
+
+def _text_quota_key(user_id: str, conversation_id: str) -> str:
+    return f"free-text:{user_id}:{conversation_id}"
+
+
+def _image_quota_key(user_id: str) -> str:
+    return f"free-images:{user_id}"
+
+
+def _capture_key(user_id: str, capture_id: str) -> str:
+    return f"free-capture:{user_id}:{capture_id}"
+
+
+def _text_quota_public(doc: Optional[dict], applies: bool = True) -> dict:
+    if not applies:
+        return {"applies": False, "unlimited": True, "blocked": False, "stage": "paid"}
+    if not doc or not doc.get("period_started_at"):
+        return {
+            "applies": True,
+            "unlimited": False,
+            "stage": "advanced",
+            "blocked": False,
+            "period_started_at": None,
+            "reset_at": None,
+            "advanced_remaining": FREE_TEXT_ADVANCED_BUDGET_UNITS,
+            "medium_remaining": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+            "advanced_budget": FREE_TEXT_ADVANCED_BUDGET_UNITS,
+            "medium_budget": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+        }
+    return {
+        "applies": True,
+        "unlimited": False,
+        "stage": doc.get("stage", "advanced"),
+        "blocked": doc.get("stage") == "blocked",
+        "period_started_at": _iso_utc(doc.get("period_started_at")),
+        "reset_at": _iso_utc(doc.get("reset_at")),
+        "advanced_remaining": max(0, FREE_TEXT_ADVANCED_BUDGET_UNITS - int(doc.get("advanced_used", 0))),
+        "medium_remaining": max(0, FREE_TEXT_MEDIUM_BUDGET_UNITS - int(doc.get("medium_used", 0))),
+        "advanced_budget": FREE_TEXT_ADVANCED_BUDGET_UNITS,
+        "medium_budget": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+    }
+
+
+def _image_quota_public(doc: Optional[dict], applies: bool = True) -> dict:
+    if not applies:
+        return {"applies": False, "unlimited": True, "remaining": None, "reset_at": None}
+    used = int((doc or {}).get("uploads_used", 0)) if (doc or {}).get("period_started_at") else 0
+    return {
+        "applies": True,
+        "unlimited": False,
+        "limit": FREE_IMAGE_MAX_UPLOADS,
+        "used": used,
+        "remaining": max(0, FREE_IMAGE_MAX_UPLOADS - used),
+        "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+        "max_bytes": FREE_IMAGE_MAX_BYTES,
+    }
+
+
+def _capture_quota_public(doc: Optional[dict], applies: bool = True) -> Optional[dict]:
+    if not doc:
+        return None
+    if not applies:
+        return {
+            "applies": False,
+            "unlimited": True,
+            "capture_id": doc.get("capture_id"),
+            "blocked": False,
+            "reset_at": None,
+        }
+    used = max(0, int(doc.get("analysis_used", 0)))
+    return {
+        "applies": True,
+        "unlimited": False,
+        "capture_id": doc.get("capture_id"),
+        "used": used,
+        "budget": FREE_IMAGE_ANALYSIS_BUDGET_UNITS,
+        "remaining": max(0, FREE_IMAGE_ANALYSIS_BUDGET_UNITS - used),
+        "blocked": used >= FREE_IMAGE_ANALYSIS_BUDGET_UNITS,
+        "period_started_at": _iso_utc(doc.get("period_started_at")),
+        "reset_at": _iso_utc(doc.get("reset_at")),
+    }
+
+
+async def _insert_quota_message(
+    user_id: str,
+    conversation_id: str,
+    message_id: str,
+    quota_type: str,
+    content: str,
+    reset_at: Optional[datetime],
+) -> dict:
+    message = {
+        "id": message_id,
+        "conversation_id": conversation_id,
+        "user_id": user_id,
+        "role": "system",
+        "content": content,
+        "quota_type": quota_type,
+        "reset_at": _iso_utc(reset_at),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.messages.update_one({"id": message_id}, {"$setOnInsert": message}, upsert=True)
+    return message
+
+
+async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: bool) -> Optional[dict]:
+    key = _text_quota_key(user_id, conversation_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.free_chat_quotas.find_one({"_id": key})
+
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.free_chat_quotas.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {
+                "period_started_at": None,
+                "reset_at": None,
+                "advanced_used": 0,
+                "medium_used": 0,
+                "stage": "advanced",
+                "advanced_notice_sent": False,
+                "final_notice_sent": False,
+                "updated_at": now,
+            }},
+        )
+        doc = await db.free_chat_quotas.find_one({"_id": key})
+
+    if not start_period:
+        return doc
+
+    reset_at = now + timedelta(hours=FREE_TEXT_WINDOW_HOURS)
+    await db.free_chat_quotas.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "advanced_used": 0,
+            "medium_used": 0,
+            "stage": "advanced",
+            "advanced_notice_sent": False,
+            "final_notice_sent": False,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    await db.free_chat_quotas.update_one(
+        {"_id": key, "period_started_at": None},
+        {"$set": {
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "advanced_used": 0,
+            "medium_used": 0,
+            "stage": "advanced",
+            "advanced_notice_sent": False,
+            "final_notice_sent": False,
+            "updated_at": now,
+        }},
+    )
+    return await db.free_chat_quotas.find_one({"_id": key})
+
+
+async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
+    flag = "advanced_notice_sent" if kind == "advanced_fallback" else "final_notice_sent"
+    result = await db.free_chat_quotas.update_one(
+        {"_id": doc["_id"], flag: {"$ne": True}},
+        {"$set": {flag: True, "updated_at": datetime.now(timezone.utc)}},
+    )
+    if result.modified_count == 0:
+        return None
+    reset_iso = _iso_utc(doc.get("reset_at"))
+    if kind == "advanced_fallback":
+        content = (
+            "Limite de l’IA avancée atteinte\n\n"
+            "Votre quota d’IA avancée est épuisé pour cette conversation. La conversation continue "
+            "temporairement avec une version moyenne, dans la limite de son quota restant. "
+            f"Votre accès à l’IA avancée dans cette conversation sera renouvelé à {reset_iso}. "
+            "Passez à une offre supérieure pour continuer avec l’IA avancée."
+        )
+    else:
+        content = (
+            "Limite gratuite atteinte\n\n"
+            "Vous avez épuisé le quota gratuit de cette conversation. Passez à une offre supérieure "
+            "pour continuer cette même conversation ou commencez une nouvelle discussion. "
+            f"Le quota de cette conversation sera renouvelé à {reset_iso}."
+        )
+    return await _insert_quota_message(
+        doc["user_id"],
+        doc["conversation_id"],
+        f"{kind}:{doc['_id']}:{_iso_utc(doc.get('period_started_at'))}",
+        kind,
+        content,
+        doc.get("reset_at"),
+    )
+
+
+async def _reserve_text_quota(user: dict, conversation_id: str, units: int) -> dict:
+    if not _free_quota_applies(user):
+        return {"applies": False, "stage": "paid", "reserved_units": 0, "quota": _text_quota_public(None, False), "notices": []}
+
+    units = max(1, int(units))
+    doc = await _get_text_quota_doc(user["id"], conversation_id, True)
+    notices = []
+
+    if doc.get("stage") == "advanced":
+        result = await db.free_chat_quotas.update_one(
+            {
+                "_id": doc["_id"],
+                "stage": "advanced",
+                "$expr": {"$lte": [{"$add": ["$advanced_used", units]}, FREE_TEXT_ADVANCED_BUDGET_UNITS]},
+            },
+            {"$inc": {"advanced_used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+        if result.modified_count:
+            latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+            return {"applies": True, "stage": "advanced", "reserved_units": units, "quota": _text_quota_public(latest), "notices": notices}
+        await db.free_chat_quotas.update_one(
+            {"_id": doc["_id"], "stage": "advanced"},
+            {"$set": {"stage": "medium", "updated_at": datetime.now(timezone.utc)}},
+        )
+        doc = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+        notice = await _maybe_text_notice(doc, "advanced_fallback")
+        if notice:
+            notices.append(notice)
+
+    if doc.get("stage") == "medium":
+        result = await db.free_chat_quotas.update_one(
+            {
+                "_id": doc["_id"],
+                "stage": "medium",
+                "$expr": {"$lte": [{"$add": ["$medium_used", units]}, FREE_TEXT_MEDIUM_BUDGET_UNITS]},
+            },
+            {"$inc": {"medium_used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+        if result.modified_count:
+            latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+            return {"applies": True, "stage": "medium", "reserved_units": units, "quota": _text_quota_public(latest), "notices": notices}
+        await db.free_chat_quotas.update_one(
+            {"_id": doc["_id"], "stage": "medium"},
+            {"$set": {"stage": "blocked", "updated_at": datetime.now(timezone.utc)}},
+        )
+        doc = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+
+    notice = await _maybe_text_notice(doc, "text_blocked")
+    if notice:
+        notices.append(notice)
+    return {"applies": True, "stage": "blocked", "reserved_units": 0, "quota": _text_quota_public(doc), "notices": notices}
+
+
+async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reserved: int, actual: int) -> dict:
+    if not _free_quota_applies(user) or stage not in ("advanced", "medium"):
+        return {"quota": _text_quota_public(None, False), "notices": []}
+    key = _text_quota_key(user["id"], conversation_id)
+    field = "advanced_used" if stage == "advanced" else "medium_used"
+    adjustment = max(1, int(actual)) - max(0, int(reserved))
+    if adjustment:
+        await db.free_chat_quotas.update_one(
+            {"_id": key},
+            {"$inc": {field: adjustment}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+    doc = await db.free_chat_quotas.find_one({"_id": key})
+    notices = []
+    if doc.get("stage") == "advanced" and int(doc.get("advanced_used", 0)) >= FREE_TEXT_ADVANCED_BUDGET_UNITS:
+        await db.free_chat_quotas.update_one({"_id": key, "stage": "advanced"}, {"$set": {"stage": "medium"}})
+        doc = await db.free_chat_quotas.find_one({"_id": key})
+        notice = await _maybe_text_notice(doc, "advanced_fallback")
+        if notice:
+            notices.append(notice)
+    if doc.get("stage") == "medium" and int(doc.get("medium_used", 0)) >= FREE_TEXT_MEDIUM_BUDGET_UNITS:
+        await db.free_chat_quotas.update_one({"_id": key, "stage": "medium"}, {"$set": {"stage": "blocked"}})
+        doc = await db.free_chat_quotas.find_one({"_id": key})
+        notice = await _maybe_text_notice(doc, "text_blocked")
+        if notice:
+            notices.append(notice)
+    return {"quota": _text_quota_public(doc), "notices": notices}
+
+
+async def _release_text_quota(user: dict, conversation_id: str, stage: str, reserved: int):
+    if not _free_quota_applies(user) or stage not in ("advanced", "medium") or reserved <= 0:
+        return
+    field = "advanced_used" if stage == "advanced" else "medium_used"
+    await db.free_chat_quotas.update_one(
+        {"_id": _text_quota_key(user["id"], conversation_id), field: {"$gte": int(reserved)}},
+        {"$inc": {field: -int(reserved)}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def _get_image_quota_doc(user_id: str, start_period: bool) -> Optional[dict]:
+    key = _image_quota_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.free_image_quotas.find_one({"_id": key})
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.free_image_quotas.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {
+                "period_started_at": None,
+                "reset_at": None,
+                "uploads_used": 0,
+                "capture_ids": [],
+                "upload_notice_sent": False,
+                "updated_at": now,
+            }},
+        )
+        await db.free_image_captures.update_many(
+            {"user_id": user_id, "reset_at": {"$lte": now}},
+            {"$set": {
+                "analysis_used": 0,
+                "analysis_notice_sent": False,
+                "period_started_at": None,
+                "reset_at": None,
+                "updated_at": now,
+            }},
+        )
+        doc = await db.free_image_quotas.find_one({"_id": key})
+
+    if not start_period:
+        return doc
+
+    reset_at = now + timedelta(hours=FREE_IMAGE_WINDOW_HOURS)
+    await db.free_image_quotas.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "uploads_used": 0,
+            "capture_ids": [],
+            "upload_notice_sent": False,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    await db.free_image_quotas.update_one(
+        {"_id": key, "period_started_at": None},
+        {"$set": {
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "uploads_used": 0,
+            "capture_ids": [],
+            "upload_notice_sent": False,
+            "updated_at": now,
+        }},
+    )
+    doc = await db.free_image_quotas.find_one({"_id": key})
+    await db.free_image_captures.update_many(
+        {"user_id": user_id, "reset_at": None},
+        {"$set": {
+            "period_started_at": doc.get("period_started_at"),
+            "reset_at": doc.get("reset_at"),
+            "updated_at": now,
+        }},
+    )
+    return doc
+
+
+def _clean_image_payload(image_base64: str) -> tuple[str, int]:
+    payload = image_base64 or ""
+    if payload.startswith("data:"):
+        payload = payload.split(",", 1)[1] if "," in payload else ""
+    try:
+        decoded = base64.b64decode(payload, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Image invalide ou encodage incorrect.")
+    if not decoded:
+        raise HTTPException(status_code=400, detail="Image vide.")
+    if len(decoded) > FREE_IMAGE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"L’image ne doit pas dépasser {FREE_IMAGE_MAX_BYTES // (1024 * 1024)} Mo.",
+        )
+    return payload, len(decoded)
+
+
+async def _maybe_image_upload_notice(user_id: str, conversation_id: str, doc: dict) -> Optional[dict]:
+    result = await db.free_image_quotas.update_one(
+        {"_id": doc["_id"], "upload_notice_sent": {"$ne": True}},
+        {"$set": {"upload_notice_sent": True, "updated_at": datetime.now(timezone.utc)}},
+    )
+    if result.modified_count == 0:
+        return None
+    reset_iso = _iso_utc(doc.get("reset_at"))
+    return await _insert_quota_message(
+        user_id,
+        conversation_id,
+        f"image-upload-blocked:{doc['_id']}:{_iso_utc(doc.get('period_started_at'))}",
+        "image_upload_blocked",
+        "Limite d’envoi de captures atteinte\n\n"
+        f"Vous avez utilisé vos trois captures d’écran ou images pour cette période. Vous pourrez "
+        f"en envoyer de nouvelles à {reset_iso} ou passer à une offre supérieure.",
+        doc.get("reset_at"),
+    )
+
+
+async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str, image_base64: str) -> dict:
+    clean_payload, byte_size = _clean_image_payload(image_base64)
+    capture_id = capture_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", capture_id or "") else str(uuid.uuid4())
+    existing = await db.free_image_captures.find_one({"_id": _capture_key(user["id"], capture_id)})
+    if existing:
+        if existing.get("user_id") != user["id"] or existing.get("conversation_id") != conversation_id:
+            raise HTTPException(status_code=409, detail="Cet identifiant de capture est déjà utilisé.")
+        return {"accepted": True, "capture": existing, "duplicate": True, "image_quota": _image_quota_public(await _get_image_quota_doc(user["id"], False))}
+
+    quota_doc = await _get_image_quota_doc(user["id"], True)
+    now = datetime.now(timezone.utc)
+    result = await db.free_image_quotas.update_one(
+        {
+            "_id": quota_doc["_id"],
+            "reset_at": {"$gt": now},
+            "capture_ids": {"$ne": capture_id},
+            "$expr": {"$lt": ["$uploads_used", FREE_IMAGE_MAX_UPLOADS]},
+        },
+        {
+            "$inc": {"uploads_used": 1},
+            "$addToSet": {"capture_ids": capture_id},
+            "$set": {"updated_at": now},
+        },
+    )
+    quota_doc = await db.free_image_quotas.find_one({"_id": quota_doc["_id"]})
+    if result.modified_count == 0 and capture_id not in quota_doc.get("capture_ids", []):
+        notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
+        return {"accepted": False, "code": "free_image_upload_limit", "notice": notice, "image_quota": _image_quota_public(quota_doc)}
+
+    capture = {
+        "_id": _capture_key(user["id"], capture_id),
+        "capture_id": capture_id,
+        "user_id": user["id"],
+        "conversation_id": conversation_id,
+        "image_base64": clean_payload,
+        "byte_size": byte_size,
+        "analysis_used": 0,
+        "analysis_notice_sent": False,
+        "period_started_at": quota_doc.get("period_started_at"),
+        "reset_at": quota_doc.get("reset_at"),
+        "accepted_at": now,
+        "updated_at": now,
+    }
+    await db.free_image_captures.update_one({"_id": capture["_id"]}, {"$setOnInsert": capture}, upsert=True)
+    capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
+    upload_notice = None
+    if int(quota_doc.get("uploads_used", 0)) >= FREE_IMAGE_MAX_UPLOADS:
+        upload_notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
+    return {
+        "accepted": True,
+        "capture": capture,
+        "duplicate": False,
+        "image_quota": _image_quota_public(quota_doc),
+        "notice": upload_notice,
+    }
+
+
+async def _get_free_capture(user: dict, conversation_id: str, capture_id: str) -> Optional[dict]:
+    if not capture_id:
+        return None
+    return await db.free_image_captures.find_one({
+        "_id": _capture_key(user["id"], capture_id),
+        "user_id": user["id"],
+        "conversation_id": conversation_id,
+    })
+
+
+async def _maybe_capture_notice(capture: dict) -> Optional[dict]:
+    result = await db.free_image_captures.update_one(
+        {"_id": capture["_id"], "analysis_notice_sent": {"$ne": True}},
+        {"$set": {"analysis_notice_sent": True, "updated_at": datetime.now(timezone.utc)}},
+    )
+    if result.modified_count == 0:
+        return None
+    reset_iso = _iso_utc(capture.get("reset_at"))
+    return await _insert_quota_message(
+        capture["user_id"],
+        capture["conversation_id"],
+        f"image-analysis-blocked:{capture['_id']}:{_iso_utc(capture.get('period_started_at'))}",
+        "image_analysis_blocked",
+        "Limite d’analyse de cette image atteinte\n\n"
+        "Cette conversation contient une capture d’écran dont le quota d’analyse est épuisé. "
+        f"Réessayez à {reset_iso}, passez à une offre supérieure ou commencez une nouvelle "
+        "conversation sans image.",
+        capture.get("reset_at"),
+    )
+
+
+async def _reserve_capture_analysis(user: dict, conversation_id: str, capture: dict, units: int) -> dict:
+    await _get_image_quota_doc(user["id"], True)
+    capture = await _get_free_capture(user, conversation_id, capture.get("capture_id"))
+    units = max(1, int(units))
+    now = datetime.now(timezone.utc)
+    result = await db.free_image_captures.update_one(
+        {
+            "_id": capture["_id"],
+            "reset_at": {"$gt": now},
+            "$expr": {"$lte": [{"$add": ["$analysis_used", units]}, FREE_IMAGE_ANALYSIS_BUDGET_UNITS]},
+        },
+        {"$inc": {"analysis_used": units}, "$set": {"updated_at": now}},
+    )
+    capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
+    if result.modified_count:
+        return {"allowed": True, "reserved_units": units, "capture": capture, "notice": None}
+    notice = await _maybe_capture_notice(capture)
+    return {"allowed": False, "reserved_units": 0, "capture": capture, "notice": notice}
+
+
+async def _finish_capture_analysis(capture: dict, reserved: int, actual: int) -> dict:
+    adjustment = max(1, int(actual)) - max(0, int(reserved))
+    if adjustment:
+        await db.free_image_captures.update_one(
+            {"_id": capture["_id"]},
+            {"$inc": {"analysis_used": adjustment}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+    latest = await db.free_image_captures.find_one({"_id": capture["_id"]})
+    notice = None
+    if int(latest.get("analysis_used", 0)) >= FREE_IMAGE_ANALYSIS_BUDGET_UNITS:
+        notice = await _maybe_capture_notice(latest)
+    return {"capture": latest, "notice": notice}
+
+
+async def _release_capture_analysis(capture: Optional[dict], reserved: int):
+    if not capture or reserved <= 0:
+        return
+    await db.free_image_captures.update_one(
+        {"_id": capture["_id"], "analysis_used": {"$gte": int(reserved)}},
+        {"$inc": {"analysis_used": -int(reserved)}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def _begin_chat_request(user_id: str, request_id: Optional[str], conversation_id: str, mode: str) -> dict:
+    request_id = request_id if re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", request_id or "") else str(uuid.uuid4())
+    key = f"chat-request:{user_id}:{request_id}"
+    record = {
+        "_id": key,
+        "request_id": request_id,
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "mode": mode,
+        "status": "processing",
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+    try:
+        await db.chat_request_results.insert_one(record)
+        return {"new": True, "record": record}
+    except DuplicateKeyError:
+        existing = await db.chat_request_results.find_one({"_id": key})
+        return {"new": False, "record": existing}
+
+
+async def _complete_chat_request(record: dict, result: dict):
+    await db.chat_request_results.update_one(
+        {"_id": record["_id"]},
+        {"$set": {"status": "completed", "result": result, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def _fail_chat_request(record: Optional[dict]):
+    if record:
+        await db.chat_request_results.update_one(
+            {"_id": record["_id"], "status": "processing"},
+            {"$set": {"status": "failed", "updated_at": datetime.now(timezone.utc)}},
+        )
 
 # Security
 security = HTTPBearer(auto_error=False)
@@ -489,7 +1131,10 @@ class UserResponse(BaseModel):
 class MessageCreate(BaseModel):
     content: str
     conversation_id: Optional[str] = None
+    request_id: Optional[str] = None
     image_base64: Optional[str] = None
+    image_id: Optional[str] = None
+    capture_id: Optional[str] = None
     document_name: Optional[str] = None
     document_text: Optional[str] = None
     model: Optional[str] = None
@@ -952,46 +1597,134 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             "direct": True,
         }
     
-    # Check screen limit for free users
-    if message.image_base64 and not user.get("is_vip"):
-        subscription = user.get("subscription", "free")
-        if subscription == "free":
-            # Check if already sent screen in this conversation
-            if message.conversation_id:
-                existing_screen = await db.messages.find_one({
-                    "conversation_id": message.conversation_id,
-                    "has_image": True,
-                    "user_id": user["id"]
-                })
-                if existing_screen:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Vous avez envoyé une capture d'écran. Pour analyser des images sans restriction et continuer dans cette conversation, passez en Premium. Vous pouvez ouvrir une nouvelle discussion pour continuer gratuitement."
-                    )
-    
     # Create or get conversation
     conversation_id = message.conversation_id
     if not conversation_id:
-        conversation_id = str(uuid.uuid4())
-        await db.conversations.insert_one({
+        stable_request = message.request_id if re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", message.request_id or "") else str(uuid.uuid4())
+        conversation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"neura-chat:{user['id']}:{stable_request}"))
+        await db.conversations.update_one({"id": conversation_id}, {"$setOnInsert": {
             "id": conversation_id,
             "user_id": user["id"],
             "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
-        })
+        }}, upsert=True)
+    else:
+        owned_conversation = await db.conversations.find_one(
+            {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+        )
+        if not owned_conversation:
+            raise HTTPException(status_code=404, detail="Conversation non trouvée")
+
+    request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "message")
+    request_record = request_gate["record"]
+    if not request_gate["new"]:
+        if request_record.get("status") == "completed" and request_record.get("result"):
+            return request_record["result"]
+        if request_record.get("status") == "processing":
+            raise HTTPException(status_code=409, detail="Cette requête est déjà en cours de traitement.")
+        resumed = await db.chat_request_results.update_one(
+            {"_id": request_record["_id"], "status": "failed"},
+            {"$set": {"status": "processing", "updated_at": datetime.now(timezone.utc)}},
+        )
+        if resumed.modified_count == 0:
+            raise HTTPException(status_code=409, detail="Cette requête est déjà en cours de traitement.")
+
+    text_reservation = {
+        "applies": False,
+        "stage": "paid",
+        "reserved_units": 0,
+        "quota": _text_quota_public(None, False),
+        "notices": [],
+    }
+    capture_reservation = {"allowed": True, "reserved_units": 0, "capture": None, "notice": None}
+    capture = None
+    image_upload_notice = None
+    effective_image_data = message.image_base64
+    image_quota = _image_quota_public(None, False)
+
+    previous_history = await db.messages.find(
+        {"conversation_id": conversation_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    previous_history = [
+        item for item in previous_history
+        if item.get("request_id") != request_record.get("request_id")
+    ]
+
+    if _free_quota_applies(user) and message.image_base64:
+        capture_result = await _accept_free_capture(
+            user, conversation_id, message.image_id or str(uuid.uuid4()), message.image_base64
+        )
+        image_quota = capture_result["image_quota"]
+        if not capture_result["accepted"]:
+            await _fail_chat_request(request_record)
+            raise HTTPException(status_code=429, detail={
+                "code": capture_result["code"],
+                "message": "Vous avez utilisé vos trois captures pour cette période.",
+                "conversation_id": conversation_id,
+                "image_quota": image_quota,
+                "notice": capture_result.get("notice"),
+            })
+        capture = capture_result["capture"]
+        image_upload_notice = capture_result.get("notice")
+        effective_image_data = capture.get("image_base64")
+    elif _free_quota_applies(user) and message.capture_id:
+        capture = await _get_free_capture(user, conversation_id, message.capture_id)
+        if not capture:
+            await _fail_chat_request(request_record)
+            raise HTTPException(status_code=404, detail="Capture introuvable pour cette conversation.")
+        effective_image_data = capture.get("image_base64")
+        image_quota = _image_quota_public(await _get_image_quota_doc(user["id"], False))
+
+    if capture:
+        visual_reserve = (
+            _weighted_text_units(message.content, BASE_CHAT_SYSTEM)
+            + 1024
+            + max(256, int(capture.get("byte_size", 0)) // 1024)
+        )
+        capture_reservation = await _reserve_capture_analysis(user, conversation_id, capture, visual_reserve)
+        if not capture_reservation["allowed"]:
+            await _fail_chat_request(request_record)
+            raise HTTPException(status_code=429, detail={
+                "code": "free_image_analysis_limit",
+                "message": "Le quota d’analyse de cette image est épuisé.",
+                "conversation_id": conversation_id,
+                "reset_at": _iso_utc(capture_reservation["capture"].get("reset_at")),
+                "capture_quota": _capture_quota_public(capture_reservation["capture"]),
+                "notice": capture_reservation.get("notice"),
+            })
+    elif not effective_image_data:
+        reserve_units = _weighted_text_units(
+            BASE_CHAT_SYSTEM,
+            message.content,
+            message.document_text,
+            *(item.get("content", "") for item in previous_history),
+        ) + 1024
+        text_reservation = await _reserve_text_quota(user, conversation_id, reserve_units)
+        if text_reservation["stage"] == "blocked":
+            await _fail_chat_request(request_record)
+            raise HTTPException(status_code=429, detail={
+                "code": "free_text_quota_exhausted",
+                "message": "Vous avez épuisé le quota gratuit de cette conversation.",
+                "conversation_id": conversation_id,
+                "quota": text_reservation["quota"],
+                "notices": text_reservation.get("notices", []),
+            })
     
     # Save user message
-    user_msg_id = str(uuid.uuid4())
-    await db.messages.insert_one({
+    user_msg_id = f"chat-user:{request_record['_id']}"
+    user_message_doc = {
         "id": user_msg_id,
         "conversation_id": conversation_id,
         "user_id": user["id"],
         "role": "user",
         "content": message.content,
-        "has_image": bool(message.image_base64),
+        "has_image": bool(effective_image_data),
+        "capture_id": capture.get("capture_id") if capture else None,
+        "request_id": request_record.get("request_id"),
         "created_at": datetime.now(timezone.utc).isoformat()
-    })
+    }
+    await db.messages.update_one({"id": user_msg_id}, {"$setOnInsert": user_message_doc}, upsert=True)
 
     document_context = ""
     if message.document_text:
@@ -1009,10 +1742,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     memory_result = await _save_ai_memory_from_text(user, message.content)
     
     # Get conversation history for context
-    history = await db.messages.find(
-        {"conversation_id": conversation_id},
-        {"_id": 0}
-    ).sort("created_at", 1).to_list(50)
+    history = previous_history + [user_message_doc]
     
     # Build chat with LLM
     system_message = """Tu es NEURA AL-NOUR (نور), un assistant IA intelligent et bienveillant avec une expertise en Islam.
@@ -1054,12 +1784,12 @@ Règles importantes:
     last_err = None
     for attempt in range(3):
         try:
-            if message.image_base64:
+            if effective_image_data:
                 # Use FileContent with content_type="image" for vision
                 from emergentintegrations.llm.chat import FileContent
             
                 # Prepare image data - ensure proper format
-                image_data = message.image_base64
+                image_data = effective_image_data
                 # Remove data URL prefix if present
                 if image_data.startswith('data:'):
                     parts = image_data.split(',', 1)
@@ -1072,7 +1802,7 @@ Règles importantes:
                         f"\n\nLANGUE : réponds toujours en {message.lang}, "
                         "quelle que soit la langue de la question."
                     )
-                # Use Gemini for vision support (native, free image analysis)
+                # Preserve the existing Gemini vision route; text routing is separate.
                 chat = LlmChat(
                     api_key=AI_LLM_KEY,
                     session_id=f"neura_{conversation_id}_vision",
@@ -1089,12 +1819,10 @@ Règles importantes:
                 )
                 response = await chat.send_message(user_msg)
             else:
-                # Resolve the selected model profile (Claude model + persona overlay).
-                profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-                # Cost control: only Neura+/Ultra (and founders/VIP) get the real paid
-                # models (GPT-4o / Claude). Everyone else keeps the STYLE but runs on Gemini.
-                if not _is_premium_ai(user):
-                    profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
+                # Resolve the existing multi-provider router. Free conversations use
+                # the selected advanced profile first, then that profile's medium model.
+                # Paid subscriptions never enter the free fallback stage.
+                profile = _chat_profile_for_user(user, message.model, text_reservation["stage"])
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
                 if message.lang:
                     persona_system += (
@@ -1135,20 +1863,61 @@ Règles importantes:
     if last_err is not None:
         es = str(last_err)
         logger.error(f"LLM error: {es[:300]}")
+        await _release_text_quota(
+            user,
+            conversation_id,
+            text_reservation.get("stage", "paid"),
+            text_reservation.get("reserved_units", 0),
+        )
+        await _release_capture_analysis(capture, capture_reservation.get("reserved_units", 0))
+        await _fail_chat_request(request_record)
         if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
             raise HTTPException(status_code=429, detail="Quota IA gratuit atteint pour le moment (limite du palier gratuit, partagée par l'app). Réessaie dans une minute.")
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
     
     # Save AI response
-    ai_msg_id = str(uuid.uuid4())
-    await db.messages.insert_one({
+    ai_msg_id = f"chat-assistant:{request_record['_id']}"
+    assistant_message = {
         "id": ai_msg_id,
         "conversation_id": conversation_id,
         "user_id": user["id"],
         "role": "assistant",
         "content": response,
+        "request_id": request_record.get("request_id"),
         "created_at": datetime.now(timezone.utc).isoformat()
-    })
+    }
+    await db.messages.update_one({"id": ai_msg_id}, {"$setOnInsert": assistant_message}, upsert=True)
+
+    quota_notices = list(text_reservation.get("notices", []))
+    if image_upload_notice:
+        quota_notices.append(image_upload_notice)
+    if capture:
+        actual_visual_units = (
+            _weighted_text_units(system_message, message.content, response)
+            + max(256, int(capture.get("byte_size", 0)) // 1024)
+        )
+        visual_finish = await _finish_capture_analysis(
+            capture, capture_reservation.get("reserved_units", 0), actual_visual_units
+        )
+        if visual_finish.get("notice"):
+            quota_notices.append(visual_finish["notice"])
+    else:
+        actual_text_units = _weighted_text_units(
+            system_message,
+            message.content,
+            message.document_text,
+            response,
+            *(item.get("content", "") for item in previous_history),
+        )
+        text_finish = await _finish_text_quota(
+            user,
+            conversation_id,
+            text_reservation.get("stage", "paid"),
+            text_reservation.get("reserved_units", 0),
+            actual_text_units,
+        )
+        text_reservation["quota"] = text_finish["quota"]
+        quota_notices.extend(text_finish.get("notices", []))
     
     # Update conversation
     await db.conversations.update_one(
@@ -1156,11 +1925,21 @@ Règles importantes:
         {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
     )
     
-    return {
+    result = {
         "message": response,
         "conversation_id": conversation_id,
         "sources": sources,
+        "quota": text_reservation.get("quota"),
+        "quota_notices": quota_notices,
+        "image_quota": image_quota,
+        "capture_id": capture.get("capture_id") if capture else None,
+        "capture_quota": _capture_quota_public(
+            visual_finish.get("capture") if capture else None,
+            _free_quota_applies(user),
+        ),
     }
+    await _complete_chat_request(request_record, result)
+    return result
 
 
 async def tavily_search(query: str, max_results: int = 5):
@@ -1219,48 +1998,125 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
     async def event_generator():
         from emergentintegrations.llm.chat import LlmChat, UserMessage
+        request_record = None
+        text_reservation = {
+            "applies": False,
+            "stage": "paid",
+            "reserved_units": 0,
+            "quota": _text_quota_public(None, False),
+            "notices": [],
+        }
+        conversation_id = message.conversation_id
         try:
             # Create or get conversation
-            conversation_id = message.conversation_id
             if not conversation_id:
-                conversation_id = str(uuid.uuid4())
-                await db.conversations.insert_one({
+                stable_request = message.request_id if re.fullmatch(r"[A-Za-z0-9._:-]{8,160}", message.request_id or "") else str(uuid.uuid4())
+                conversation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"neura-stream:{user['id']}:{stable_request}"))
+                await db.conversations.update_one({"id": conversation_id}, {"$setOnInsert": {
                     "id": conversation_id,
                     "user_id": user["id"],
                     "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
+                }}, upsert=True)
+            else:
+                owned_conversation = await db.conversations.find_one(
+                    {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+                )
+                if not owned_conversation:
+                    yield sse({"type": "error", "detail": "Conversation non trouvée."})
+                    return
+
+            request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "stream")
+            request_record = request_gate["record"]
+            if not request_gate["new"]:
+                if request_record.get("status") == "completed" and request_record.get("result"):
+                    cached = request_record["result"]
+                    yield sse({"type": "conversation", "conversation_id": cached["conversation_id"]})
+                    yield sse({"type": "phase", "phase": "writing"})
+                    yield sse({"type": "delta", "content": cached.get("message", "")})
+                    yield sse({"type": "done", **cached})
+                    return
+                yield sse({"type": "error", "detail": "Cette requête est déjà en cours de traitement."})
+                return
             yield sse({"type": "conversation", "conversation_id": conversation_id})
 
+            previous_history = await db.messages.find(
+                {"conversation_id": conversation_id}, {"_id": 0}
+            ).sort("created_at", 1).to_list(50)
+            previous_history = [
+                item for item in previous_history
+                if item.get("request_id") != request_record.get("request_id")
+            ]
+
+            direct_answer = _current_date_direct_answer(message.content, message.lang)
+            if direct_answer:
+                user_doc = {
+                    "id": f"chat-user:{request_record['_id']}",
+                    "conversation_id": conversation_id,
+                    "user_id": user["id"],
+                    "role": "user",
+                    "content": message.content,
+                    "request_id": request_record.get("request_id"),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await db.messages.update_one({"id": user_doc["id"]}, {"$setOnInsert": user_doc}, upsert=True)
+                assistant_doc = {
+                    "id": f"chat-assistant:{request_record['_id']}",
+                    "conversation_id": conversation_id,
+                    "user_id": user["id"],
+                    "role": "assistant",
+                    "content": direct_answer,
+                    "request_id": request_record.get("request_id"),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await db.messages.update_one({"id": assistant_doc["id"]}, {"$setOnInsert": assistant_doc}, upsert=True)
+                result = {
+                    "message": direct_answer,
+                    "conversation_id": conversation_id,
+                    "sources": [],
+                    "quota": _text_quota_public(await _get_text_quota_doc(user["id"], conversation_id, False)) if _free_quota_applies(user) else _text_quota_public(None, False),
+                }
+                await _complete_chat_request(request_record, result)
+                yield sse({"type": "phase", "phase": "writing"})
+                yield sse({"type": "delta", "content": direct_answer})
+                yield sse({"type": "done", **result})
+                return
+
+            reserve_units = _weighted_text_units(
+                BASE_CHAT_SYSTEM,
+                message.content,
+                *(item.get("content", "") for item in previous_history),
+            ) + 1024
+            text_reservation = await _reserve_text_quota(user, conversation_id, reserve_units)
+            if text_reservation["stage"] == "blocked":
+                await _fail_chat_request(request_record)
+                yield sse({
+                    "type": "quota_limit",
+                    "code": "free_text_quota_exhausted",
+                    "detail": "Vous avez épuisé le quota gratuit de cette conversation.",
+                    "quota": text_reservation["quota"],
+                    "notices": text_reservation.get("notices", []),
+                })
+                return
+
             # Save user message
-            await db.messages.insert_one({
-                "id": str(uuid.uuid4()),
+            user_doc = {
+                "id": f"chat-user:{request_record['_id']}",
                 "conversation_id": conversation_id,
                 "user_id": user["id"],
                 "role": "user",
                 "content": message.content,
+                "request_id": request_record.get("request_id"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-            direct_answer = _current_date_direct_answer(message.content, message.lang)
-            if direct_answer:
-                await _save_direct_chat_answer(conversation_id, user["id"], direct_answer)
-                yield sse({"type": "phase", "phase": "writing"})
-                yield sse({"type": "delta", "content": direct_answer})
-                yield sse({"type": "done", "conversation_id": conversation_id, "sources": []})
-                return
+            }
+            await db.messages.update_one({"id": user_doc["id"]}, {"$setOnInsert": user_doc}, upsert=True)
 
             # Conversation history (exclude the message we just saved)
-            history = await db.messages.find(
-                {"conversation_id": conversation_id}, {"_id": 0}
-            ).sort("created_at", 1).to_list(50)
+            history = previous_history + [user_doc]
 
             # Build the system prompt (model persona + precedence + active language)
-            profile = MODEL_PROFILES.get(message.model, MODEL_PROFILES[DEFAULT_MODEL])
-            # Cost control: real paid models (GPT-4o / Claude) only for Neura+/Ultra/founders.
-            if not _is_premium_ai(user):
-                profile = {**profile, "provider": "gemini", "model_id": "gemini-2.5-flash"}
+            profile = _chat_profile_for_user(user, message.model, text_reservation["stage"])
             memory_result = await _save_ai_memory_from_text(user, message.content)
             memory_context = await _ai_memory_context(user)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
@@ -1313,22 +2169,52 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             answer = "".join(full_text)
 
             # Save AI response
-            await db.messages.insert_one({
-                "id": str(uuid.uuid4()),
+            assistant_doc = {
+                "id": f"chat-assistant:{request_record['_id']}",
                 "conversation_id": conversation_id,
                 "user_id": user["id"],
                 "role": "assistant",
                 "content": answer,
+                "request_id": request_record.get("request_id"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
-            })
+            }
+            await db.messages.update_one({"id": assistant_doc["id"]}, {"$setOnInsert": assistant_doc}, upsert=True)
+            actual_units = _weighted_text_units(
+                system_prompt,
+                message.content,
+                answer,
+                *(item.get("content", "") for item in previous_history),
+            )
+            quota_finish = await _finish_text_quota(
+                user,
+                conversation_id,
+                text_reservation.get("stage", "paid"),
+                text_reservation.get("reserved_units", 0),
+                actual_units,
+            )
             await db.conversations.update_one(
                 {"id": conversation_id},
                 {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
             )
 
-            yield sse({"type": "done", "conversation_id": conversation_id, "sources": sources})
+            result = {
+                "message": answer,
+                "conversation_id": conversation_id,
+                "sources": sources,
+                "quota": quota_finish["quota"],
+                "quota_notices": text_reservation.get("notices", []) + quota_finish.get("notices", []),
+            }
+            await _complete_chat_request(request_record, result)
+            yield sse({"type": "done", **result})
         except Exception as e:
             logger.error(f"Stream error: {e}")
+            await _release_text_quota(
+                user,
+                conversation_id,
+                text_reservation.get("stage", "paid"),
+                text_reservation.get("reserved_units", 0),
+            )
+            await _fail_chat_request(request_record)
             yield sse({"type": "error", "detail": "Service IA temporairement indisponible."})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -1367,6 +2253,33 @@ async def get_conversation_messages(conversation_id: str, user: dict = Depends(g
     ).sort("created_at", 1).to_list(1000)
     
     return messages
+
+
+@api_router.get("/chat/conversations/{conversation_id}/quota")
+async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_current_user)):
+    conversation = await db.conversations.find_one(
+        {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation non trouvée")
+    applies = _free_quota_applies(user)
+    if not applies:
+        return {**_text_quota_public(None, False), "capture": None}
+    doc = await _get_text_quota_doc(user["id"], conversation_id, False)
+    await _get_image_quota_doc(user["id"], False)
+    capture = await db.free_image_captures.find_one(
+        {"user_id": user["id"], "conversation_id": conversation_id},
+        sort=[("accepted_at", -1)],
+    )
+    return {**_text_quota_public(doc), "capture": _capture_quota_public(capture)}
+
+
+@api_router.get("/chat/quota/images")
+async def get_chat_image_quota(user: dict = Depends(get_current_user)):
+    if not _free_quota_applies(user):
+        return _image_quota_public(None, False)
+    doc = await _get_image_quota_doc(user["id"], False)
+    return _image_quota_public(doc)
 
 @api_router.delete("/chat/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, user: dict = Depends(get_current_user)):

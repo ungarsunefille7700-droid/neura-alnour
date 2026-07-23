@@ -122,11 +122,16 @@ const SubscriptionPage = () => {
       price: { monthly: 0, yearly: 0 },
       description: 'Découvrez ce que l’IA peut faire',
       features: [
-        'Modèle de base Gemini',
-        'Messages texte illimités et historique limité à 10 conversations',
+        'Routeur IA multi-fournisseurs',
+        'Messages IA avec quota',
+        'Captures d’écran limitées',
         '3 créations d’images offertes',
         'Mémoire développeur limitée',
-        'Module islamique complet et gratuit'
+        'Coran complet avec audio',
+        'Horaires de prière avec Adhan',
+        'Invocations',
+        'Quiz islamiques',
+        'Module Ramadan et Aïd'
       ],
       highlight: false,
       current: user?.subscription === 'free'

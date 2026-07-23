@@ -11,6 +11,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import DevWorkspace from '@/components/DevWorkspace';
+import { createChatRequestId, formatQuotaReset } from '@/utils/chatQuota';
 import { toast } from 'sonner';
 import { 
   Send, 
@@ -129,6 +130,23 @@ const getStatusLabel = (lang, model, phase) => {
   return (l && l[phase]) || '…';
 };
 
+const quotaNoticeContent = (message) => {
+  const reset = formatQuotaReset(message.reset_at) || 'l’heure indiquée par le serveur';
+  if (message.quota_type === 'advanced_fallback') {
+    return `**Limite de l’IA avancée atteinte**\n\nVotre quota d’IA avancée est épuisé pour cette conversation. La conversation continue temporairement avec une version moyenne, dans la limite de son quota restant. Votre accès à l’IA avancée dans cette conversation sera renouvelé à ${reset}. Passez à une offre supérieure pour continuer avec l’IA avancée.`;
+  }
+  if (message.quota_type === 'text_blocked') {
+    return `**Limite gratuite atteinte**\n\nVous avez épuisé le quota gratuit de cette conversation. Passez à une offre supérieure pour continuer cette même conversation ou commencez une nouvelle discussion. Le quota de cette conversation sera renouvelé à ${reset}.`;
+  }
+  if (message.quota_type === 'image_upload_blocked') {
+    return `**Limite d’envoi de captures atteinte**\n\nVous avez utilisé vos trois captures d’écran ou images pour cette période. Vous pourrez en envoyer de nouvelles à ${reset} ou passer à une offre supérieure.`;
+  }
+  if (message.quota_type === 'image_analysis_blocked') {
+    return `**Limite d’analyse de cette image atteinte**\n\nCette conversation contient une capture d’écran dont le quota d’analyse est épuisé. Réessayez à ${reset}, passez à une offre supérieure ou commencez une nouvelle conversation sans image.`;
+  }
+  return message.content;
+};
+
 const getLocalCurrentDateAnswer = (text, lang) => {
   const normalized = (text || '')
     .trim()
@@ -189,10 +207,18 @@ const ChatPage = () => {
   const [streamPhase, setStreamPhase] = useState(null);
   const [streamContent, setStreamContent] = useState('');
   const [streamSources, setStreamSources] = useState([]);
+  const [conversationQuota, setConversationQuota] = useState(null);
+  const [chatImageQuota, setChatImageQuota] = useState(null);
+  const [activeCaptureId, setActiveCaptureId] = useState(null);
+  const [captureQuota, setCaptureQuota] = useState(null);
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const textQuotaBlocked = Boolean(currentConversation && conversationQuota?.applies && conversationQuota?.blocked);
+  const captureQuotaBlocked = Boolean(currentConversation && captureQuota?.applies && captureQuota?.blocked);
+  const conversationBlocked = textQuotaBlocked || captureQuotaBlocked;
+  const imageUploadBlocked = Boolean(chatImageQuota?.applies && chatImageQuota?.remaining <= 0);
 
   useEffect(() => {
     fetchConversations();
@@ -205,6 +231,9 @@ const ChatPage = () => {
     } else {
       setMessages([]);
       setCurrentConversation(null);
+      setConversationQuota(null);
+      setActiveCaptureId(null);
+      setCaptureQuota(null);
     }
   }, [conversationId]);
 
@@ -214,7 +243,31 @@ const ChatPage = () => {
 
   useEffect(() => {
     fetchImageGenRemaining();
+    fetchChatImageQuota();
   }, []);
+
+  useEffect(() => {
+    const deadlines = [
+      conversationQuota?.reset_at,
+      captureQuota?.reset_at,
+      chatImageQuota?.reset_at
+    ]
+      .map((value) => value ? new Date(value).getTime() : NaN)
+      .filter((value) => Number.isFinite(value) && value > Date.now());
+    if (!deadlines.length) return undefined;
+
+    const delay = Math.min(...deadlines) - Date.now() + 500;
+    const timer = window.setTimeout(() => {
+      if (currentConversation) fetchMessages(currentConversation);
+      fetchChatImageQuota();
+    }, Math.max(500, delay));
+    return () => window.clearTimeout(timer);
+  }, [
+    currentConversation,
+    conversationQuota?.reset_at,
+    captureQuota?.reset_at,
+    chatImageQuota?.reset_at
+  ]);
 
   const fetchImageGenRemaining = async () => {
     try {
@@ -222,6 +275,17 @@ const ChatPage = () => {
       setImageGenRemaining(response.data);
     } catch (error) {
       console.error('Error fetching image gen remaining:', error);
+    }
+  };
+
+  const fetchChatImageQuota = async () => {
+    try {
+      const response = await axios.get(`${API}/chat/quota/images`, { headers: getAuthHeader() });
+      setChatImageQuota(response.data);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching chat image quota:', error);
+      return null;
     }
   };
 
@@ -291,16 +355,20 @@ const ChatPage = () => {
 
   const fetchMessages = async (convId) => {
     try {
-      const response = await axios.get(`${API}/chat/conversations/${convId}/messages`, {
-        headers: getAuthHeader()
-      });
-      setMessages(response.data);
+      const [messagesResponse, quotaResponse] = await Promise.all([
+        axios.get(`${API}/chat/conversations/${convId}/messages`, { headers: getAuthHeader() }),
+        axios.get(`${API}/chat/conversations/${convId}/quota`, { headers: getAuthHeader() })
+      ]);
+      setMessages(messagesResponse.data);
+      setConversationQuota(quotaResponse.data);
+      setCaptureQuota(quotaResponse.data?.capture || null);
+      setActiveCaptureId(quotaResponse.data?.capture?.capture_id || null);
     } catch (error) {
       console.error('Error fetching messages:', error);
     }
   };
 
-  const sendMessageStream = async (userMessage, tempId) => {
+  const sendMessageStream = async (userMessage, tempId, requestId) => {
     setStreaming(true);
     setStreamPhase('searching');
     setStreamContent('');
@@ -308,6 +376,7 @@ const ChatPage = () => {
     let acc = '';
     let sources = [];
     let convId = currentConversation;
+    let quotaLimited = false;
     try {
       const response = await fetch(`${API}/chat/stream`, {
         method: 'POST',
@@ -315,6 +384,7 @@ const ChatPage = () => {
         body: JSON.stringify({
           content: userMessage,
           conversation_id: currentConversation,
+          request_id: requestId,
           model: selectedModel,
           lang: languageName,
           web_search: true
@@ -349,10 +419,26 @@ const ChatPage = () => {
           } else if (evt.type === 'done') {
             if (Array.isArray(evt.sources)) sources = evt.sources;
             if (evt.conversation_id) convId = evt.conversation_id;
+            if (evt.quota) setConversationQuota(evt.quota);
+          } else if (evt.type === 'quota_limit') {
+            quotaLimited = true;
+            if (evt.quota) setConversationQuota(evt.quota);
+            toast.error(evt.detail || 'Limite gratuite atteinte pour cette conversation.');
           } else if (evt.type === 'error') {
             throw new Error(evt.detail || 'error');
           }
         }
+      }
+      if (quotaLimited) {
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+        if (convId) {
+          if (!currentConversation) {
+            setCurrentConversation(convId);
+            navigate(`/chat/${convId}`, { replace: true });
+          }
+          await fetchMessages(convId);
+        }
+        return;
       }
       const aiMessage = {
         id: `ai-${Date.now()}`,
@@ -367,6 +453,7 @@ const ChatPage = () => {
         navigate(`/chat/${convId}`, { replace: true });
         fetchConversations();
       }
+      if (convId) fetchMessages(convId);
     } catch (error) {
       toast.error('Erreur lors de la recherche web');
       setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -418,8 +505,13 @@ const ChatPage = () => {
   const sendMessage = async (e) => {
     e.preventDefault();
     if ((!inputMessage.trim() && !selectedImage && !selectedDocument) || loading || streaming) return;
+    if (conversationBlocked) {
+      toast.error('Cette conversation a atteint sa limite gratuite. Commencez une nouvelle conversation ou consultez les offres.');
+      return;
+    }
 
     const userMessage = inputMessage.trim();
+    const requestId = createChatRequestId();
     setInputMessage('');
 
     // Optimistically add user message
@@ -457,6 +549,7 @@ const ChatPage = () => {
       axios.post(`${API}/chat/message`, {
         content: userMessage,
         conversation_id: currentConversation,
+        request_id: requestId,
         model: selectedModel,
         lang: languageName,
         web_search: false
@@ -478,8 +571,8 @@ const ChatPage = () => {
     }
 
     // Web search uses the SSE streaming endpoint (text only).
-    if (webSearch && !imageToSend && !documentToSend) {
-      await sendMessageStream(userMessage, tempUserMsg.id);
+    if (webSearch && !imageToSend && !documentToSend && !activeCaptureId) {
+      await sendMessageStream(userMessage, tempUserMsg.id, requestId);
       return;
     }
 
@@ -488,7 +581,10 @@ const ChatPage = () => {
       const response = await axios.post(`${API}/chat/message`, {
         content: userMessage || (documentToSend ? "Analyse ce document s'il te plaît." : "Analyse cette image s'il te plaît."),
         conversation_id: currentConversation,
+        request_id: requestId,
         image_base64: imageToSend,
+        image_id: imageToSend ? requestId : null,
+        capture_id: !imageToSend && !documentToSend ? activeCaptureId : null,
         document_name: documentToSend?.name || null,
         document_text: documentToSend?.content || null,
         model: selectedModel,
@@ -508,6 +604,10 @@ const ChatPage = () => {
         created_at: new Date().toISOString()
       };
       setMessages(prev => [...prev, aiMessage]);
+      if (response.data.quota) setConversationQuota(response.data.quota);
+      if (response.data.image_quota) setChatImageQuota(response.data.image_quota);
+      if (response.data.capture_id) setActiveCaptureId(response.data.capture_id);
+      if (response.data.capture_quota) setCaptureQuota(response.data.capture_quota);
 
       // Update conversation ID if new
       if (!currentConversation) {
@@ -515,8 +615,28 @@ const ChatPage = () => {
         navigate(`/chat/${response.data.conversation_id}`, { replace: true });
         fetchConversations();
       }
+      fetchChatImageQuota();
+      if (response.data.conversation_id) fetchMessages(response.data.conversation_id);
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || 'Erreur lors de l\'envoi du message';
+      const detail = error.response?.data?.detail;
+      const errorMsg = typeof detail === 'object'
+        ? detail.message || 'Limite gratuite atteinte'
+        : detail || 'Erreur lors de l\'envoi du message';
+      if (detail && typeof detail === 'object') {
+        if (detail.quota) setConversationQuota(detail.quota);
+        if (detail.image_quota) setChatImageQuota(detail.image_quota);
+        if (detail.capture_quota) setCaptureQuota(detail.capture_quota);
+        const failedConversationId = detail.conversation_id || currentConversation;
+        if (failedConversationId) {
+          if (!currentConversation) {
+            setCurrentConversation(failedConversationId);
+            navigate(`/chat/${failedConversationId}`, { replace: true });
+            fetchConversations();
+          }
+          fetchMessages(failedConversationId);
+        }
+        fetchChatImageQuota();
+      }
       toast.error(errorMsg);
       // Remove temp message on error
       setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id));
@@ -542,6 +662,13 @@ const ChatPage = () => {
       ].includes(file.type) ||
       /\.(txt|md|csv|json|xml|html|css|js|jsx|ts|tsx|py|java|php|sql|yml|yaml|toml|ini|log)$/i.test(file.name)
     );
+
+    if (isImage && imageUploadBlocked) {
+      const reset = formatQuotaReset(chatImageQuota?.reset_at);
+      toast.error(`Limite de captures atteinte${reset ? `. Renouvellement : ${reset}` : ''}.`);
+      e.target.value = '';
+      return;
+    }
 
     // Check file size (max 5MB for images, 1MB for text/code documents)
     if (isImage && file.size > 5 * 1024 * 1024) {
@@ -600,6 +727,12 @@ const ChatPage = () => {
   const startNewChat = () => {
     setCurrentConversation(null);
     setMessages([]);
+    setConversationQuota(null);
+    setActiveCaptureId(null);
+    setCaptureQuota(null);
+    setSelectedImage(null);
+    setImagePreview(null);
+    setSelectedDocument(null);
     navigate('/chat');
     setSidebarOpen(false);
   };
@@ -835,58 +968,87 @@ const ChatPage = () => {
                 </div>
               </div>
             ) : (
-              messages.map((msg, index) => (
-                <div
-                  key={msg.id || index}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  data-testid={`message-${index}`}
-                >
-                  <div className={`
-                    max-w-[85%] rounded-2xl p-4
-                    ${msg.role === 'user' 
-                      ? 'bg-primary text-primary-foreground rounded-br-md' 
-                      : 'glass rounded-bl-md'
-                    }
-                  `}>
-                    {msg.role === 'assistant' && (
-                      <div className="flex items-center gap-2 mb-2 text-primary">
-                        <Sparkles className="w-4 h-4" />
-                        <span className="text-xs font-medium">NEURA AL-NOUR</span>
-                      </div>
-                    )}
-                    {/* Show image preview if message has image */}
-                    {msg.image_preview && (
-                      <img 
-                        src={msg.image_preview} 
-                        alt="Uploaded" 
-                        className="max-w-[200px] rounded-lg mb-2"
-                      />
-                    )}
-                    {msg.has_image && !msg.image_preview && (
-                      <div className="flex items-center gap-2 mb-2 text-xs opacity-70">
-                        <ImageIcon className="w-4 h-4" />
-                        <span>Image envoyée</span>
-                      </div>
-                    )}
-                    {msg.generated_image && (
-                      <img 
-                        src={msg.generated_image} 
-                        alt="Generated" 
-                        className="max-w-[300px] rounded-lg mb-2"
-                        data-testid="generated-image"
-                      />
-                    )}
-                    {msg.role === 'assistant' ? (
-                      <div className="markdown-content text-sm leading-relaxed">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{msg.content}</ReactMarkdown>
-                      </div>
-                    ) : (
-                      <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
-                    )}
-                    {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && renderSources(msg.sources)}
+              messages.map((msg, index) => {
+                const isQuotaNotice = msg.role === 'system' && Boolean(msg.quota_type);
+                const showNewConversation = ['text_blocked', 'image_analysis_blocked'].includes(msg.quota_type);
+                return (
+                  <div
+                    key={msg.id || index}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    data-testid={`message-${index}`}
+                  >
+                    <div className={`
+                      max-w-[85%] rounded-2xl p-4
+                      ${msg.role === 'user'
+                        ? 'bg-primary text-primary-foreground rounded-br-md'
+                        : isQuotaNotice
+                          ? 'border border-amber-500/40 bg-amber-500/10 rounded-bl-md'
+                          : 'glass rounded-bl-md'
+                      }
+                    `}>
+                      {msg.role === 'assistant' && (
+                        <div className="flex items-center gap-2 mb-2 text-primary">
+                          <Sparkles className="w-4 h-4" />
+                          <span className="text-xs font-medium">NEURA AL-NOUR</span>
+                        </div>
+                      )}
+                      {/* Show image preview if message has image */}
+                      {msg.image_preview && (
+                        <img
+                          src={msg.image_preview}
+                          alt="Uploaded"
+                          className="max-w-[200px] rounded-lg mb-2"
+                        />
+                      )}
+                      {msg.has_image && !msg.image_preview && (
+                        <div className="flex items-center gap-2 mb-2 text-xs opacity-70">
+                          <ImageIcon className="w-4 h-4" />
+                          <span>Image envoyée</span>
+                        </div>
+                      )}
+                      {msg.generated_image && (
+                        <img
+                          src={msg.generated_image}
+                          alt="Generated"
+                          className="max-w-[300px] rounded-lg mb-2"
+                          data-testid="generated-image"
+                        />
+                      )}
+                      {msg.role === 'assistant' || isQuotaNotice ? (
+                        <div className="markdown-content text-sm leading-relaxed">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                            {isQuotaNotice ? quotaNoticeContent(msg) : msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+                      )}
+                      {isQuotaNotice && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Link
+                            to="/subscription"
+                            className="inline-flex h-9 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                            data-testid="quota-upgrade-btn"
+                          >
+                            {showNewConversation ? 'Passer à une offre supérieure' : 'Voir les offres'}
+                          </Link>
+                          {showNewConversation && (
+                            <button
+                              type="button"
+                              onClick={startNewChat}
+                              className="inline-flex h-9 items-center rounded-md border border-border px-3 text-xs font-medium hover:bg-muted"
+                              data-testid="quota-new-chat-btn"
+                            >
+                              Nouvelle conversation
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && renderSources(msg.sources)}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
             {streaming && (
               <div className="flex justify-start">
@@ -967,6 +1129,20 @@ const ChatPage = () => {
                   aria-label="Retirer le document"
                 >
                   <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {conversationBlocked && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
+                <span>
+                  Cette conversation est temporairement limitée
+                  {(captureQuotaBlocked ? formatQuotaReset(captureQuota?.reset_at) : formatQuotaReset(conversationQuota?.reset_at))
+                    ? ` jusqu’au ${captureQuotaBlocked ? formatQuotaReset(captureQuota?.reset_at) : formatQuotaReset(conversationQuota?.reset_at)}`
+                    : ''}.
+                </span>
+                <button type="button" onClick={startNewChat} className="font-medium text-primary hover:underline">
+                  Nouvelle conversation
                 </button>
               </div>
             )}
@@ -1073,7 +1249,10 @@ const ChatPage = () => {
                 size="icon"
                 className="h-12 w-12 rounded-full"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={loading || generatingImage}
+                disabled={loading || generatingImage || conversationBlocked}
+                title={imageUploadBlocked && formatQuotaReset(chatImageQuota?.reset_at)
+                  ? `Captures renouvelées le ${formatQuotaReset(chatImageQuota.reset_at)}. Les documents texte restent disponibles.`
+                  : 'Ajouter une image ou un document'}
                 data-testid="add-image-btn"
               >
                 <ImageIcon className="w-5 h-5" />
@@ -1113,9 +1292,13 @@ const ChatPage = () => {
                   ref={inputRef}
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  placeholder={selectedImage || selectedDocument ? "Ajoutez un message (optionnel)..." : t('chat.placeholder')}
+                  placeholder={conversationBlocked
+                    ? 'Limite atteinte pour cette conversation'
+                    : selectedImage || selectedDocument
+                      ? "Ajoutez un message (optionnel)..."
+                      : t('chat.placeholder')}
                   className="pr-4 h-12 rounded-full bg-muted border-0"
-                  disabled={loading}
+                  disabled={loading || conversationBlocked}
                   data-testid="chat-input"
                 />
               </div>
@@ -1123,12 +1306,17 @@ const ChatPage = () => {
                 type="submit" 
                 size="icon" 
                 className="h-12 w-12 rounded-full"
-                disabled={loading || generatingImage || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
+                disabled={loading || generatingImage || conversationBlocked || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
                 data-testid="send-message-btn"
               >
                 <Send className="w-5 h-5" />
               </Button>
             </div>
+            {imageUploadBlocked && (
+              <p className="mt-2 text-xs text-muted-foreground" data-testid="chat-image-reset">
+                Nouvelles captures disponibles le {formatQuotaReset(chatImageQuota?.reset_at) || 'prochain renouvellement serveur'}.
+              </p>
+            )}
             <p className="text-xs text-center text-muted-foreground mt-3">
               {t('chat.disclaimer')}
             </p>

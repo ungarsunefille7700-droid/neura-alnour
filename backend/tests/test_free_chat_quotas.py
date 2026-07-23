@@ -1,0 +1,317 @@
+import asyncio
+import base64
+import sys
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+from pymongo.errors import DuplicateKeyError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import server
+
+
+class UpdateResult:
+    def __init__(self, modified_count=0, upserted_id=None):
+        self.modified_count = modified_count
+        self.upserted_id = upserted_id
+
+
+def _value(doc, expression):
+    if isinstance(expression, str) and expression.startswith("$"):
+        return doc.get(expression[1:], 0)
+    if isinstance(expression, dict) and "$add" in expression:
+        return sum(_value(doc, part) for part in expression["$add"])
+    return expression
+
+
+def _matches(doc, query):
+    for key, expected in query.items():
+        if key == "$expr":
+            operator, values = next(iter(expected.items()))
+            left, right = (_value(doc, value) for value in values)
+            if operator == "$lte" and not left <= right:
+                return False
+            if operator == "$lt" and not left < right:
+                return False
+            continue
+        actual = doc.get(key)
+        if isinstance(expected, dict):
+            for operator, value in expected.items():
+                if operator == "$ne":
+                    if isinstance(actual, list) and value in actual:
+                        return False
+                    if not isinstance(actual, list) and actual == value:
+                        return False
+                elif operator == "$gt" and not actual > value:
+                    return False
+                elif operator == "$gte" and not actual >= value:
+                    return False
+                elif operator == "$lte" and not actual <= value:
+                    return False
+                else:
+                    if operator not in ("$ne", "$gt", "$gte", "$lte"):
+                        raise AssertionError(f"Unsupported query operator: {operator}")
+        elif actual != expected:
+            return False
+    return True
+
+
+class FakeCollection:
+    def __init__(self):
+        self.docs = {}
+
+    async def find_one(self, query, projection=None, sort=None):
+        matches = [doc for doc in self.docs.values() if _matches(doc, query)]
+        if sort and matches:
+            field, direction = sort[0]
+            matches.sort(key=lambda item: item.get(field), reverse=direction < 0)
+        return deepcopy(matches[0]) if matches else None
+
+    async def insert_one(self, document):
+        key = document.get("_id")
+        if key in self.docs:
+            raise DuplicateKeyError("duplicate")
+        self.docs[key] = deepcopy(document)
+        return object()
+
+    async def update_one(self, query, update, upsert=False):
+        existing_key = next((key for key, doc in self.docs.items() if _matches(doc, query)), None)
+        inserted = False
+        if existing_key is None:
+            if not upsert:
+                return UpdateResult()
+            document = {
+                key: deepcopy(value)
+                for key, value in query.items()
+                if not key.startswith("$") and not isinstance(value, dict)
+            }
+            document.update(deepcopy(update.get("$setOnInsert", {})))
+            existing_key = document.get("_id") or document.get("id")
+            self.docs[existing_key] = document
+            inserted = True
+
+        document = self.docs[existing_key]
+        for key, value in update.get("$set", {}).items():
+            document[key] = deepcopy(value)
+        for key, value in update.get("$inc", {}).items():
+            document[key] = document.get(key, 0) + value
+        for key, value in update.get("$addToSet", {}).items():
+            document.setdefault(key, [])
+            if value not in document[key]:
+                document[key].append(deepcopy(value))
+        self.docs[existing_key] = document
+        return UpdateResult(0 if inserted else 1, existing_key if inserted else None)
+
+    async def update_many(self, query, update):
+        count = 0
+        for key, document in list(self.docs.items()):
+            if not _matches(document, query):
+                continue
+            for field, value in update.get("$set", {}).items():
+                document[field] = deepcopy(value)
+            self.docs[key] = document
+            count += 1
+        return UpdateResult(count)
+
+
+class FakeDB:
+    def __init__(self):
+        self.free_chat_quotas = FakeCollection()
+        self.free_image_quotas = FakeCollection()
+        self.free_image_captures = FakeCollection()
+        self.messages = FakeCollection()
+        self.chat_request_results = FakeCollection()
+
+
+@pytest.fixture
+def quota_db(monkeypatch):
+    fake = FakeDB()
+    monkeypatch.setattr(server, "db", fake)
+    monkeypatch.setattr(server, "FREE_TEXT_ADVANCED_BUDGET_UNITS", 10)
+    monkeypatch.setattr(server, "FREE_TEXT_MEDIUM_BUDGET_UNITS", 6)
+    monkeypatch.setattr(server, "FREE_IMAGE_MAX_UPLOADS", 3)
+    monkeypatch.setattr(server, "FREE_IMAGE_ANALYSIS_BUDGET_UNITS", 10)
+    return fake
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def free_user():
+    return {"id": "free-user", "email": "free@example.com", "subscription": "free", "is_vip": False}
+
+
+def test_multi_provider_router_and_paid_behavior_are_preserved():
+    free = free_user()
+    standard_paid = {"id": "pro", "email": "pro@example.com", "subscription": "pro", "is_vip": False}
+    neura_plus = {"id": "plus", "email": "plus@example.com", "subscription": "neura_plus", "is_vip": False}
+
+    assert server._chat_profile_for_user(free, "chatgpt", "advanced")["provider"] == "openai"
+    assert server._chat_profile_for_user(free, "chatgpt", "medium")["model_id"] == "gpt-4o-mini"
+    assert server._chat_profile_for_user(free, "claude", "advanced")["provider"] == "anthropic"
+    assert server._chat_profile_for_user(free, "claude", "medium")["model_id"] == "claude-haiku-4-5"
+    assert server._chat_profile_for_user(free, "gemini", "medium")["model_id"] == "gemini-2.0-flash-lite"
+    assert server._chat_profile_for_user(standard_paid, "claude", "advanced")["provider"] == "gemini"
+    assert server._chat_profile_for_user(neura_plus, "claude", "advanced")["provider"] == "anthropic"
+
+
+def test_every_paid_plan_bypasses_the_free_quota(quota_db):
+    for subscription in ("comme_toi", "mongo", "pro", "developer", "neura_plus", "neura_ultra"):
+        user = {"id": subscription, "email": f"{subscription}@example.com", "subscription": subscription, "is_vip": False}
+        result = run(server._reserve_text_quota(user, "conversation", 999999))
+        assert result["stage"] == "paid"
+        assert result["quota"]["unlimited"] is True
+    assert quota_db.free_chat_quotas.docs == {}
+
+
+def test_text_quota_is_independent_per_conversation_and_notices_are_unique(quota_db):
+    user = free_user()
+    first_a = run(server._reserve_text_quota(user, "conversation-a", 6))
+    first_b = run(server._reserve_text_quota(user, "conversation-b", 6))
+    assert first_a["stage"] == "advanced"
+    assert first_b["stage"] == "advanced"
+
+    fallback_a = run(server._reserve_text_quota(user, "conversation-a", 6))
+    assert fallback_a["stage"] == "medium"
+    assert len(fallback_a["notices"]) == 1
+    assert fallback_a["notices"][0]["quota_type"] == "advanced_fallback"
+
+    blocked_a = run(server._reserve_text_quota(user, "conversation-a", 1))
+    assert blocked_a["stage"] == "blocked"
+    assert len(blocked_a["notices"]) == 1
+    assert blocked_a["notices"][0]["quota_type"] == "text_blocked"
+    blocked_again = run(server._reserve_text_quota(user, "conversation-a", 1))
+    assert blocked_again["stage"] == "blocked"
+    assert blocked_again["notices"] == []
+
+    untouched_b = run(server._get_text_quota_doc(user["id"], "conversation-b", False))
+    assert untouched_b["stage"] == "advanced"
+    assert untouched_b["advanced_used"] == 6
+    assert len(quota_db.messages.docs) == 2
+
+
+def test_text_quota_does_not_consume_during_inactivity_and_renews_per_conversation(quota_db):
+    user = free_user()
+    assert run(server._get_text_quota_doc(user["id"], "conversation-a", False)) is None
+    run(server._reserve_text_quota(user, "conversation-a", 4))
+    run(server._reserve_text_quota(user, "conversation-b", 3))
+    before_a = run(server._get_text_quota_doc(user["id"], "conversation-a", False))
+    unchanged_a = run(server._get_text_quota_doc(user["id"], "conversation-a", False))
+    before_b = run(server._get_text_quota_doc(user["id"], "conversation-b", False))
+    assert unchanged_a["advanced_used"] == before_a["advanced_used"] == 4
+    assert before_a["conversation_id"] == "conversation-a"
+    assert before_b["conversation_id"] == "conversation-b"
+    assert before_a["reset_at"] - before_a["period_started_at"] == timedelta(hours=server.FREE_TEXT_WINDOW_HOURS)
+    assert before_b["reset_at"] - before_b["period_started_at"] == timedelta(hours=server.FREE_TEXT_WINDOW_HOURS)
+
+    key_a = server._text_quota_key(user["id"], "conversation-a")
+    quota_db.free_chat_quotas.docs[key_a]["reset_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    renewed = run(server._get_text_quota_doc(user["id"], "conversation-a", False))
+    assert renewed["period_started_at"] is None
+    assert renewed["advanced_used"] == 0
+    assert renewed["medium_used"] == 0
+    assert renewed["stage"] == "advanced"
+
+    restarted = run(server._reserve_text_quota(user, "conversation-a", 2))
+    still_b = run(server._get_text_quota_doc(user["id"], "conversation-b", False))
+    assert restarted["stage"] == "advanced"
+    assert still_b["advanced_used"] == 3
+
+
+def test_parallel_text_reservations_cannot_exceed_a_stage_budget(quota_db):
+    user = free_user()
+
+    async def reserve_both():
+        return await asyncio.gather(
+            server._reserve_text_quota(user, "parallel", 6),
+            server._reserve_text_quota(user, "parallel", 6),
+        )
+
+    results = run(reserve_both())
+    document = run(server._get_text_quota_doc(user["id"], "parallel", False))
+    assert {result["stage"] for result in results} == {"advanced", "medium"}
+    assert document["advanced_used"] <= server.FREE_TEXT_ADVANCED_BUDGET_UNITS
+    assert document["medium_used"] <= server.FREE_TEXT_MEDIUM_BUDGET_UNITS
+
+
+def test_image_upload_limit_is_account_wide_and_idempotent(quota_db):
+    user = free_user()
+    payload = base64.b64encode(b"valid-image").decode()
+    assert run(server._get_image_quota_doc(user["id"], False)) is None
+    first = run(server._accept_free_capture(user, "conversation-a", "capture-1", payload))
+    duplicate = run(server._accept_free_capture(user, "conversation-a", "capture-1", payload))
+    second = run(server._accept_free_capture(user, "conversation-b", "capture-2", payload))
+    third = run(server._accept_free_capture(user, "conversation-c", "capture-3", payload))
+    refused = run(server._accept_free_capture(user, "conversation-new", "capture-4", payload))
+
+    assert first["accepted"] and duplicate["duplicate"]
+    assert second["accepted"] and third["accepted"]
+    assert third["notice"]["quota_type"] == "image_upload_blocked"
+    assert refused["accepted"] is False
+    assert refused["notice"] is None
+    assert refused["image_quota"]["used"] == 3
+    assert refused["image_quota"]["remaining"] == 0
+    assert len(quota_db.free_image_captures.docs) == 3
+    assert len(quota_db.messages.docs) == 1
+
+
+def test_parallel_image_uploads_cannot_exceed_the_account_limit(quota_db):
+    user = free_user()
+    payload = base64.b64encode(b"valid-image").decode()
+
+    async def upload_all():
+        return await asyncio.gather(*(
+            server._accept_free_capture(user, f"conversation-{index}", f"capture-{index}", payload)
+            for index in range(4)
+        ))
+
+    results = run(upload_all())
+    assert sum(1 for result in results if result["accepted"]) == 3
+    quota = run(server._get_image_quota_doc(user["id"], False))
+    assert quota["uploads_used"] == 3
+
+
+def test_each_capture_has_an_independent_analysis_budget_and_renews(quota_db):
+    user = free_user()
+    payload = base64.b64encode(b"valid-image").decode()
+    capture_a = run(server._accept_free_capture(user, "conversation-a", "capture-a", payload))["capture"]
+    capture_b = run(server._accept_free_capture(user, "conversation-b", "capture-b", payload))["capture"]
+
+    allowed_a = run(server._reserve_capture_analysis(user, "conversation-a", capture_a, 6))
+    allowed_b = run(server._reserve_capture_analysis(user, "conversation-b", capture_b, 6))
+    blocked_a = run(server._reserve_capture_analysis(user, "conversation-a", capture_a, 6))
+    blocked_a_again = run(server._reserve_capture_analysis(user, "conversation-a", capture_a, 6))
+    assert allowed_a["allowed"] and allowed_b["allowed"]
+    assert blocked_a["allowed"] is False and blocked_a["notice"] is not None
+    assert blocked_a_again["notice"] is None
+
+    stored_b = run(server._get_free_capture(user, "conversation-b", "capture-b"))
+    assert stored_b["analysis_used"] == 6
+
+    image_key = server._image_quota_key(user["id"])
+    past = datetime.now(timezone.utc) - timedelta(seconds=1)
+    quota_db.free_image_quotas.docs[image_key]["reset_at"] = past
+    for document in quota_db.free_image_captures.docs.values():
+        document["reset_at"] = past
+    renewed = run(server._get_image_quota_doc(user["id"], False))
+    assert renewed["uploads_used"] == 0
+    assert all(document["analysis_used"] == 0 for document in quota_db.free_image_captures.docs.values())
+
+
+def test_image_size_is_checked_on_the_server(quota_db, monkeypatch):
+    monkeypatch.setattr(server, "FREE_IMAGE_MAX_BYTES", 3)
+    with pytest.raises(HTTPException) as error:
+        server._clean_image_payload(base64.b64encode(b"four").decode())
+    assert error.value.status_code == 413
+
+
+def test_request_idempotency_reuses_the_same_server_record(quota_db):
+    first = run(server._begin_chat_request("user", "request-123", "conversation", "message"))
+    second = run(server._begin_chat_request("user", "request-123", "conversation", "message"))
+    assert first["new"] is True
+    assert second["new"] is False
+    assert first["record"]["_id"] == second["record"]["_id"]

@@ -52,7 +52,15 @@ const LandingPage = () => {
       name: "Gratuit",
       price: "0€",
       period: "",
-      features: ["Messages illimités", "Module islamique complet", "Quiz illimité", "Heures de prière + Adhan"],
+      features: [
+        "Messages IA avec quota",
+        "Captures d’écran limitées",
+        "Coran complet avec audio",
+        "Horaires de prière avec Adhan",
+        "Invocations",
+        "Quiz islamiques",
+        "Module Ramadan et Aïd"
+      ],
       highlight: false
     },
     {
