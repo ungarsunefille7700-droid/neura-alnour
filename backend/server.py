@@ -76,6 +76,22 @@ FREE_IMAGE_ANALYSIS_BUDGET_UNITS = int(os.environ.get("FREE_IMAGE_ANALYSIS_BUDGE
 # The application already enforced 5 MiB, which is stricter than the requested 20 MiB ceiling.
 FREE_IMAGE_MAX_BYTES = int(os.environ.get("FREE_IMAGE_MAX_BYTES", str(5 * 1024 * 1024)))
 
+# Mongo plan quotas. These are weighted usage budgets, not wall-clock timers.
+# Keeping them server-configurable allows cost calibration without a code change.
+MONGO_TEXT_WINDOW_HOURS = int(os.environ.get("MONGO_TEXT_WINDOW_HOURS", "3"))
+MONGO_TEXT_ADVANCED_BUDGET_UNITS = int(os.environ.get("MONGO_TEXT_ADVANCED_BUDGET_UNITS", "600000"))
+MONGO_TEXT_MEDIUM_BUDGET_UNITS = int(os.environ.get("MONGO_TEXT_MEDIUM_BUDGET_UNITS", "300000"))
+MONGO_TEXT_ADVANCED_MAX_TOKENS = int(os.environ.get("MONGO_TEXT_ADVANCED_MAX_TOKENS", "2048"))
+MONGO_TEXT_MEDIUM_MAX_TOKENS = int(os.environ.get("MONGO_TEXT_MEDIUM_MAX_TOKENS", "1024"))
+MONGO_TEXT_ECONOMIC_MAX_TOKENS = int(os.environ.get("MONGO_TEXT_ECONOMIC_MAX_TOKENS", "768"))
+MONGO_CHAT_HISTORY_MESSAGES = int(os.environ.get("MONGO_CHAT_HISTORY_MESSAGES", "100"))
+
+MONGO_IMAGE_WINDOW_HOURS = int(os.environ.get("MONGO_IMAGE_WINDOW_HOURS", "24"))
+MONGO_IMAGE_MAX_UPLOADS = int(os.environ.get("MONGO_IMAGE_MAX_UPLOADS", "50"))
+MONGO_IMAGE_ANALYSIS_BUDGET_UNITS = int(os.environ.get("MONGO_IMAGE_ANALYSIS_BUDGET_UNITS", "60000"))
+MONGO_IMAGE_GENERATION_WINDOW_HOURS = int(os.environ.get("MONGO_IMAGE_GENERATION_WINDOW_HOURS", "24"))
+MONGO_IMAGE_GENERATION_LIMIT = int(os.environ.get("MONGO_IMAGE_GENERATION_LIMIT", "20"))
+
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 
@@ -298,6 +314,10 @@ MODEL_PROFILES = {
         "free_advanced_model_id": os.environ.get("FREE_CHATGPT_ADVANCED_MODEL", "gpt-4o"),
         "medium_provider": "openai",
         "medium_model_id": os.environ.get("FREE_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
+        "mongo_medium_provider": "openai",
+        "mongo_medium_model_id": os.environ.get("MONGO_CHATGPT_MEDIUM_MODEL", "gpt-4o-mini"),
+        "economic_provider": "openai",
+        "economic_model_id": os.environ.get("MONGO_CHATGPT_ECONOMIC_MODEL", "gpt-4.1-nano"),
         "persona": (
             "STYLE DE RÉPONSE — Direct et structuré :\n"
             "- Va droit au but, oriente vers la solution.\n"
@@ -313,6 +333,10 @@ MODEL_PROFILES = {
         "free_advanced_model_id": os.environ.get("FREE_CLAUDE_ADVANCED_MODEL", "claude-sonnet-4-5"),
         "medium_provider": "anthropic",
         "medium_model_id": os.environ.get("FREE_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
+        "mongo_medium_provider": "anthropic",
+        "mongo_medium_model_id": os.environ.get("MONGO_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
+        "economic_provider": "anthropic",
+        "economic_model_id": os.environ.get("MONGO_CLAUDE_ECONOMIC_MODEL", "claude-3-5-haiku-20241022"),
         "persona": (
             "STYLE DE RÉPONSE — Réfléchi et nuancé :\n"
             "- Explique ton raisonnement, montre les nuances et les différents angles.\n"
@@ -328,6 +352,10 @@ MODEL_PROFILES = {
         "free_advanced_model_id": os.environ.get("FREE_GEMINI_ADVANCED_MODEL", "gemini-2.5-flash"),
         "medium_provider": "gemini",
         "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "mongo_medium_provider": "gemini",
+        "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash"),
+        "economic_provider": "gemini",
+        "economic_model_id": os.environ.get("MONGO_GEMINI_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
             "STYLE DE RÉPONSE — Synthétique et factuel :\n"
             "- Réponses concises, allant à l'essentiel.\n"
@@ -345,6 +373,10 @@ MODEL_PROFILES = {
         # routing unchanged until a real xAI model is explicitly configured.
         "medium_provider": "gemini",
         "medium_model_id": os.environ.get("FREE_GROK_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "mongo_medium_provider": "gemini",
+        "mongo_medium_model_id": os.environ.get("MONGO_GROK_MEDIUM_MODEL", "gemini-2.0-flash"),
+        "economic_provider": "gemini",
+        "economic_model_id": os.environ.get("MONGO_GROK_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
             "STYLE DE RÉPONSE — Cash et direct :\n"
             "- Ton franc et décontracté, sans langue de bois.\n"
@@ -366,7 +398,7 @@ VIP_ADMINS = [
 # Subscription Plans
 SUBSCRIPTION_PLANS = {
     "free": {"name": "Gratuit", "price_monthly": 0, "price_yearly": 0, "features": ["quota_text", "limited_screens", "islamic_module", "quiz"]},
-    "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["unlimited_screens", "unlimited_images", "full_history", "detailed_responses", "export"]},
+    "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["increased_ai_quotas", "longer_conversations", "captures_50_per_day", "extended_image_analysis", "extended_memory", "full_history", "detailed_responses", "export", "extended_image_generation"]},
     "pro": {"name": "Pro", "price_monthly": 14.99, "price_yearly": 89.99, "features": ["priority", "fast_responses", "coaching", "premium_themes", "adhan_hd", "offline", "memorization", "stats"]},
     "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
     "neura_plus": {"name": "Neura+", "price_monthly": 119.99, "price_yearly": 1199.99, "features": ["dev_workspace", "code_advanced", "multi_file", "project_analysis", "dev_memory", "audit", "priority"]},
@@ -429,8 +461,56 @@ def _free_quota_applies(user: dict) -> bool:
     return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription", "free") == "free"
 
 
+def _mongo_quota_applies(user: dict) -> bool:
+    return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription") == "mongo"
+
+
+def _quota_plan(user: dict) -> Optional[str]:
+    if _free_quota_applies(user):
+        return "free"
+    if _mongo_quota_applies(user):
+        return "mongo"
+    return None
+
+
+def _text_quota_config(plan: str) -> dict:
+    if plan == "mongo":
+        return {
+            "window_hours": MONGO_TEXT_WINDOW_HOURS,
+            "advanced_budget": MONGO_TEXT_ADVANCED_BUDGET_UNITS,
+            "medium_budget": MONGO_TEXT_MEDIUM_BUDGET_UNITS,
+            "economic_fallback": True,
+        }
+    return {
+        "window_hours": FREE_TEXT_WINDOW_HOURS,
+        "advanced_budget": FREE_TEXT_ADVANCED_BUDGET_UNITS,
+        "medium_budget": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+        "economic_fallback": False,
+    }
+
+
+def _image_quota_config(plan: str) -> dict:
+    if plan == "mongo":
+        return {
+            "window_hours": MONGO_IMAGE_WINDOW_HOURS,
+            "max_uploads": MONGO_IMAGE_MAX_UPLOADS,
+            "analysis_budget": MONGO_IMAGE_ANALYSIS_BUDGET_UNITS,
+            "max_bytes": FREE_IMAGE_MAX_BYTES,
+        }
+    return {
+        "window_hours": FREE_IMAGE_WINDOW_HOURS,
+        "max_uploads": FREE_IMAGE_MAX_UPLOADS,
+        "analysis_budget": FREE_IMAGE_ANALYSIS_BUDGET_UNITS,
+        "max_bytes": FREE_IMAGE_MAX_BYTES,
+    }
+
+
+def _chat_history_limit(user: dict) -> int:
+    return MONGO_CHAT_HISTORY_MESSAGES if _mongo_quota_applies(user) else 50
+
+
 def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_stage: str = "advanced") -> dict:
-    """Resolve the existing multi-provider router, then apply only the free fallback stage."""
+    """Resolve the multi-provider router and the quota stage for free/Mongo users."""
     base = MODEL_PROFILES.get(requested_model, MODEL_PROFILES[DEFAULT_MODEL])
     profile = {**base, "params": dict(base.get("params", {}))}
     if _free_quota_applies(user):
@@ -441,6 +521,22 @@ def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_sta
             profile["params"]["max_tokens"] = min(
                 int(profile["params"].get("max_tokens", FREE_TEXT_MEDIUM_MAX_TOKENS)),
                 FREE_TEXT_MEDIUM_MAX_TOKENS,
+            )
+        return profile
+
+    if _mongo_quota_applies(user):
+        if quota_stage == "medium":
+            profile["provider"] = base.get("mongo_medium_provider", base.get("medium_provider", base.get("provider", "gemini")))
+            profile["model_id"] = base.get("mongo_medium_model_id", base.get("medium_model_id", base.get("model_id")))
+            profile["params"]["max_tokens"] = MONGO_TEXT_MEDIUM_MAX_TOKENS
+        elif quota_stage == "economic":
+            profile["provider"] = base.get("economic_provider", base.get("medium_provider", base.get("provider", "gemini")))
+            profile["model_id"] = base.get("economic_model_id", base.get("medium_model_id", base.get("model_id")))
+            profile["params"]["max_tokens"] = MONGO_TEXT_ECONOMIC_MAX_TOKENS
+        else:
+            profile["params"]["max_tokens"] = max(
+                int(profile["params"].get("max_tokens", 0)),
+                MONGO_TEXT_ADVANCED_MAX_TOKENS,
             )
         return profile
 
@@ -471,65 +567,74 @@ def _weighted_text_units(*parts: Any) -> int:
     return max(1, (characters + 3) // 4)
 
 
-def _text_quota_key(user_id: str, conversation_id: str) -> str:
-    return f"free-text:{user_id}:{conversation_id}"
+def _text_quota_key(user_id: str, conversation_id: str, plan: str = "free") -> str:
+    return f"{plan}-text:{user_id}:{conversation_id}"
 
 
-def _image_quota_key(user_id: str) -> str:
-    return f"free-images:{user_id}"
+def _image_quota_key(user_id: str, plan: str = "free") -> str:
+    return f"{plan}-images:{user_id}"
 
 
-def _capture_key(user_id: str, capture_id: str) -> str:
-    return f"free-capture:{user_id}:{capture_id}"
+def _capture_key(user_id: str, capture_id: str, plan: str = "free") -> str:
+    return f"{plan}-capture:{user_id}:{capture_id}"
 
 
-def _text_quota_public(doc: Optional[dict], applies: bool = True) -> dict:
+def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "free") -> dict:
     if not applies:
         return {"applies": False, "unlimited": True, "blocked": False, "stage": "paid"}
+    plan = (doc or {}).get("quota_plan", plan)
+    config = _text_quota_config(plan)
     if not doc or not doc.get("period_started_at"):
         return {
             "applies": True,
             "unlimited": False,
+            "plan": plan,
             "stage": "advanced",
             "blocked": False,
             "period_started_at": None,
             "reset_at": None,
-            "advanced_remaining": FREE_TEXT_ADVANCED_BUDGET_UNITS,
-            "medium_remaining": FREE_TEXT_MEDIUM_BUDGET_UNITS,
-            "advanced_budget": FREE_TEXT_ADVANCED_BUDGET_UNITS,
-            "medium_budget": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+            "advanced_remaining": config["advanced_budget"],
+            "medium_remaining": config["medium_budget"],
+            "advanced_budget": config["advanced_budget"],
+            "medium_budget": config["medium_budget"],
+            "economic_used": 0,
         }
     return {
         "applies": True,
         "unlimited": False,
+        "plan": plan,
         "stage": doc.get("stage", "advanced"),
         "blocked": doc.get("stage") == "blocked",
         "period_started_at": _iso_utc(doc.get("period_started_at")),
         "reset_at": _iso_utc(doc.get("reset_at")),
-        "advanced_remaining": max(0, FREE_TEXT_ADVANCED_BUDGET_UNITS - int(doc.get("advanced_used", 0))),
-        "medium_remaining": max(0, FREE_TEXT_MEDIUM_BUDGET_UNITS - int(doc.get("medium_used", 0))),
-        "advanced_budget": FREE_TEXT_ADVANCED_BUDGET_UNITS,
-        "medium_budget": FREE_TEXT_MEDIUM_BUDGET_UNITS,
+        "advanced_remaining": max(0, config["advanced_budget"] - int(doc.get("advanced_used", 0))),
+        "medium_remaining": max(0, config["medium_budget"] - int(doc.get("medium_used", 0))),
+        "advanced_budget": config["advanced_budget"],
+        "medium_budget": config["medium_budget"],
+        "economic_used": max(0, int(doc.get("economic_used", 0))),
     }
 
 
-def _image_quota_public(doc: Optional[dict], applies: bool = True) -> dict:
+def _image_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "free") -> dict:
     if not applies:
         return {"applies": False, "unlimited": True, "remaining": None, "reset_at": None}
+    plan = (doc or {}).get("quota_plan", plan)
+    config = _image_quota_config(plan)
     used = int((doc or {}).get("uploads_used", 0)) if (doc or {}).get("period_started_at") else 0
     return {
         "applies": True,
         "unlimited": False,
-        "limit": FREE_IMAGE_MAX_UPLOADS,
+        "plan": plan,
+        "limit": config["max_uploads"],
         "used": used,
-        "remaining": max(0, FREE_IMAGE_MAX_UPLOADS - used),
+        "remaining": max(0, config["max_uploads"] - used),
         "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
         "reset_at": _iso_utc((doc or {}).get("reset_at")),
-        "max_bytes": FREE_IMAGE_MAX_BYTES,
+        "max_bytes": config["max_bytes"],
     }
 
 
-def _capture_quota_public(doc: Optional[dict], applies: bool = True) -> Optional[dict]:
+def _capture_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "free") -> Optional[dict]:
     if not doc:
         return None
     if not applies:
@@ -540,15 +645,18 @@ def _capture_quota_public(doc: Optional[dict], applies: bool = True) -> Optional
             "blocked": False,
             "reset_at": None,
         }
+    plan = doc.get("quota_plan", plan)
+    budget = int(doc.get("analysis_budget") or _image_quota_config(plan)["analysis_budget"])
     used = max(0, int(doc.get("analysis_used", 0)))
     return {
         "applies": True,
         "unlimited": False,
+        "plan": plan,
         "capture_id": doc.get("capture_id"),
         "used": used,
-        "budget": FREE_IMAGE_ANALYSIS_BUDGET_UNITS,
-        "remaining": max(0, FREE_IMAGE_ANALYSIS_BUDGET_UNITS - used),
-        "blocked": used >= FREE_IMAGE_ANALYSIS_BUDGET_UNITS,
+        "budget": budget,
+        "remaining": max(0, budget - used),
+        "blocked": used >= budget,
         "period_started_at": _iso_utc(doc.get("period_started_at")),
         "reset_at": _iso_utc(doc.get("reset_at")),
     }
@@ -576,8 +684,9 @@ async def _insert_quota_message(
     return message
 
 
-async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: bool) -> Optional[dict]:
-    key = _text_quota_key(user_id, conversation_id)
+async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: bool, plan: str = "free") -> Optional[dict]:
+    key = _text_quota_key(user_id, conversation_id, plan)
+    config = _text_quota_config(plan)
     now = datetime.now(timezone.utc)
     doc = await db.free_chat_quotas.find_one({"_id": key})
 
@@ -589,9 +698,11 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
                 "reset_at": None,
                 "advanced_used": 0,
                 "medium_used": 0,
+                "economic_used": 0,
                 "stage": "advanced",
                 "advanced_notice_sent": False,
                 "final_notice_sent": False,
+                "economic_notice_sent": False,
                 "updated_at": now,
             }},
         )
@@ -600,20 +711,23 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
     if not start_period:
         return doc
 
-    reset_at = now + timedelta(hours=FREE_TEXT_WINDOW_HOURS)
+    reset_at = now + timedelta(hours=config["window_hours"])
     await db.free_chat_quotas.update_one(
         {"_id": key},
         {"$setOnInsert": {
             "_id": key,
             "user_id": user_id,
             "conversation_id": conversation_id,
+            "quota_plan": plan,
             "period_started_at": now,
             "reset_at": reset_at,
             "advanced_used": 0,
             "medium_used": 0,
+            "economic_used": 0,
             "stage": "advanced",
             "advanced_notice_sent": False,
             "final_notice_sent": False,
+            "economic_notice_sent": False,
             "created_at": now,
             "updated_at": now,
         }},
@@ -626,9 +740,11 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
             "reset_at": reset_at,
             "advanced_used": 0,
             "medium_used": 0,
+            "economic_used": 0,
             "stage": "advanced",
             "advanced_notice_sent": False,
             "final_notice_sent": False,
+            "economic_notice_sent": False,
             "updated_at": now,
         }},
     )
@@ -636,7 +752,10 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
 
 
 async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
-    flag = "advanced_notice_sent" if kind == "advanced_fallback" else "final_notice_sent"
+    flag = {
+        "advanced_fallback": "advanced_notice_sent",
+        "economic_fallback": "economic_notice_sent",
+    }.get(kind, "final_notice_sent")
     result = await db.free_chat_quotas.update_one(
         {"_id": doc["_id"], flag: {"$ne": True}},
         {"$set": {flag: True, "updated_at": datetime.now(timezone.utc)}},
@@ -644,7 +763,21 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
     if result.modified_count == 0:
         return None
     reset_iso = _iso_utc(doc.get("reset_at"))
-    if kind == "advanced_fallback":
+    plan = doc.get("quota_plan", "free")
+    if plan == "mongo" and kind == "advanced_fallback":
+        content = (
+            "Limite de l’IA avancée atteinte\n\n"
+            "Votre quota d’IA avancée est épuisé pour cette conversation. Les réponses utilisent "
+            "maintenant temporairement une version moyenne. Votre accès à l’IA avancée sera "
+            f"renouvelé à {reset_iso}."
+        )
+    elif plan == "mongo" and kind == "economic_fallback":
+        content = (
+            "Quota de l’IA moyenne atteint\n\n"
+            "Cette conversation continue temporairement avec une version économique jusqu’au "
+            f"renouvellement de votre quota à {reset_iso}."
+        )
+    elif kind == "advanced_fallback":
         content = (
             "Limite de l’IA avancée atteinte\n\n"
             "Votre quota d’IA avancée est épuisé pour cette conversation. La conversation continue "
@@ -670,11 +803,13 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
 
 
 async def _reserve_text_quota(user: dict, conversation_id: str, units: int) -> dict:
-    if not _free_quota_applies(user):
+    plan = _quota_plan(user)
+    if not plan:
         return {"applies": False, "stage": "paid", "reserved_units": 0, "quota": _text_quota_public(None, False), "notices": []}
 
+    config = _text_quota_config(plan)
     units = max(1, int(units))
-    doc = await _get_text_quota_doc(user["id"], conversation_id, True)
+    doc = await _get_text_quota_doc(user["id"], conversation_id, True, plan)
     notices = []
 
     if doc.get("stage") == "advanced":
@@ -682,13 +817,13 @@ async def _reserve_text_quota(user: dict, conversation_id: str, units: int) -> d
             {
                 "_id": doc["_id"],
                 "stage": "advanced",
-                "$expr": {"$lte": [{"$add": ["$advanced_used", units]}, FREE_TEXT_ADVANCED_BUDGET_UNITS]},
+                "$expr": {"$lte": [{"$add": ["$advanced_used", units]}, config["advanced_budget"]]},
             },
             {"$inc": {"advanced_used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
         )
         if result.modified_count:
             latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
-            return {"applies": True, "stage": "advanced", "reserved_units": units, "quota": _text_quota_public(latest), "notices": notices}
+            return {"applies": True, "stage": "advanced", "reserved_units": units, "quota": _text_quota_public(latest, True, plan), "notices": notices}
         await db.free_chat_quotas.update_one(
             {"_id": doc["_id"], "stage": "advanced"},
             {"$set": {"stage": "medium", "updated_at": datetime.now(timezone.utc)}},
@@ -703,30 +838,46 @@ async def _reserve_text_quota(user: dict, conversation_id: str, units: int) -> d
             {
                 "_id": doc["_id"],
                 "stage": "medium",
-                "$expr": {"$lte": [{"$add": ["$medium_used", units]}, FREE_TEXT_MEDIUM_BUDGET_UNITS]},
+                "$expr": {"$lte": [{"$add": ["$medium_used", units]}, config["medium_budget"]]},
             },
             {"$inc": {"medium_used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
         )
         if result.modified_count:
             latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
-            return {"applies": True, "stage": "medium", "reserved_units": units, "quota": _text_quota_public(latest), "notices": notices}
+            return {"applies": True, "stage": "medium", "reserved_units": units, "quota": _text_quota_public(latest, True, plan), "notices": notices}
         await db.free_chat_quotas.update_one(
             {"_id": doc["_id"], "stage": "medium"},
-            {"$set": {"stage": "blocked", "updated_at": datetime.now(timezone.utc)}},
+            {"$set": {
+                "stage": "economic" if config["economic_fallback"] else "blocked",
+                "updated_at": datetime.now(timezone.utc),
+            }},
         )
         doc = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+
+    if doc.get("stage") == "economic" and config["economic_fallback"]:
+        notice = await _maybe_text_notice(doc, "economic_fallback")
+        if notice:
+            notices.append(notice)
+        await db.free_chat_quotas.update_one(
+            {"_id": doc["_id"], "stage": "economic"},
+            {"$inc": {"economic_used": units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+        )
+        latest = await db.free_chat_quotas.find_one({"_id": doc["_id"]})
+        return {"applies": True, "stage": "economic", "reserved_units": units, "quota": _text_quota_public(latest, True, plan), "notices": notices}
 
     notice = await _maybe_text_notice(doc, "text_blocked")
     if notice:
         notices.append(notice)
-    return {"applies": True, "stage": "blocked", "reserved_units": 0, "quota": _text_quota_public(doc), "notices": notices}
+    return {"applies": True, "stage": "blocked", "reserved_units": 0, "quota": _text_quota_public(doc, True, plan), "notices": notices}
 
 
 async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reserved: int, actual: int) -> dict:
-    if not _free_quota_applies(user) or stage not in ("advanced", "medium"):
+    plan = _quota_plan(user)
+    if not plan or stage not in ("advanced", "medium", "economic"):
         return {"quota": _text_quota_public(None, False), "notices": []}
-    key = _text_quota_key(user["id"], conversation_id)
-    field = "advanced_used" if stage == "advanced" else "medium_used"
+    config = _text_quota_config(plan)
+    key = _text_quota_key(user["id"], conversation_id, plan)
+    field = {"advanced": "advanced_used", "medium": "medium_used", "economic": "economic_used"}[stage]
     adjustment = max(1, int(actual)) - max(0, int(reserved))
     if adjustment:
         await db.free_chat_quotas.update_one(
@@ -735,35 +886,44 @@ async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reser
         )
     doc = await db.free_chat_quotas.find_one({"_id": key})
     notices = []
-    if doc.get("stage") == "advanced" and int(doc.get("advanced_used", 0)) >= FREE_TEXT_ADVANCED_BUDGET_UNITS:
+    if doc.get("stage") == "advanced" and int(doc.get("advanced_used", 0)) >= config["advanced_budget"]:
         await db.free_chat_quotas.update_one({"_id": key, "stage": "advanced"}, {"$set": {"stage": "medium"}})
         doc = await db.free_chat_quotas.find_one({"_id": key})
         notice = await _maybe_text_notice(doc, "advanced_fallback")
         if notice:
             notices.append(notice)
-    if doc.get("stage") == "medium" and int(doc.get("medium_used", 0)) >= FREE_TEXT_MEDIUM_BUDGET_UNITS:
-        await db.free_chat_quotas.update_one({"_id": key, "stage": "medium"}, {"$set": {"stage": "blocked"}})
+    if doc.get("stage") == "medium" and int(doc.get("medium_used", 0)) >= config["medium_budget"]:
+        next_stage = "economic" if config["economic_fallback"] else "blocked"
+        await db.free_chat_quotas.update_one({"_id": key, "stage": "medium"}, {"$set": {"stage": next_stage}})
         doc = await db.free_chat_quotas.find_one({"_id": key})
-        notice = await _maybe_text_notice(doc, "text_blocked")
+        notice = await _maybe_text_notice(doc, "economic_fallback" if next_stage == "economic" else "text_blocked")
         if notice:
             notices.append(notice)
-    return {"quota": _text_quota_public(doc), "notices": notices}
+    return {"quota": _text_quota_public(doc, True, plan), "notices": notices}
 
 
 async def _release_text_quota(user: dict, conversation_id: str, stage: str, reserved: int):
-    if not _free_quota_applies(user) or stage not in ("advanced", "medium") or reserved <= 0:
+    plan = _quota_plan(user)
+    if not plan or stage not in ("advanced", "medium", "economic") or reserved <= 0:
         return
-    field = "advanced_used" if stage == "advanced" else "medium_used"
+    field = {"advanced": "advanced_used", "medium": "medium_used", "economic": "economic_used"}[stage]
     await db.free_chat_quotas.update_one(
-        {"_id": _text_quota_key(user["id"], conversation_id), field: {"$gte": int(reserved)}},
+        {"_id": _text_quota_key(user["id"], conversation_id, plan), field: {"$gte": int(reserved)}},
         {"$inc": {field: -int(reserved)}, "$set": {"updated_at": datetime.now(timezone.utc)}},
     )
 
 
-async def _get_image_quota_doc(user_id: str, start_period: bool) -> Optional[dict]:
-    key = _image_quota_key(user_id)
+async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "free") -> Optional[dict]:
+    key = _image_quota_key(user_id, plan)
+    config = _image_quota_config(plan)
+    capture_scope = {"user_id": user_id, "quota_plan": plan}
+    if plan == "free":
+        capture_scope = {"user_id": user_id, "quota_plan": {"$ne": "mongo"}}
     now = datetime.now(timezone.utc)
     doc = await db.free_image_quotas.find_one({"_id": key})
+    if doc and not doc.get("quota_plan"):
+        await db.free_image_quotas.update_one({"_id": key}, {"$set": {"quota_plan": plan}})
+        doc["quota_plan"] = plan
     if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
         await db.free_image_quotas.update_one(
             {"_id": key, "reset_at": {"$lte": now}},
@@ -777,7 +937,7 @@ async def _get_image_quota_doc(user_id: str, start_period: bool) -> Optional[dic
             }},
         )
         await db.free_image_captures.update_many(
-            {"user_id": user_id, "reset_at": {"$lte": now}},
+            {**capture_scope, "reset_at": {"$lte": now}},
             {"$set": {
                 "analysis_used": 0,
                 "analysis_notice_sent": False,
@@ -791,12 +951,13 @@ async def _get_image_quota_doc(user_id: str, start_period: bool) -> Optional[dic
     if not start_period:
         return doc
 
-    reset_at = now + timedelta(hours=FREE_IMAGE_WINDOW_HOURS)
+    reset_at = now + timedelta(hours=config["window_hours"])
     await db.free_image_quotas.update_one(
         {"_id": key},
         {"$setOnInsert": {
             "_id": key,
             "user_id": user_id,
+            "quota_plan": plan,
             "period_started_at": now,
             "reset_at": reset_at,
             "uploads_used": 0,
@@ -820,7 +981,7 @@ async def _get_image_quota_doc(user_id: str, start_period: bool) -> Optional[dic
     )
     doc = await db.free_image_quotas.find_one({"_id": key})
     await db.free_image_captures.update_many(
-        {"user_id": user_id, "reset_at": None},
+        {**capture_scope, "reset_at": None},
         {"$set": {
             "period_started_at": doc.get("period_started_at"),
             "reset_at": doc.get("reset_at"),
@@ -856,35 +1017,41 @@ async def _maybe_image_upload_notice(user_id: str, conversation_id: str, doc: di
     if result.modified_count == 0:
         return None
     reset_iso = _iso_utc(doc.get("reset_at"))
+    plan = doc.get("quota_plan", "free")
+    limit = _image_quota_config(plan)["max_uploads"]
+    count_label = f"vos {limit} captures" if plan == "mongo" else "vos trois captures"
+    upgrade_suffix = "" if plan == "mongo" else " ou passer à une offre supérieure"
     return await _insert_quota_message(
         user_id,
         conversation_id,
         f"image-upload-blocked:{doc['_id']}:{_iso_utc(doc.get('period_started_at'))}",
         "image_upload_blocked",
         "Limite d’envoi de captures atteinte\n\n"
-        f"Vous avez utilisé vos trois captures d’écran ou images pour cette période. Vous pourrez "
-        f"en envoyer de nouvelles à {reset_iso} ou passer à une offre supérieure.",
+        f"Vous avez utilisé {count_label} d’écran ou images pour cette période. Vous pourrez "
+        f"en envoyer de nouvelles à {reset_iso}{upgrade_suffix}.",
         doc.get("reset_at"),
     )
 
 
 async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str, image_base64: str) -> dict:
+    plan = _quota_plan(user) or "free"
+    config = _image_quota_config(plan)
     clean_payload, byte_size = _clean_image_payload(image_base64)
     capture_id = capture_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", capture_id or "") else str(uuid.uuid4())
-    existing = await db.free_image_captures.find_one({"_id": _capture_key(user["id"], capture_id)})
+    existing = await db.free_image_captures.find_one({"_id": _capture_key(user["id"], capture_id, plan)})
     if existing:
         if existing.get("user_id") != user["id"] or existing.get("conversation_id") != conversation_id:
             raise HTTPException(status_code=409, detail="Cet identifiant de capture est déjà utilisé.")
-        return {"accepted": True, "capture": existing, "duplicate": True, "image_quota": _image_quota_public(await _get_image_quota_doc(user["id"], False))}
+        return {"accepted": True, "capture": existing, "duplicate": True, "image_quota": _image_quota_public(await _get_image_quota_doc(user["id"], False, plan), True, plan)}
 
-    quota_doc = await _get_image_quota_doc(user["id"], True)
+    quota_doc = await _get_image_quota_doc(user["id"], True, plan)
     now = datetime.now(timezone.utc)
     result = await db.free_image_quotas.update_one(
         {
             "_id": quota_doc["_id"],
             "reset_at": {"$gt": now},
             "capture_ids": {"$ne": capture_id},
-            "$expr": {"$lt": ["$uploads_used", FREE_IMAGE_MAX_UPLOADS]},
+            "$expr": {"$lt": ["$uploads_used", config["max_uploads"]]},
         },
         {
             "$inc": {"uploads_used": 1},
@@ -895,15 +1062,17 @@ async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str
     quota_doc = await db.free_image_quotas.find_one({"_id": quota_doc["_id"]})
     if result.modified_count == 0 and capture_id not in quota_doc.get("capture_ids", []):
         notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
-        return {"accepted": False, "code": "free_image_upload_limit", "notice": notice, "image_quota": _image_quota_public(quota_doc)}
+        return {"accepted": False, "code": f"{plan}_image_upload_limit", "notice": notice, "image_quota": _image_quota_public(quota_doc, True, plan)}
 
     capture = {
-        "_id": _capture_key(user["id"], capture_id),
+        "_id": _capture_key(user["id"], capture_id, plan),
         "capture_id": capture_id,
         "user_id": user["id"],
         "conversation_id": conversation_id,
+        "quota_plan": plan,
         "image_base64": clean_payload,
         "byte_size": byte_size,
+        "analysis_budget": config["analysis_budget"],
         "analysis_used": 0,
         "analysis_notice_sent": False,
         "period_started_at": quota_doc.get("period_started_at"),
@@ -914,13 +1083,13 @@ async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str
     await db.free_image_captures.update_one({"_id": capture["_id"]}, {"$setOnInsert": capture}, upsert=True)
     capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
     upload_notice = None
-    if int(quota_doc.get("uploads_used", 0)) >= FREE_IMAGE_MAX_UPLOADS:
+    if int(quota_doc.get("uploads_used", 0)) >= config["max_uploads"]:
         upload_notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
     return {
         "accepted": True,
         "capture": capture,
         "duplicate": False,
-        "image_quota": _image_quota_public(quota_doc),
+        "image_quota": _image_quota_public(quota_doc, True, plan),
         "notice": upload_notice,
     }
 
@@ -928,8 +1097,9 @@ async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str
 async def _get_free_capture(user: dict, conversation_id: str, capture_id: str) -> Optional[dict]:
     if not capture_id:
         return None
+    plan = _quota_plan(user) or "free"
     return await db.free_image_captures.find_one({
-        "_id": _capture_key(user["id"], capture_id),
+        "_id": _capture_key(user["id"], capture_id, plan),
         "user_id": user["id"],
         "conversation_id": conversation_id,
     })
@@ -943,6 +1113,8 @@ async def _maybe_capture_notice(capture: dict) -> Optional[dict]:
     if result.modified_count == 0:
         return None
     reset_iso = _iso_utc(capture.get("reset_at"))
+    plan = capture.get("quota_plan", "free")
+    suffix = "Les autres captures et les conversations textuelles restent disponibles." if plan == "mongo" else "Passez à une offre supérieure ou commencez une nouvelle conversation sans image."
     return await _insert_quota_message(
         capture["user_id"],
         capture["conversation_id"],
@@ -950,14 +1122,15 @@ async def _maybe_capture_notice(capture: dict) -> Optional[dict]:
         "image_analysis_blocked",
         "Limite d’analyse de cette image atteinte\n\n"
         "Cette conversation contient une capture d’écran dont le quota d’analyse est épuisé. "
-        f"Réessayez à {reset_iso}, passez à une offre supérieure ou commencez une nouvelle "
-        "conversation sans image.",
+        f"Réessayez à {reset_iso}. {suffix}",
         capture.get("reset_at"),
     )
 
 
 async def _reserve_capture_analysis(user: dict, conversation_id: str, capture: dict, units: int) -> dict:
-    await _get_image_quota_doc(user["id"], True)
+    plan = _quota_plan(user) or "free"
+    config = _image_quota_config(plan)
+    await _get_image_quota_doc(user["id"], True, plan)
     capture = await _get_free_capture(user, conversation_id, capture.get("capture_id"))
     units = max(1, int(units))
     now = datetime.now(timezone.utc)
@@ -965,7 +1138,7 @@ async def _reserve_capture_analysis(user: dict, conversation_id: str, capture: d
         {
             "_id": capture["_id"],
             "reset_at": {"$gt": now},
-            "$expr": {"$lte": [{"$add": ["$analysis_used", units]}, FREE_IMAGE_ANALYSIS_BUDGET_UNITS]},
+            "$expr": {"$lte": [{"$add": ["$analysis_used", units]}, config["analysis_budget"]]},
         },
         {"$inc": {"analysis_used": units}, "$set": {"updated_at": now}},
     )
@@ -985,7 +1158,8 @@ async def _finish_capture_analysis(capture: dict, reserved: int, actual: int) ->
         )
     latest = await db.free_image_captures.find_one({"_id": capture["_id"]})
     notice = None
-    if int(latest.get("analysis_used", 0)) >= FREE_IMAGE_ANALYSIS_BUDGET_UNITS:
+    budget = int(latest.get("analysis_budget") or _image_quota_config(latest.get("quota_plan", "free"))["analysis_budget"])
+    if int(latest.get("analysis_used", 0)) >= budget:
         notice = await _maybe_capture_notice(latest)
     return {"capture": latest, "notice": notice}
 
@@ -1641,16 +1815,17 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     image_upload_notice = None
     effective_image_data = message.image_base64
     image_quota = _image_quota_public(None, False)
+    quota_plan = _quota_plan(user)
 
     previous_history = await db.messages.find(
         {"conversation_id": conversation_id}, {"_id": 0}
-    ).sort("created_at", 1).to_list(50)
+    ).sort("created_at", 1).to_list(_chat_history_limit(user))
     previous_history = [
         item for item in previous_history
         if item.get("request_id") != request_record.get("request_id")
     ]
 
-    if _free_quota_applies(user) and message.image_base64:
+    if quota_plan and message.image_base64:
         capture_result = await _accept_free_capture(
             user, conversation_id, message.image_id or str(uuid.uuid4()), message.image_base64
         )
@@ -1659,7 +1834,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             await _fail_chat_request(request_record)
             raise HTTPException(status_code=429, detail={
                 "code": capture_result["code"],
-                "message": "Vous avez utilisé vos trois captures pour cette période.",
+                "message": f"Vous avez utilisé vos {_image_quota_config(quota_plan)['max_uploads']} captures pour cette période.",
                 "conversation_id": conversation_id,
                 "image_quota": image_quota,
                 "notice": capture_result.get("notice"),
@@ -1667,13 +1842,13 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         capture = capture_result["capture"]
         image_upload_notice = capture_result.get("notice")
         effective_image_data = capture.get("image_base64")
-    elif _free_quota_applies(user) and message.capture_id:
+    elif quota_plan and message.capture_id:
         capture = await _get_free_capture(user, conversation_id, message.capture_id)
         if not capture:
             await _fail_chat_request(request_record)
             raise HTTPException(status_code=404, detail="Capture introuvable pour cette conversation.")
         effective_image_data = capture.get("image_base64")
-        image_quota = _image_quota_public(await _get_image_quota_doc(user["id"], False))
+        image_quota = _image_quota_public(await _get_image_quota_doc(user["id"], False, quota_plan), True, quota_plan)
 
     if capture:
         visual_reserve = (
@@ -1689,7 +1864,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
                 "message": "Le quota d’analyse de cette image est épuisé.",
                 "conversation_id": conversation_id,
                 "reset_at": _iso_utc(capture_reservation["capture"].get("reset_at")),
-                "capture_quota": _capture_quota_public(capture_reservation["capture"]),
+                "capture_quota": _capture_quota_public(capture_reservation["capture"], True, quota_plan or "free"),
                 "notice": capture_reservation.get("notice"),
             })
     elif not effective_image_data:
@@ -1934,7 +2109,8 @@ Règles importantes:
         "capture_id": capture.get("capture_id") if capture else None,
         "capture_quota": _capture_quota_public(
             visual_finish.get("capture") if capture else None,
-            _free_quota_applies(user),
+            bool(quota_plan),
+            quota_plan or "free",
         ),
     }
     await _complete_chat_request(request_record, result)
@@ -2042,7 +2218,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             previous_history = await db.messages.find(
                 {"conversation_id": conversation_id}, {"_id": 0}
-            ).sort("created_at", 1).to_list(50)
+            ).sort("created_at", 1).to_list(_chat_history_limit(user))
             previous_history = [
                 item for item in previous_history
                 if item.get("request_id") != request_record.get("request_id")
@@ -2074,7 +2250,11 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     "message": direct_answer,
                     "conversation_id": conversation_id,
                     "sources": [],
-                    "quota": _text_quota_public(await _get_text_quota_doc(user["id"], conversation_id, False)) if _free_quota_applies(user) else _text_quota_public(None, False),
+                    "quota": _text_quota_public(
+                        await _get_text_quota_doc(user["id"], conversation_id, False, _quota_plan(user)),
+                        True,
+                        _quota_plan(user),
+                    ) if _quota_plan(user) else _text_quota_public(None, False),
                 }
                 await _complete_chat_request(request_record, result)
                 yield sse({"type": "phase", "phase": "writing"})
@@ -2261,24 +2441,28 @@ async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation non trouvée")
-    applies = _free_quota_applies(user)
-    if not applies:
+    plan = _quota_plan(user)
+    if not plan:
         return {**_text_quota_public(None, False), "capture": None}
-    doc = await _get_text_quota_doc(user["id"], conversation_id, False)
-    await _get_image_quota_doc(user["id"], False)
+    doc = await _get_text_quota_doc(user["id"], conversation_id, False, plan)
+    await _get_image_quota_doc(user["id"], False, plan)
+    capture_scope = {"quota_plan": plan}
+    if plan == "free":
+        capture_scope = {"quota_plan": {"$ne": "mongo"}}
     capture = await db.free_image_captures.find_one(
-        {"user_id": user["id"], "conversation_id": conversation_id},
+        {"user_id": user["id"], "conversation_id": conversation_id, **capture_scope},
         sort=[("accepted_at", -1)],
     )
-    return {**_text_quota_public(doc), "capture": _capture_quota_public(capture)}
+    return {**_text_quota_public(doc, True, plan), "capture": _capture_quota_public(capture, True, plan)}
 
 
 @api_router.get("/chat/quota/images")
 async def get_chat_image_quota(user: dict = Depends(get_current_user)):
-    if not _free_quota_applies(user):
+    plan = _quota_plan(user)
+    if not plan:
         return _image_quota_public(None, False)
-    doc = await _get_image_quota_doc(user["id"], False)
-    return _image_quota_public(doc)
+    doc = await _get_image_quota_doc(user["id"], False, plan)
+    return _image_quota_public(doc, True, plan)
 
 @api_router.delete("/chat/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, user: dict = Depends(get_current_user)):
@@ -2290,13 +2474,88 @@ async def delete_conversation(conversation_id: str, user: dict = Depends(get_cur
 
 # ============== IMAGE GENERATION ==============
 
+def _mongo_generation_key(user_id: str) -> str:
+    return f"mongo-image-generations:{user_id}"
+
+
+def _mongo_generation_quota_public(doc: Optional[dict]) -> dict:
+    used = int((doc or {}).get("used", 0)) if (doc or {}).get("period_started_at") else 0
+    return {
+        "remaining": max(0, MONGO_IMAGE_GENERATION_LIMIT - used),
+        "limit": MONGO_IMAGE_GENERATION_LIMIT,
+        "used": used,
+        "unlimited": False,
+        "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+    }
+
+
+async def _get_mongo_generation_quota_doc(user_id: str, start_period: bool) -> Optional[dict]:
+    key = _mongo_generation_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.mongo_image_generation_quotas.find_one({"_id": key})
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.mongo_image_generation_quotas.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {"period_started_at": None, "reset_at": None, "used": 0, "updated_at": now}},
+        )
+        doc = await db.mongo_image_generation_quotas.find_one({"_id": key})
+    if not start_period:
+        return doc
+
+    reset_at = now + timedelta(hours=MONGO_IMAGE_GENERATION_WINDOW_HOURS)
+    await db.mongo_image_generation_quotas.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "used": 0,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    await db.mongo_image_generation_quotas.update_one(
+        {"_id": key, "period_started_at": None},
+        {"$set": {"period_started_at": now, "reset_at": reset_at, "used": 0, "updated_at": now}},
+    )
+    return await db.mongo_image_generation_quotas.find_one({"_id": key})
+
+
+async def _reserve_mongo_generation(user_id: str) -> dict:
+    doc = await _get_mongo_generation_quota_doc(user_id, True)
+    now = datetime.now(timezone.utc)
+    result = await db.mongo_image_generation_quotas.update_one(
+        {
+            "_id": doc["_id"],
+            "reset_at": {"$gt": now},
+            "$expr": {"$lt": ["$used", MONGO_IMAGE_GENERATION_LIMIT]},
+        },
+        {"$inc": {"used": 1}, "$set": {"updated_at": now}},
+    )
+    latest = await db.mongo_image_generation_quotas.find_one({"_id": doc["_id"]})
+    return {"allowed": bool(result.modified_count), "quota": _mongo_generation_quota_public(latest)}
+
+
+async def _release_mongo_generation(user_id: str):
+    await db.mongo_image_generation_quotas.update_one(
+        {"_id": _mongo_generation_key(user_id), "used": {"$gte": 1}},
+        {"$inc": {"used": -1}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+
+
 @api_router.get("/images/remaining")
 async def get_remaining_generations(user: dict = Depends(get_current_user)):
     """Check how many free image generations the user has remaining"""
     subscription = user.get("subscription", "free")
     is_vip = user.get("is_vip", False)
     
-    if is_vip or subscription in ("mongo", "pro", "developer"):
+    if subscription == "mongo" and not is_vip:
+        return _mongo_generation_quota_public(await _get_mongo_generation_quota_doc(user["id"], False))
+
+    if is_vip or subscription in ("pro", "developer"):
         return {"remaining": -1, "limit": -1, "unlimited": True}
     
     used = user.get("image_generations_count", 0)
@@ -2310,15 +2569,26 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
     
     if not request.prompt or not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Le prompt ne peut pas être vide")
+
+    mongo_generation_reserved = False
+    if subscription == "mongo" and not is_vip:
+        generation_reservation = await _reserve_mongo_generation(user["id"])
+        if not generation_reservation["allowed"]:
+            reset_at = generation_reservation["quota"].get("reset_at")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Quota Mongo de 20 générations atteint. Renouvellement à {reset_at}.",
+            )
+        mongo_generation_reserved = True
     
-    # VIP and mongo/pro/developer get unlimited
+    # VIP and pro/developer keep their existing unlimited entitlement.
     if not is_vip and subscription not in ("mongo", "pro", "developer"):
         # Plans without unlimited image entitlement: 3 total free generations
         used = user.get("image_generations_count", 0)
         if used >= 3:
             raise HTTPException(
                 status_code=403, 
-                detail="Vous avez utilisé vos 3 générations gratuites. Abonnez-vous au plan Mongo pour des générations illimitées."
+                detail="Vous avez utilisé vos 3 générations gratuites. Le plan Mongo propose un quota étendu."
             )
     
     try:
@@ -2348,19 +2618,28 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
         if images and len(images) > 0:
             image_base64 = images[0]
             
-            # Increment generation count for non-unlimited users
+            # Increment the legacy free counter. Mongo was reserved atomically above.
             if not is_vip and subscription not in ("mongo", "pro", "developer"):
                 await db.users.update_one(
                     {"id": user["id"]},
                     {"$inc": {"image_generations_count": 1}}
                 )
             
-            return {"image_base64": image_base64}
+            result = {"image_base64": image_base64}
+            if subscription == "mongo" and not is_vip:
+                result["generation_quota"] = _mongo_generation_quota_public(
+                    await _get_mongo_generation_quota_doc(user["id"], False)
+                )
+            return result
         else:
             raise HTTPException(status_code=500, detail="Aucune image générée")
     except HTTPException:
+        if mongo_generation_reserved:
+            await _release_mongo_generation(user["id"])
         raise
     except Exception as e:
+        if mongo_generation_reserved:
+            await _release_mongo_generation(user["id"])
         logger.error(f"Image generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
 

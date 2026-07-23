@@ -122,6 +122,7 @@ class FakeDB:
         self.free_chat_quotas = FakeCollection()
         self.free_image_quotas = FakeCollection()
         self.free_image_captures = FakeCollection()
+        self.mongo_image_generation_quotas = FakeCollection()
         self.messages = FakeCollection()
         self.chat_request_results = FakeCollection()
 
@@ -134,6 +135,11 @@ def quota_db(monkeypatch):
     monkeypatch.setattr(server, "FREE_TEXT_MEDIUM_BUDGET_UNITS", 6)
     monkeypatch.setattr(server, "FREE_IMAGE_MAX_UPLOADS", 3)
     monkeypatch.setattr(server, "FREE_IMAGE_ANALYSIS_BUDGET_UNITS", 10)
+    monkeypatch.setattr(server, "MONGO_TEXT_ADVANCED_BUDGET_UNITS", 20)
+    monkeypatch.setattr(server, "MONGO_TEXT_MEDIUM_BUDGET_UNITS", 10)
+    monkeypatch.setattr(server, "MONGO_IMAGE_MAX_UPLOADS", 5)
+    monkeypatch.setattr(server, "MONGO_IMAGE_ANALYSIS_BUDGET_UNITS", 20)
+    monkeypatch.setattr(server, "MONGO_IMAGE_GENERATION_LIMIT", 3)
     return fake
 
 
@@ -143,6 +149,10 @@ def run(coro):
 
 def free_user():
     return {"id": "free-user", "email": "free@example.com", "subscription": "free", "is_vip": False}
+
+
+def mongo_user():
+    return {"id": "mongo-user", "email": "mongo@example.com", "subscription": "mongo", "is_vip": False}
 
 
 def test_multi_provider_router_and_paid_behavior_are_preserved():
@@ -155,17 +165,93 @@ def test_multi_provider_router_and_paid_behavior_are_preserved():
     assert server._chat_profile_for_user(free, "claude", "advanced")["provider"] == "anthropic"
     assert server._chat_profile_for_user(free, "claude", "medium")["model_id"] == "claude-haiku-4-5"
     assert server._chat_profile_for_user(free, "gemini", "medium")["model_id"] == "gemini-2.0-flash-lite"
+    assert server._chat_profile_for_user(mongo_user(), "chatgpt", "advanced")["model_id"] == "gpt-4o"
+    assert server._chat_profile_for_user(mongo_user(), "chatgpt", "medium")["model_id"] == "gpt-4o-mini"
+    assert server._chat_profile_for_user(mongo_user(), "chatgpt", "economic")["model_id"] == "gpt-4.1-nano"
+    assert server._chat_profile_for_user(mongo_user(), "claude", "advanced")["provider"] == "anthropic"
+    assert server._chat_profile_for_user(mongo_user(), "claude", "economic")["model_id"] == "claude-3-5-haiku-20241022"
+    assert server._chat_profile_for_user(mongo_user(), "gemini", "medium")["model_id"] == "gemini-2.0-flash"
+    assert server._chat_profile_for_user(mongo_user(), "gemini", "economic")["model_id"] == "gemini-2.0-flash-lite"
+    assert server._chat_profile_for_user(mongo_user(), "grok", "advanced")["provider"] == "gemini"
     assert server._chat_profile_for_user(standard_paid, "claude", "advanced")["provider"] == "gemini"
     assert server._chat_profile_for_user(neura_plus, "claude", "advanced")["provider"] == "anthropic"
 
 
 def test_every_paid_plan_bypasses_the_free_quota(quota_db):
-    for subscription in ("comme_toi", "mongo", "pro", "developer", "neura_plus", "neura_ultra"):
+    for subscription in ("comme_toi", "pro", "developer", "neura_plus", "neura_ultra"):
         user = {"id": subscription, "email": f"{subscription}@example.com", "subscription": subscription, "is_vip": False}
         result = run(server._reserve_text_quota(user, "conversation", 999999))
         assert result["stage"] == "paid"
         assert result["quota"]["unlimited"] is True
     assert quota_db.free_chat_quotas.docs == {}
+
+
+def test_mongo_text_quota_falls_back_without_blocking_and_renews(quota_db):
+    user = mongo_user()
+    assert run(server._reserve_text_quota(user, "mongo-a", 8))["stage"] == "advanced"
+    assert run(server._reserve_text_quota(user, "mongo-a", 8))["stage"] == "advanced"
+
+    medium = run(server._reserve_text_quota(user, "mongo-a", 8))
+    assert medium["stage"] == "medium"
+    assert [notice["quota_type"] for notice in medium["notices"]] == ["advanced_fallback"]
+
+    economic = run(server._reserve_text_quota(user, "mongo-a", 8))
+    assert economic["stage"] == "economic"
+    assert economic["quota"]["blocked"] is False
+    assert [notice["quota_type"] for notice in economic["notices"]] == ["economic_fallback"]
+
+    for _ in range(5):
+        continued = run(server._reserve_text_quota(user, "mongo-a", 100))
+        assert continued["stage"] == "economic"
+        assert continued["quota"]["blocked"] is False
+        assert continued["notices"] == []
+
+    independent = run(server._reserve_text_quota(user, "mongo-b", 5))
+    assert independent["stage"] == "advanced"
+    document = run(server._get_text_quota_doc(user["id"], "mongo-a", False, "mongo"))
+    assert document["reset_at"] - document["period_started_at"] == timedelta(hours=server.MONGO_TEXT_WINDOW_HOURS)
+
+    quota_db.free_chat_quotas.docs[server._text_quota_key(user["id"], "mongo-a", "mongo")]["reset_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    renewed = run(server._reserve_text_quota(user, "mongo-a", 2))
+    assert renewed["stage"] == "advanced"
+    assert renewed["quota"]["advanced_remaining"] == server.MONGO_TEXT_ADVANCED_BUDGET_UNITS - 2
+
+
+def test_mongo_capture_limits_are_account_wide_and_analysis_is_independent(quota_db):
+    user = mongo_user()
+    payload = base64.b64encode(b"valid-image").decode()
+    accepted = [
+        run(server._accept_free_capture(user, f"conversation-{index}", f"capture-{index}", payload))
+        for index in range(server.MONGO_IMAGE_MAX_UPLOADS)
+    ]
+    refused = run(server._accept_free_capture(user, "conversation-extra", "capture-extra", payload))
+    assert all(result["accepted"] for result in accepted)
+    assert accepted[-1]["image_quota"]["limit"] == server.MONGO_IMAGE_MAX_UPLOADS
+    assert refused["accepted"] is False
+    assert refused["image_quota"]["remaining"] == 0
+
+    first_capture = accepted[0]["capture"]
+    second_capture = accepted[1]["capture"]
+    assert run(server._reserve_capture_analysis(user, "conversation-0", first_capture, 12))["allowed"]
+    assert run(server._reserve_capture_analysis(user, "conversation-1", second_capture, 12))["allowed"]
+    blocked = run(server._reserve_capture_analysis(user, "conversation-0", first_capture, 12))
+    assert blocked["allowed"] is False
+    assert blocked["capture"]["analysis_used"] == 12
+    assert run(server._reserve_text_quota(user, "text-only", 5))["stage"] == "advanced"
+
+
+def test_mongo_image_generation_quota_is_separate_and_releasable(quota_db):
+    user = mongo_user()
+    results = [run(server._reserve_mongo_generation(user["id"])) for _ in range(server.MONGO_IMAGE_GENERATION_LIMIT)]
+    blocked = run(server._reserve_mongo_generation(user["id"]))
+    assert all(result["allowed"] for result in results)
+    assert blocked["allowed"] is False
+    assert blocked["quota"]["remaining"] == 0
+    assert blocked["quota"]["reset_at"] is not None
+
+    run(server._release_mongo_generation(user["id"]))
+    available = run(server._reserve_mongo_generation(user["id"]))
+    assert available["allowed"] is True
 
 
 def test_text_quota_is_independent_per_conversation_and_notices_are_unique(quota_db):

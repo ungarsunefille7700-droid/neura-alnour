@@ -67,7 +67,18 @@ const LandingPage = () => {
       name: "Mongo",
       price: "8,99€",
       period: "/mois",
-      features: ["Screens illimités", "Images IA illimitées", "Historique complet", "Export conversations"],
+      features: [
+        "Tout du plan Gratuit",
+        "Quotas IA avancée fortement augmentés",
+        "Conversations plus longues",
+        "Jusqu’à 50 captures d’écran par 24 h",
+        "Analyse d’images prolongée",
+        "Mémoire et contexte étendus",
+        "Historique complet",
+        "Réponses détaillées",
+        "Export de conversations",
+        "Génération d’images avec quota étendu"
+      ],
       highlight: true
     },
     {

@@ -32,6 +32,31 @@ describe('free plan quota wording', () => {
       expect(subscription).toContain(price);
     });
   });
+
+  test('shows the exact Mongo quota offer without unlimited claims', () => {
+    const subscription = readPage('SubscriptionPage.js');
+    const landing = readPage('LandingPage.js');
+    const expected = [
+      'Tout du plan Gratuit',
+      'Quotas IA avancée fortement augmentés',
+      'Conversations plus longues',
+      'Jusqu’à 50 captures d’écran par 24 h',
+      'Analyse d’images prolongée',
+      'Mémoire et contexte étendus',
+      'Historique complet',
+      'Réponses détaillées',
+      'Export de conversations',
+      'Génération d’images avec quota étendu'
+    ];
+    expected.forEach((feature) => {
+      expect(subscription).toContain(feature);
+      expect(landing).toContain(feature);
+    });
+    expect(subscription).not.toContain('Screens illimités');
+    expect(subscription).not.toContain('Images IA illimitées');
+    expect(landing).not.toContain('Screens illimités');
+    expect(landing).not.toContain('Images IA illimitées');
+  });
 });
 
 describe('quota client helpers', () => {

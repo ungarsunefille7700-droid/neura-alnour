@@ -143,11 +143,15 @@ const SubscriptionPage = () => {
       description: 'Le plus populaire',
       features: [
         'Tout du plan Gratuit',
-        'Screens illimités',
-        'Images IA illimitées',
+        'Quotas IA avancée fortement augmentés',
+        'Conversations plus longues',
+        'Jusqu’à 50 captures d’écran par 24 h',
+        'Analyse d’images prolongée',
+        'Mémoire et contexte étendus',
         'Historique complet',
         'Réponses détaillées',
-        'Export de conversations'
+        'Export de conversations',
+        'Génération d’images avec quota étendu'
       ],
       highlight: true,
       current: user?.subscription === 'mongo'

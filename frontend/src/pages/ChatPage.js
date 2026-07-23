@@ -211,13 +211,14 @@ const ChatPage = () => {
   const [chatImageQuota, setChatImageQuota] = useState(null);
   const [activeCaptureId, setActiveCaptureId] = useState(null);
   const [captureQuota, setCaptureQuota] = useState(null);
+  const isMongoPlan = user?.subscription === 'mongo';
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
   const textQuotaBlocked = Boolean(currentConversation && conversationQuota?.applies && conversationQuota?.blocked);
   const captureQuotaBlocked = Boolean(currentConversation && captureQuota?.applies && captureQuota?.blocked);
-  const conversationBlocked = textQuotaBlocked || captureQuotaBlocked;
+  const conversationBlocked = textQuotaBlocked || (!isMongoPlan && captureQuotaBlocked);
   const imageUploadBlocked = Boolean(chatImageQuota?.applies && chatImageQuota?.remaining <= 0);
 
   useEffect(() => {
@@ -250,7 +251,8 @@ const ChatPage = () => {
     const deadlines = [
       conversationQuota?.reset_at,
       captureQuota?.reset_at,
-      chatImageQuota?.reset_at
+      chatImageQuota?.reset_at,
+      imageGenRemaining?.reset_at
     ]
       .map((value) => value ? new Date(value).getTime() : NaN)
       .filter((value) => Number.isFinite(value) && value > Date.now());
@@ -260,14 +262,20 @@ const ChatPage = () => {
     const timer = window.setTimeout(() => {
       if (currentConversation) fetchMessages(currentConversation);
       fetchChatImageQuota();
+      fetchImageGenRemaining();
     }, Math.max(500, delay));
     return () => window.clearTimeout(timer);
   }, [
     currentConversation,
     conversationQuota?.reset_at,
     captureQuota?.reset_at,
-    chatImageQuota?.reset_at
+    chatImageQuota?.reset_at,
+    imageGenRemaining?.reset_at
   ]);
+
+  useEffect(() => {
+    if (isMongoPlan && captureQuotaBlocked) setActiveCaptureId(null);
+  }, [isMongoPlan, captureQuotaBlocked]);
 
   const fetchImageGenRemaining = async () => {
     try {
@@ -294,7 +302,8 @@ const ChatPage = () => {
     
     // Check remaining
     if (imageGenRemaining && !imageGenRemaining.unlimited && imageGenRemaining.remaining <= 0) {
-      toast.error('Vous avez utilisé vos 3 générations gratuites. Abonnez-vous au plan Mongo pour continuer.');
+      const reset = formatQuotaReset(imageGenRemaining.reset_at);
+      toast.error(`Quota de génération d’images atteint${reset ? `. Renouvellement : ${reset}` : ''}.`);
       return;
     }
 
@@ -325,6 +334,7 @@ const ChatPage = () => {
         created_at: new Date().toISOString()
       };
       setMessages(prev => [...prev, aiMessage]);
+      if (response.data.generation_quota) setImageGenRemaining(response.data.generation_quota);
       
       // Refresh remaining count
       fetchImageGenRemaining();
@@ -362,7 +372,11 @@ const ChatPage = () => {
       setMessages(messagesResponse.data);
       setConversationQuota(quotaResponse.data);
       setCaptureQuota(quotaResponse.data?.capture || null);
-      setActiveCaptureId(quotaResponse.data?.capture?.capture_id || null);
+      setActiveCaptureId(
+        isMongoPlan && quotaResponse.data?.capture?.blocked
+          ? null
+          : quotaResponse.data?.capture?.capture_id || null
+      );
     } catch (error) {
       console.error('Error fetching messages:', error);
     }
@@ -625,7 +639,10 @@ const ChatPage = () => {
       if (detail && typeof detail === 'object') {
         if (detail.quota) setConversationQuota(detail.quota);
         if (detail.image_quota) setChatImageQuota(detail.image_quota);
-        if (detail.capture_quota) setCaptureQuota(detail.capture_quota);
+        if (detail.capture_quota) {
+          setCaptureQuota(detail.capture_quota);
+          if (isMongoPlan && detail.capture_quota.blocked) setActiveCaptureId(null);
+        }
         const failedConversationId = detail.conversation_id || currentConversation;
         if (failedConversationId) {
           if (!currentConversation) {
@@ -1268,7 +1285,7 @@ const ChatPage = () => {
                   onClick={generateImage}
                   disabled={loading || generatingImage || !inputMessage.trim()}
                   title={imageGenRemaining && !imageGenRemaining.unlimited 
-                    ? `Générer une image (${imageGenRemaining.remaining}/3 restantes)` 
+                    ? `Générer une image (${imageGenRemaining.remaining}/${imageGenRemaining.limit} restantes)`
                     : 'Générer une image'}
                   data-testid="generate-image-btn"
                 >
