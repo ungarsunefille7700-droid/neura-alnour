@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import json
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 from pymongo.errors import DuplicateKeyError
 import os
 import logging
@@ -111,6 +111,50 @@ PLUS_IMAGE_GENERATION_LIMIT = int(os.environ.get("PLUS_IMAGE_GENERATION_LIMIT", 
 
 PLUS_WORK_WINDOW_HOURS = int(os.environ.get("PLUS_WORK_WINDOW_HOURS", "5"))
 PLUS_WORK_BUDGET_UNITS = int(os.environ.get("PLUS_WORK_BUDGET_UNITS", "90"))
+
+# Neura+ expensive-model budgets are account-wide. Standard text remains
+# available through progressively cheaper real models when a budget is used.
+NEURA_PLUS_TEXT_MULTIPLIER = int(os.environ.get("NEURA_PLUS_TEXT_MULTIPLIER", "5"))
+NEURA_PLUS_TEXT_WINDOW_HOURS = int(
+    os.environ.get("NEURA_PLUS_TEXT_WINDOW_HOURS", str(PLUS_TEXT_WINDOW_HOURS))
+)
+NEURA_PLUS_TEXT_ADVANCED_BUDGET_UNITS = int(
+    os.environ.get(
+        "NEURA_PLUS_TEXT_ADVANCED_BUDGET_UNITS",
+        str(PLUS_TEXT_ADVANCED_BUDGET_UNITS * NEURA_PLUS_TEXT_MULTIPLIER),
+    )
+)
+NEURA_PLUS_TEXT_MEDIUM_BUDGET_UNITS = int(
+    os.environ.get(
+        "NEURA_PLUS_TEXT_MEDIUM_BUDGET_UNITS",
+        str(PLUS_TEXT_MEDIUM_BUDGET_UNITS * NEURA_PLUS_TEXT_MULTIPLIER),
+    )
+)
+NEURA_PLUS_AGENT_WINDOW_HOURS = int(os.environ.get("NEURA_PLUS_AGENT_WINDOW_HOURS", "5"))
+NEURA_PLUS_AGENT_SOFT_UNITS = int(os.environ.get("NEURA_PLUS_AGENT_SOFT_UNITS", "5000"))
+NEURA_PLUS_AGENT_HARD_UNITS = int(os.environ.get("NEURA_PLUS_AGENT_HARD_UNITS", "8000"))
+NEURA_PLUS_AGENT_MAX_CONCURRENT = int(os.environ.get("NEURA_PLUS_AGENT_MAX_CONCURRENT", "4"))
+NEURA_PLUS_MEDIA_WINDOW_HOURS = int(os.environ.get("NEURA_PLUS_MEDIA_WINDOW_HOURS", "5"))
+NEURA_PLUS_MEDIA_SOFT_UNITS = int(os.environ.get("NEURA_PLUS_MEDIA_SOFT_UNITS", "2000"))
+NEURA_PLUS_MEDIA_HARD_UNITS = int(os.environ.get("NEURA_PLUS_MEDIA_HARD_UNITS", "3000"))
+NEURA_PLUS_IMAGE_MAX_BYTES = int(
+    os.environ.get("NEURA_PLUS_IMAGE_MAX_BYTES", str(20 * 1024 * 1024))
+)
+NEURA_PLUS_IMAGE_ANALYSIS_BUDGET_UNITS = int(
+    os.environ.get(
+        "NEURA_PLUS_IMAGE_ANALYSIS_BUDGET_UNITS",
+        str(PLUS_IMAGE_ANALYSIS_BUDGET_UNITS * NEURA_PLUS_TEXT_MULTIPLIER),
+    )
+)
+NEURA_PLUS_IMAGE_GENERATION_WINDOW_HOURS = int(
+    os.environ.get("NEURA_PLUS_IMAGE_GENERATION_WINDOW_HOURS", "24")
+)
+NEURA_PLUS_IMAGE_GENERATION_SOFT_UNITS = int(
+    os.environ.get("NEURA_PLUS_IMAGE_GENERATION_SOFT_UNITS", "2000")
+)
+NEURA_PLUS_IMAGE_GENERATION_HARD_UNITS = int(
+    os.environ.get("NEURA_PLUS_IMAGE_GENERATION_HARD_UNITS", "3000")
+)
 
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
@@ -604,7 +648,24 @@ SUBSCRIPTION_PLANS = {
         ],
     },
     "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
-    "neura_plus": {"name": "Neura+", "price_monthly": 119.99, "price_yearly": 1199.99, "features": ["dev_workspace", "code_advanced", "multi_file", "project_analysis", "dev_memory", "audit", "priority"]},
+    "neura_plus": {
+        "name": "Neura+",
+        "price_monthly": 119.99,
+        "price_yearly": 1199.99,
+        "features": [
+            "plus_features",
+            "guarded_ai_usage",
+            "advanced_models",
+            "guarded_work",
+            "guarded_developer",
+            "dev_workspace",
+            "multi_file",
+            "project_analysis",
+            "dev_memory",
+            "guarded_media",
+            "high_image_generation",
+        ],
+    },
     "neura_ultra": {"name": "Neura Ultra", "price_monthly": 299.99, "price_yearly": 2999.99, "features": ["dev_workspace", "code_max", "massive_generation", "full_project_analysis", "dev_agent", "security_audit", "max_memory", "experimental", "max_priority"]}
 }
 
@@ -630,7 +691,7 @@ def is_vip_email(email: Optional[str]) -> bool:
 # (single AI engine = Gemini; no extra paid provider). window_hours = regeneration delay.
 DEV_TIERS = {
     "free":  {"label": "Gratuit",     "requests": 5,    "window_hours": 4, "max_tokens": 1024, "max_files": 2,  "memory_turns": 6,  "project_analysis": False},
-    "plus":  {"label": "Neura+",      "requests": 150,  "window_hours": 1, "max_tokens": 4096, "max_files": 10, "memory_turns": 30, "project_analysis": True},
+    "plus":  {"label": "Neura+",      "requests": None, "window_hours": NEURA_PLUS_AGENT_WINDOW_HOURS, "max_tokens": 4096, "max_files": 10, "memory_turns": 30, "project_analysis": True},
     "ultra": {"label": "Neura Ultra", "requests": 1000, "window_hours": 1, "max_tokens": 8192, "max_files": 30, "memory_turns": 60, "project_analysis": True},
 }
 
@@ -672,6 +733,13 @@ def _plus_quota_applies(user: dict) -> bool:
     return not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription") == "pro"
 
 
+def _neura_plus_quota_applies(user: dict) -> bool:
+    return (
+        not (user.get("is_vip") or is_vip_email(user.get("email")))
+        and user.get("subscription") == "neura_plus"
+    )
+
+
 def _has_plus_capabilities(user: dict) -> bool:
     if user.get("is_vip") or is_vip_email(user.get("email")):
         return True
@@ -685,10 +753,19 @@ def _quota_plan(user: dict) -> Optional[str]:
         return "mongo"
     if _plus_quota_applies(user):
         return "plus"
+    if _neura_plus_quota_applies(user):
+        return "neura_plus"
     return None
 
 
 def _text_quota_config(plan: str) -> dict:
+    if plan == "neura_plus":
+        return {
+            "window_hours": NEURA_PLUS_TEXT_WINDOW_HOURS,
+            "advanced_budget": NEURA_PLUS_TEXT_ADVANCED_BUDGET_UNITS,
+            "medium_budget": NEURA_PLUS_TEXT_MEDIUM_BUDGET_UNITS,
+            "economic_fallback": True,
+        }
     if plan == "plus":
         return {
             "window_hours": PLUS_TEXT_WINDOW_HOURS,
@@ -712,6 +789,13 @@ def _text_quota_config(plan: str) -> dict:
 
 
 def _image_quota_config(plan: str) -> dict:
+    if plan == "neura_plus":
+        return {
+            "window_hours": NEURA_PLUS_MEDIA_WINDOW_HOURS,
+            "max_uploads": 1_000_000,
+            "analysis_budget": NEURA_PLUS_IMAGE_ANALYSIS_BUDGET_UNITS,
+            "max_bytes": NEURA_PLUS_IMAGE_MAX_BYTES,
+        }
     if plan == "plus":
         return {
             "window_hours": PLUS_IMAGE_WINDOW_HOURS,
@@ -892,14 +976,14 @@ async def _active_model_for_conversation(
                 stage = stored_stage
             elif stored_stage == "blocked":
                 stage = "medium"
-            if plan == "plus":
-                levels_available = _plus_available_levels(quota_doc)
+            if plan in ("plus", "neura_plus"):
+                levels_available = _plus_available_levels(quota_doc, plan)
                 reset_at = quota_doc.get("reset_at")
                 reason = quota_doc.get("last_selection_reason") or reason
                 if intelligence_mode is None:
                     mode = _normalize_intelligence_mode(quota_doc.get("last_requested_mode") or mode)
                 if intelligence_mode is not None and mode != "auto":
-                    levels_available = _plus_available_levels(quota_doc)
+                    levels_available = _plus_available_levels(quota_doc, plan)
                     preferred = {"high": "advanced", "medium": "medium", "instant": "economic"}[mode]
                     if preferred == "advanced" and not levels_available["high"]:
                         stage = "medium" if levels_available["medium"] else "economic"
@@ -941,6 +1025,222 @@ def _weighted_text_units(*parts: Any) -> int:
     """Estimate provider usage when the integration does not return token accounting."""
     characters = sum(len(str(part or "")) for part in parts)
     return max(1, (characters + 3) // 4)
+
+
+def _neura_plus_agent_key(user_id: str) -> str:
+    return f"neura-plus-agent:{user_id}"
+
+
+def _neura_plus_agent_public(
+    doc: Optional[dict],
+    *,
+    restriction_reason: Optional[str] = None,
+) -> dict:
+    used = max(0, int((doc or {}).get("used_units", 0)))
+    active = max(0, int((doc or {}).get("active_tasks", 0)))
+    degraded = used >= NEURA_PLUS_AGENT_SOFT_UNITS
+    blocked = used >= NEURA_PLUS_AGENT_HARD_UNITS
+    return {
+        "applies": True,
+        "unlimited": False,
+        "quasi_unlimited": True,
+        "blocked": blocked,
+        "degraded": degraded,
+        "status": "restricted" if blocked else ("economy_fallback" if degraded else "normal"),
+        "used_units": used,
+        "remaining": None,
+        "limit": None,
+        "active_tasks": active,
+        "max_concurrent": NEURA_PLUS_AGENT_MAX_CONCURRENT,
+        "window_hours": NEURA_PLUS_AGENT_WINDOW_HOURS,
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+        "restriction_reason": restriction_reason,
+        "chat_available": True,
+    }
+
+
+async def _get_neura_plus_agent_doc(user_id: str, create: bool = True) -> Optional[dict]:
+    key = _neura_plus_agent_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.neura_plus_guardrails.find_one({"_id": key})
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.neura_plus_guardrails.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {
+                "used_units": 0,
+                "active_tasks": 0,
+                "active_reservations": [],
+                "period_started_at": None,
+                "reset_at": None,
+                "updated_at": now,
+            }},
+        )
+        doc = await db.neura_plus_guardrails.find_one({"_id": key})
+    if doc and doc.get("active_reservations"):
+        stale_before = now - timedelta(minutes=30)
+        active_reservations = [
+            item
+            for item in doc.get("active_reservations", [])
+            if _aware_utc(item.get("started_at")) and _aware_utc(item.get("started_at")) > stale_before
+        ]
+        if len(active_reservations) != len(doc.get("active_reservations", [])):
+            await db.neura_plus_guardrails.update_one(
+                {"_id": key},
+                {"$set": {
+                    "active_reservations": active_reservations,
+                    "active_tasks": len(active_reservations),
+                    "updated_at": now,
+                }},
+            )
+            doc = await db.neura_plus_guardrails.find_one({"_id": key})
+    if doc or not create:
+        return doc
+    await db.neura_plus_guardrails.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "used_units": 0,
+            "active_tasks": 0,
+            "active_reservations": [],
+            "period_started_at": None,
+            "reset_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    return await db.neura_plus_guardrails.find_one({"_id": key})
+
+
+async def _reserve_neura_plus_agent_usage(
+    user: dict,
+    units: int,
+    *,
+    reservation_id: str,
+    task_type: str,
+) -> dict:
+    units = max(1, min(60, int(units)))
+    reservation_id = str(reservation_id or uuid.uuid4())[:160]
+    now = datetime.now(timezone.utc)
+    doc = await _get_neura_plus_agent_doc(user["id"], True)
+    if not doc.get("period_started_at"):
+        reset_at = now + timedelta(hours=NEURA_PLUS_AGENT_WINDOW_HOURS)
+        await db.neura_plus_guardrails.update_one(
+            {"_id": doc["_id"], "period_started_at": None},
+            {"$set": {
+                "period_started_at": now,
+                "reset_at": reset_at,
+                "updated_at": now,
+            }},
+        )
+        doc = await db.neura_plus_guardrails.find_one({"_id": doc["_id"]})
+
+    result = await db.neura_plus_guardrails.update_one(
+        {
+            "_id": doc["_id"],
+            "active_reservations.id": {"$ne": reservation_id},
+            "$expr": {
+                "$and": [
+                    {"$lt": ["$active_tasks", NEURA_PLUS_AGENT_MAX_CONCURRENT]},
+                    {"$lte": [{"$add": ["$used_units", units]}, NEURA_PLUS_AGENT_HARD_UNITS]},
+                ]
+            },
+        },
+        {
+            "$inc": {"used_units": units, "active_tasks": 1},
+            "$push": {
+                "active_reservations": {
+                    "id": reservation_id,
+                    "units": units,
+                    "task_type": task_type,
+                    "started_at": now,
+                }
+            },
+            "$set": {"updated_at": now},
+        },
+    )
+    latest = await db.neura_plus_guardrails.find_one({"_id": doc["_id"]})
+    if result.modified_count:
+        return {
+            "allowed": True,
+            "reservation_id": reservation_id,
+            "reserved_units": units,
+            "degraded": int(latest.get("used_units", 0)) >= NEURA_PLUS_AGENT_SOFT_UNITS,
+            "quota": _neura_plus_agent_public(latest),
+        }
+
+    duplicate = any(
+        item.get("id") == reservation_id
+        for item in (latest or {}).get("active_reservations", [])
+    )
+    if duplicate:
+        return {
+            "allowed": False,
+            "reservation_id": reservation_id,
+            "reserved_units": 0,
+            "degraded": False,
+            "quota": _neura_plus_agent_public(latest, restriction_reason="duplicate_request"),
+            "reason": "duplicate_request",
+        }
+    reason = (
+        "too_many_concurrent_tasks"
+        if int((latest or {}).get("active_tasks", 0)) >= NEURA_PLUS_AGENT_MAX_CONCURRENT
+        else "exceptional_usage_guardrail"
+    )
+    return {
+        "allowed": False,
+        "reservation_id": reservation_id,
+        "reserved_units": 0,
+        "degraded": True,
+        "quota": _neura_plus_agent_public(latest, restriction_reason=reason),
+        "reason": reason,
+    }
+
+
+async def _finish_neura_plus_agent_usage(
+    user: dict,
+    reservation_id: str,
+    reserved: int,
+    actual: int,
+) -> dict:
+    adjustment = max(1, min(60, int(actual))) - max(0, int(reserved))
+    update: dict = {
+        "$inc": {"active_tasks": -1},
+        "$pull": {"active_reservations": {"id": reservation_id}},
+        "$set": {"updated_at": datetime.now(timezone.utc)},
+    }
+    if adjustment:
+        update["$inc"]["used_units"] = adjustment
+    await db.neura_plus_guardrails.update_one(
+        {
+            "_id": _neura_plus_agent_key(user["id"]),
+            "active_reservations.id": reservation_id,
+        },
+        update,
+    )
+    doc = await _get_neura_plus_agent_doc(user["id"], False)
+    return _neura_plus_agent_public(doc)
+
+
+async def _release_neura_plus_agent_usage(
+    user: dict,
+    reservation_id: str,
+    reserved: int,
+) -> None:
+    if not reservation_id or reserved <= 0:
+        return
+    await db.neura_plus_guardrails.update_one(
+        {
+            "_id": _neura_plus_agent_key(user["id"]),
+            "active_reservations.id": reservation_id,
+        },
+        {
+            "$inc": {"active_tasks": -1, "used_units": -int(reserved)},
+            "$pull": {"active_reservations": {"id": reservation_id}},
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        },
+    )
 
 
 def _work_quota_key(user_id: str) -> str:
@@ -1063,9 +1363,20 @@ async def _get_work_quota_doc(user_id: str, create: bool = True) -> Optional[dic
     return await db.plus_work_quotas.find_one({"_id": key})
 
 
-async def _reserve_work_quota(user: dict, units: int) -> dict:
+async def _reserve_work_quota(
+    user: dict,
+    units: int,
+    reservation_id: Optional[str] = None,
+) -> dict:
     if not _has_plus_capabilities(user):
         raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+    if _neura_plus_quota_applies(user):
+        return await _reserve_neura_plus_agent_usage(
+            user,
+            max(1, int(units)) * 2,
+            reservation_id=reservation_id or str(uuid.uuid4()),
+            task_type="work",
+        )
     if not _plus_quota_applies(user):
         return {
             "allowed": True,
@@ -1089,7 +1400,19 @@ async def _reserve_work_quota(user: dict, units: int) -> dict:
     }
 
 
-async def _finish_work_quota(user: dict, reserved: int, actual: int) -> dict:
+async def _finish_work_quota(
+    user: dict,
+    reserved: int,
+    actual: int,
+    reservation_id: Optional[str] = None,
+) -> dict:
+    if _neura_plus_quota_applies(user):
+        return await _finish_neura_plus_agent_usage(
+            user,
+            reservation_id or "",
+            reserved,
+            max(1, int(actual)) * 2,
+        )
     if not _plus_quota_applies(user):
         return _work_quota_public(None, applies=False, unlimited=True)
     adjustment = max(1, min(6, int(actual))) - max(0, int(reserved))
@@ -1102,7 +1425,18 @@ async def _finish_work_quota(user: dict, reserved: int, actual: int) -> dict:
     return _work_quota_public(doc, applies=True)
 
 
-async def _release_work_quota(user: dict, reserved: int) -> None:
+async def _release_work_quota(
+    user: dict,
+    reserved: int,
+    reservation_id: Optional[str] = None,
+) -> None:
+    if _neura_plus_quota_applies(user):
+        await _release_neura_plus_agent_usage(
+            user,
+            reservation_id or "",
+            reserved,
+        )
+        return
     if not _plus_quota_applies(user) or reserved <= 0:
         return
     await db.plus_work_quotas.update_one(
@@ -1115,6 +1449,8 @@ async def _release_work_quota(user: dict, reserved: int) -> None:
 
 
 def _text_quota_key(user_id: str, conversation_id: str, plan: str = "free") -> str:
+    if plan == "neura_plus":
+        return f"neura-plus-text:{user_id}"
     return f"{plan}-text:{user_id}:{conversation_id}"
 
 
@@ -1146,7 +1482,7 @@ def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "f
             "medium_budget": config["medium_budget"],
             "economic_used": 0,
         }
-        if plan == "plus":
+        if plan in ("plus", "neura_plus"):
             empty["levels_available"] = {"high": True, "medium": True, "instant": True}
             empty["requested_mode"] = "auto"
             empty["selection_reason"] = None
@@ -1165,8 +1501,8 @@ def _text_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "f
         "medium_budget": config["medium_budget"],
         "economic_used": max(0, int(doc.get("economic_used", 0))),
     }
-    if plan == "plus":
-        result["levels_available"] = _plus_available_levels(doc)
+    if plan in ("plus", "neura_plus"):
+        result["levels_available"] = _plus_available_levels(doc, plan)
         result["requested_mode"] = doc.get("last_requested_mode", "auto")
         result["selection_reason"] = doc.get("last_selection_reason")
     return result
@@ -1177,6 +1513,28 @@ def _image_quota_public(doc: Optional[dict], applies: bool = True, plan: str = "
         return {"applies": False, "unlimited": True, "remaining": None, "reset_at": None}
     plan = (doc or {}).get("quota_plan", plan)
     config = _image_quota_config(plan)
+    if plan == "neura_plus":
+        used_units = max(0, int((doc or {}).get("media_units", 0)))
+        return {
+            "applies": True,
+            "unlimited": False,
+            "quasi_unlimited": True,
+            "plan": plan,
+            "blocked": used_units >= NEURA_PLUS_MEDIA_HARD_UNITS,
+            "degraded": used_units >= NEURA_PLUS_MEDIA_SOFT_UNITS,
+            "status": (
+                "restricted"
+                if used_units >= NEURA_PLUS_MEDIA_HARD_UNITS
+                else ("guarded" if used_units >= NEURA_PLUS_MEDIA_SOFT_UNITS else "normal")
+            ),
+            "limit": None,
+            "remaining": None,
+            "used_units": used_units,
+            "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
+            "reset_at": _iso_utc((doc or {}).get("reset_at")),
+            "max_bytes": config["max_bytes"],
+            "chat_available": True,
+        }
     if plan == "plus":
         events = (doc or {}).get("events", [])
         used = len(events)
@@ -1262,7 +1620,7 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
 
     if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
         renewed_stage = "advanced"
-        if plan == "plus":
+        if plan in ("plus", "neura_plus"):
             renewed_stage = {
                 "medium": "medium",
                 "instant": "economic",
@@ -1279,7 +1637,7 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
                 "advanced_notice_sent": False,
                 "final_notice_sent": False,
                 "economic_notice_sent": False,
-                "last_selection_reason": "renewal" if plan == "plus" else None,
+                "last_selection_reason": "renewal" if plan in ("plus", "neura_plus") else None,
                 "updated_at": now,
             }},
         )
@@ -1325,6 +1683,11 @@ async def _get_text_quota_doc(user_id: str, conversation_id: str, start_period: 
             "updated_at": now,
         }},
     )
+    if plan == "neura_plus":
+        await db.free_chat_quotas.update_one(
+            {"_id": key},
+            {"$set": {"conversation_id": conversation_id, "updated_at": now}},
+        )
     return await db.free_chat_quotas.find_one({"_id": key})
 
 
@@ -1341,13 +1704,13 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
         return None
     reset_iso = _iso_utc(doc.get("reset_at"))
     plan = doc.get("quota_plan", "free")
-    if plan == "plus" and kind == "advanced_fallback":
+    if plan in ("plus", "neura_plus") and kind == "advanced_fallback":
         content = (
             "Limite de l’IA élevée atteinte\n\n"
             "Le quota d’IA élevée de cette conversation est épuisé. Elle continue avec l’IA moyenne "
             f"du même fournisseur jusqu’au renouvellement à {reset_iso}."
         )
-    elif plan == "plus" and kind == "economic_fallback":
+    elif plan in ("plus", "neura_plus") and kind == "economic_fallback":
         content = (
             "Quota de l’IA moyenne atteint\n\n"
             "Cette conversation continue avec l’IA instantanée du même fournisseur jusqu’au "
@@ -1408,8 +1771,8 @@ def _normalize_intelligence_mode(value: Optional[str]) -> str:
     return aliases.get(str(value or "auto").strip().lower(), "auto")
 
 
-def _plus_available_levels(doc: Optional[dict]) -> dict:
-    config = _text_quota_config("plus")
+def _plus_available_levels(doc: Optional[dict], plan: str = "plus") -> dict:
+    config = _text_quota_config(plan)
     return {
         "high": int((doc or {}).get("advanced_used", 0)) < config["advanced_budget"],
         "medium": int((doc or {}).get("medium_used", 0)) < config["medium_budget"],
@@ -1451,11 +1814,12 @@ async def _reserve_plus_text_quota(
     has_tools: bool,
     has_image: bool,
     has_document: bool,
+    plan: str = "plus",
 ) -> dict:
-    config = _text_quota_config("plus")
+    config = _text_quota_config(plan)
     units = max(1, int(units))
     mode = _normalize_intelligence_mode(requested_mode)
-    doc = await _get_text_quota_doc(user["id"], conversation_id, True, "plus")
+    doc = await _get_text_quota_doc(user["id"], conversation_id, True, plan)
     preferred = {
         "high": "advanced",
         "medium": "medium",
@@ -1498,7 +1862,7 @@ async def _reserve_plus_text_quota(
                 "requested_mode": mode,
                 "selection_reason": reason,
                 "reserved_units": units,
-                "quota": _text_quota_public(latest, True, "plus"),
+                "quota": _text_quota_public(latest, True, plan),
                 "notices": notices,
             }
 
@@ -1527,7 +1891,7 @@ async def _reserve_plus_text_quota(
                 "requested_mode": mode,
                 "selection_reason": reason,
                 "reserved_units": units,
-                "quota": _text_quota_public(latest, True, "plus"),
+                "quota": _text_quota_public(latest, True, plan),
                 "notices": notices,
             }
 
@@ -1579,7 +1943,7 @@ async def _reserve_text_quota(
                 "notices": [],
             }
         return {"applies": False, "stage": "paid", "reserved_units": 0, "quota": _text_quota_public(None, False), "notices": []}
-    if plan == "plus":
+    if plan in ("plus", "neura_plus"):
         return await _reserve_plus_text_quota(
             user,
             conversation_id,
@@ -1589,6 +1953,7 @@ async def _reserve_text_quota(
             has_tools=has_tools,
             has_image=has_image,
             has_document=has_document,
+            plan=plan,
         )
 
     config = _text_quota_config(plan)
@@ -1675,7 +2040,7 @@ async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reser
             {"_id": key, "stage": "advanced"},
             {"$set": {
                 "stage": "medium",
-                "last_selection_reason": "quota" if plan == "plus" else None,
+                "last_selection_reason": "quota" if plan in ("plus", "neura_plus") else None,
             }},
         )
         doc = await db.free_chat_quotas.find_one({"_id": key})
@@ -1688,7 +2053,7 @@ async def _finish_text_quota(user: dict, conversation_id: str, stage: str, reser
             {"_id": key, "stage": "medium"},
             {"$set": {
                 "stage": next_stage,
-                "last_selection_reason": "quota" if plan == "plus" else None,
+                "last_selection_reason": "quota" if plan in ("plus", "neura_plus") else None,
             }},
         )
         doc = await db.free_chat_quotas.find_one({"_id": key})
@@ -1755,6 +2120,7 @@ async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "fr
                 "period_started_at": None,
                 "reset_at": None,
                 "uploads_used": 0,
+                "media_units": 0,
                 "capture_ids": [],
                 "upload_notice_sent": False,
                 "updated_at": now,
@@ -1785,6 +2151,7 @@ async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "fr
             "period_started_at": now,
             "reset_at": reset_at,
             "uploads_used": 0,
+            "media_units": 0,
             "capture_ids": [],
             "upload_notice_sent": False,
             "created_at": now,
@@ -1798,6 +2165,7 @@ async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "fr
             "period_started_at": now,
             "reset_at": reset_at,
             "uploads_used": 0,
+            "media_units": 0,
             "capture_ids": [],
             "upload_notice_sent": False,
             "updated_at": now,
@@ -1815,7 +2183,11 @@ async def _get_image_quota_doc(user_id: str, start_period: bool, plan: str = "fr
     return doc
 
 
-def _clean_image_payload(image_base64: str) -> tuple[str, int]:
+def _clean_image_payload(
+    image_base64: str,
+    max_bytes: Optional[int] = None,
+) -> tuple[str, int]:
+    max_bytes = FREE_IMAGE_MAX_BYTES if max_bytes is None else int(max_bytes)
     payload = image_base64 or ""
     if payload.startswith("data:"):
         payload = payload.split(",", 1)[1] if "," in payload else ""
@@ -1825,15 +2197,28 @@ def _clean_image_payload(image_base64: str) -> tuple[str, int]:
         raise HTTPException(status_code=400, detail="Image invalide ou encodage incorrect.")
     if not decoded:
         raise HTTPException(status_code=400, detail="Image vide.")
-    if len(decoded) > FREE_IMAGE_MAX_BYTES:
+    if len(decoded) > max_bytes:
         raise HTTPException(
             status_code=413,
-            detail=f"L’image ne doit pas dépasser {FREE_IMAGE_MAX_BYTES // (1024 * 1024)} Mo.",
+            detail=f"L’image ne doit pas dépasser {max_bytes // (1024 * 1024)} Mo.",
         )
     return payload, len(decoded)
 
 
 async def _maybe_image_upload_notice(user_id: str, conversation_id: str, doc: dict) -> Optional[dict]:
+    if doc.get("quota_plan") == "neura_plus":
+        quota = _image_quota_public(doc, True, "neura_plus")
+        return await _insert_quota_message(
+            user_id,
+            conversation_id,
+            f"neura-plus-media-guard:{doc['_id']}:{quota.get('reset_at')}",
+            "image_upload_guardrail",
+            "Protection temporaire des fichiers Neura+\n\n"
+            "Un volume exceptionnel d'images ou de fichiers a ete detecte. "
+            f"Les nouveaux envois seront disponibles a {quota.get('reset_at')}. "
+            "Le Chat textuel reste disponible.",
+            doc.get("reset_at"),
+        )
     if doc.get("quota_plan") == "plus":
         quota = _image_quota_public(doc, True, "plus")
         reset_at = (
@@ -1875,16 +2260,131 @@ async def _maybe_image_upload_notice(user_id: str, conversation_id: str, doc: di
     )
 
 
+async def _store_neura_plus_capture(
+    payload: str,
+    *,
+    user_id: str,
+    capture_id: str,
+) -> Any:
+    raw = base64.b64decode(payload)
+    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="neura_plus_media")
+    return await bucket.upload_from_stream(
+        f"{user_id}/{capture_id}",
+        raw,
+        metadata={"user_id": user_id, "capture_id": capture_id},
+    )
+
+
+async def _capture_image_payload(capture: dict) -> Optional[str]:
+    if capture.get("image_base64"):
+        return capture["image_base64"]
+    gridfs_id = capture.get("gridfs_id")
+    if not gridfs_id:
+        return None
+    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="neura_plus_media")
+    stream = await bucket.open_download_stream(gridfs_id)
+    raw = await stream.read()
+    return base64.b64encode(raw).decode("ascii")
+
+
 async def _accept_free_capture(user: dict, conversation_id: str, capture_id: str, image_base64: str) -> dict:
     plan = _quota_plan(user) or "free"
     config = _image_quota_config(plan)
-    clean_payload, byte_size = _clean_image_payload(image_base64)
+    clean_payload, byte_size = _clean_image_payload(
+        image_base64,
+        _image_quota_config(plan)["max_bytes"],
+    )
     capture_id = capture_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", capture_id or "") else str(uuid.uuid4())
     existing = await db.free_image_captures.find_one({"_id": _capture_key(user["id"], capture_id, plan)})
     if existing:
         if existing.get("user_id") != user["id"] or existing.get("conversation_id") != conversation_id:
             raise HTTPException(status_code=409, detail="Cet identifiant de capture est déjà utilisé.")
         return {"accepted": True, "capture": existing, "duplicate": True, "image_quota": _image_quota_public(await _get_image_quota_doc(user["id"], False, plan), True, plan)}
+
+    if plan == "neura_plus":
+        quota_doc = await _get_image_quota_doc(user["id"], True, plan)
+        now = datetime.now(timezone.utc)
+        media_units = max(1, (byte_size + (1024 * 1024) - 1) // (1024 * 1024))
+        result = await db.free_image_quotas.update_one(
+            {
+                "_id": quota_doc["_id"],
+                "capture_ids": {"$ne": capture_id},
+                "$expr": {
+                    "$lte": [
+                        {"$add": ["$media_units", media_units]},
+                        NEURA_PLUS_MEDIA_HARD_UNITS,
+                    ]
+                },
+            },
+            {
+                "$inc": {"uploads_used": 1, "media_units": media_units},
+                "$addToSet": {"capture_ids": capture_id},
+                "$set": {"updated_at": now},
+            },
+        )
+        quota_doc = await db.free_image_quotas.find_one({"_id": quota_doc["_id"]})
+        if result.modified_count == 0 and capture_id not in quota_doc.get("capture_ids", []):
+            notice = await _maybe_image_upload_notice(user["id"], conversation_id, quota_doc)
+            return {
+                "accepted": False,
+                "code": "neura_plus_media_guardrail",
+                "notice": notice,
+                "image_quota": _image_quota_public(quota_doc, True, plan),
+            }
+
+        gridfs_id = None
+        try:
+            gridfs_id = await _store_neura_plus_capture(
+                clean_payload,
+                user_id=user["id"],
+                capture_id=capture_id,
+            )
+            capture = {
+                "_id": _capture_key(user["id"], capture_id, plan),
+                "capture_id": capture_id,
+                "user_id": user["id"],
+                "conversation_id": conversation_id,
+                "quota_plan": plan,
+                "gridfs_id": gridfs_id,
+                "byte_size": byte_size,
+                "media_units": media_units,
+                "analysis_budget": config["analysis_budget"],
+                "analysis_used": 0,
+                "analysis_notice_sent": False,
+                "period_started_at": quota_doc.get("period_started_at"),
+                "reset_at": quota_doc.get("reset_at"),
+                "accepted_at": now,
+                "updated_at": now,
+            }
+            await db.free_image_captures.update_one(
+                {"_id": capture["_id"]},
+                {"$setOnInsert": capture},
+                upsert=True,
+            )
+            capture = await db.free_image_captures.find_one({"_id": capture["_id"]})
+        except Exception:
+            if gridfs_id is not None:
+                try:
+                    bucket = AsyncIOMotorGridFSBucket(db, bucket_name="neura_plus_media")
+                    await bucket.delete(gridfs_id)
+                except Exception:
+                    pass
+            await db.free_image_quotas.update_one(
+                {"_id": quota_doc["_id"], "capture_ids": capture_id},
+                {
+                    "$inc": {"uploads_used": -1, "media_units": -media_units},
+                    "$pull": {"capture_ids": capture_id},
+                    "$set": {"updated_at": datetime.now(timezone.utc)},
+                },
+            )
+            raise
+        return {
+            "accepted": True,
+            "capture": capture,
+            "duplicate": False,
+            "image_quota": _image_quota_public(quota_doc, True, plan),
+            "notice": None,
+        }
 
     if plan == "plus":
         quota_doc = await _get_image_quota_doc(user["id"], True, plan)
@@ -2821,22 +3321,28 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         image_quota = capture_result["image_quota"]
         if not capture_result["accepted"]:
             await _fail_chat_request(request_record)
+            upload_message = (
+                "Protection temporaire Neura+ active pour les nouveaux envois. "
+                "Le Chat textuel reste disponible."
+                if quota_plan == "neura_plus"
+                else f"Vous avez utilisé vos {_image_quota_config(quota_plan)['max_uploads']} captures pour cette période."
+            )
             raise HTTPException(status_code=429, detail={
                 "code": capture_result["code"],
-                "message": f"Vous avez utilisé vos {_image_quota_config(quota_plan)['max_uploads']} captures pour cette période.",
+                "message": upload_message,
                 "conversation_id": conversation_id,
                 "image_quota": image_quota,
                 "notice": capture_result.get("notice"),
             })
         capture = capture_result["capture"]
         image_upload_notice = capture_result.get("notice")
-        effective_image_data = capture.get("image_base64")
+        effective_image_data = await _capture_image_payload(capture)
     elif quota_plan and message.capture_id:
         capture = await _get_free_capture(user, conversation_id, message.capture_id)
         if not capture:
             await _fail_chat_request(request_record)
             raise HTTPException(status_code=404, detail="Capture introuvable pour cette conversation.")
-        effective_image_data = capture.get("image_base64")
+        effective_image_data = await _capture_image_payload(capture)
         image_quota = _image_quota_public(await _get_image_quota_doc(user["id"], False, quota_plan), True, quota_plan)
 
     if capture:
@@ -3518,6 +4024,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
 
     async def event_generator():
         reserved_work_units = 0
+        work_guard_reservation_id = message.request_id or str(uuid.uuid4())
         request_record = None
         capture = None
         capture_reserved = 0
@@ -3564,7 +4071,11 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 has_document=bool(message.document_text),
                 project_file_count=len(project_files),
             )
-            reservation = await _reserve_work_quota(user, estimate)
+            reservation = await _reserve_work_quota(
+                user,
+                estimate,
+                work_guard_reservation_id,
+            )
             if not reservation["allowed"]:
                 quota = reservation["quota"]
                 yield work_sse({
@@ -3587,11 +4098,11 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
             request_record = request_gate["record"]
             if not request_gate["new"]:
                 if request_record.get("status") == "completed" and request_record.get("result"):
-                    await _release_work_quota(user, reserved_work_units)
+                    await _release_work_quota(user, reserved_work_units, work_guard_reservation_id)
                     reserved_work_units = 0
                     yield work_sse({"type": "done", **request_record["result"]})
                     return
-                await _release_work_quota(user, reserved_work_units)
+                await _release_work_quota(user, reserved_work_units, work_guard_reservation_id)
                 reserved_work_units = 0
                 yield work_sse({
                     "type": "error",
@@ -3622,7 +4133,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                     user, conversation_id, str(uuid.uuid4()), message.image_base64
                 )
                 if not capture_result["accepted"]:
-                    await _release_work_quota(user, reserved_work_units)
+                    await _release_work_quota(user, reserved_work_units, work_guard_reservation_id)
                     reserved_work_units = 0
                     await _fail_chat_request(request_record)
                     yield work_sse({
@@ -3638,7 +4149,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                     user, conversation_id, capture, visual_units
                 )
                 if not capture_reservation["allowed"]:
-                    await _release_work_quota(user, reserved_work_units)
+                    await _release_work_quota(user, reserved_work_units, work_guard_reservation_id)
                     reserved_work_units = 0
                     await _fail_chat_request(request_record)
                     yield work_sse({
@@ -3728,12 +4239,18 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                     has_document=bool(message.document_text),
                 ),
             )
+            if reservation.get("degraded"):
+                stage = "economic"
             routed_profile = _chat_profile_for_user(user, selected_model, stage)
             public_model = _model_public(
                 routed_profile,
                 stage,
                 requested_mode=requested_mode,
-                selection_reason="auto" if requested_mode == "auto" else "manual",
+                selection_reason=(
+                    "guardrail"
+                    if reservation.get("degraded")
+                    else ("auto" if requested_mode == "auto" else "manual")
+                ),
                 levels_available={"high": True, "medium": True, "instant": True},
             )
 
@@ -3832,7 +4349,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 has_document=bool(message.document_text),
             )
             work_quota = await _finish_work_quota(
-                user, reserved_work_units, actual_units
+                user, reserved_work_units, actual_units, work_guard_reservation_id
             )
             reserved_work_units = 0
             if capture:
@@ -3881,7 +4398,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
         except Exception as exc:
             logger.error("Work task error: %s", str(exc)[:500])
             if reserved_work_units:
-                await _release_work_quota(user, reserved_work_units)
+                await _release_work_quota(user, reserved_work_units, work_guard_reservation_id)
             if capture and capture_reserved:
                 await _release_capture_analysis(capture, capture_reserved)
             if request_record:
@@ -3899,6 +4416,10 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
 async def get_work_quota(user: dict = Depends(get_current_user)):
     if not _has_plus_capabilities(user):
         raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
+    if _neura_plus_quota_applies(user):
+        return _neura_plus_agent_public(
+            await _get_neura_plus_agent_doc(user["id"], False)
+        )
     if not _plus_quota_applies(user):
         return _work_quota_public(None, applies=False, unlimited=True)
     doc = await _get_work_quota_doc(user["id"], False)
@@ -3994,19 +4515,25 @@ async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_
     if conversation_type == "work":
         if not _has_plus_capabilities(user):
             raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
-        work_doc = (
-            await _get_work_quota_doc(user["id"], False)
-            if _plus_quota_applies(user)
-            else None
-        )
-        return {
-            **_text_quota_public(None, False),
-            "conversation_type": "work",
-            "work_quota": _work_quota_public(
+        if _neura_plus_quota_applies(user):
+            work_quota = _neura_plus_agent_public(
+                await _get_neura_plus_agent_doc(user["id"], False)
+            )
+        else:
+            work_doc = (
+                await _get_work_quota_doc(user["id"], False)
+                if _plus_quota_applies(user)
+                else None
+            )
+            work_quota = _work_quota_public(
                 work_doc,
                 applies=_plus_quota_applies(user),
                 unlimited=not _plus_quota_applies(user),
-            ),
+            )
+        return {
+            **_text_quota_public(None, False),
+            "conversation_type": "work",
+            "work_quota": work_quota,
             "capture": None,
             "active_model": await _active_model_for_conversation(
                 user, conversation_id, conversation=conversation
@@ -4203,6 +4730,105 @@ async def _release_plus_generation(user_id: str):
     )
 
 
+def _neura_plus_generation_key(user_id: str) -> str:
+    return f"neura-plus-image-generations:{user_id}"
+
+
+def _neura_plus_generation_quota_public(doc: Optional[dict]) -> dict:
+    used_units = max(0, int((doc or {}).get("used_units", 0)))
+    return {
+        "remaining": None,
+        "limit": None,
+        "used_units": used_units,
+        "unlimited": False,
+        "quasi_unlimited": True,
+        "blocked": used_units >= NEURA_PLUS_IMAGE_GENERATION_HARD_UNITS,
+        "degraded": used_units >= NEURA_PLUS_IMAGE_GENERATION_SOFT_UNITS,
+        "period_started_at": _iso_utc((doc or {}).get("period_started_at")),
+        "reset_at": _iso_utc((doc or {}).get("reset_at")),
+    }
+
+
+async def _get_neura_plus_generation_doc(user_id: str, start_period: bool) -> Optional[dict]:
+    key = _neura_plus_generation_key(user_id)
+    now = datetime.now(timezone.utc)
+    doc = await db.neura_plus_guardrails.find_one({"_id": key})
+    if doc and doc.get("reset_at") and _aware_utc(doc.get("reset_at")) <= now:
+        await db.neura_plus_guardrails.update_one(
+            {"_id": key, "reset_at": {"$lte": now}},
+            {"$set": {
+                "period_started_at": None,
+                "reset_at": None,
+                "used_units": 0,
+                "updated_at": now,
+            }},
+        )
+        doc = await db.neura_plus_guardrails.find_one({"_id": key})
+    if doc or not start_period:
+        if doc and start_period and not doc.get("period_started_at"):
+            reset_at = now + timedelta(hours=NEURA_PLUS_IMAGE_GENERATION_WINDOW_HOURS)
+            await db.neura_plus_guardrails.update_one(
+                {"_id": key, "period_started_at": None},
+                {"$set": {"period_started_at": now, "reset_at": reset_at, "updated_at": now}},
+            )
+            doc = await db.neura_plus_guardrails.find_one({"_id": key})
+        return doc
+    reset_at = now + timedelta(hours=NEURA_PLUS_IMAGE_GENERATION_WINDOW_HOURS)
+    await db.neura_plus_guardrails.update_one(
+        {"_id": key},
+        {"$setOnInsert": {
+            "_id": key,
+            "user_id": user_id,
+            "resource": "image_generation",
+            "used_units": 0,
+            "period_started_at": now,
+            "reset_at": reset_at,
+            "created_at": now,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+    return await db.neura_plus_guardrails.find_one({"_id": key})
+
+
+async def _reserve_neura_plus_generation(user_id: str) -> dict:
+    cost_units = 10
+    doc = await _get_neura_plus_generation_doc(user_id, True)
+    result = await db.neura_plus_guardrails.update_one(
+        {
+            "_id": doc["_id"],
+            "$expr": {
+                "$lte": [
+                    {"$add": ["$used_units", cost_units]},
+                    NEURA_PLUS_IMAGE_GENERATION_HARD_UNITS,
+                ]
+            },
+        },
+        {"$inc": {"used_units": cost_units}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+    latest = await db.neura_plus_guardrails.find_one({"_id": doc["_id"]})
+    return {
+        "allowed": bool(result.modified_count),
+        "reserved_units": cost_units if result.modified_count else 0,
+        "quota": _neura_plus_generation_quota_public(latest),
+    }
+
+
+async def _release_neura_plus_generation(user_id: str, reserved_units: int):
+    if reserved_units <= 0:
+        return
+    await db.neura_plus_guardrails.update_one(
+        {
+            "_id": _neura_plus_generation_key(user_id),
+            "used_units": {"$gte": int(reserved_units)},
+        },
+        {
+            "$inc": {"used_units": -int(reserved_units)},
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        },
+    )
+
+
 @api_router.get("/images/remaining")
 async def get_remaining_generations(user: dict = Depends(get_current_user)):
     """Check how many free image generations the user has remaining"""
@@ -4214,6 +4840,11 @@ async def get_remaining_generations(user: dict = Depends(get_current_user)):
 
     if subscription == "pro" and not is_vip:
         return _plus_generation_quota_public(await _get_plus_generation_quota_doc(user["id"], False))
+
+    if subscription == "neura_plus" and not is_vip:
+        return _neura_plus_generation_quota_public(
+            await _get_neura_plus_generation_doc(user["id"], False)
+        )
 
     if is_vip or subscription == "developer":
         return {"remaining": -1, "limit": -1, "unlimited": True}
@@ -4232,6 +4863,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
 
     mongo_generation_reserved = False
     plus_generation_reserved = False
+    neura_plus_generation_reserved = 0
     if subscription == "mongo" and not is_vip:
         generation_reservation = await _reserve_mongo_generation(user["id"])
         if not generation_reservation["allowed"]:
@@ -4250,9 +4882,25 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
                 detail=f"Quota Plus de 50 générations atteint. Renouvellement à {reset_at}.",
             )
         plus_generation_reserved = True
+    elif subscription == "neura_plus" and not is_vip:
+        generation_reservation = await _reserve_neura_plus_generation(user["id"])
+        if not generation_reservation["allowed"]:
+            reset_at = generation_reservation["quota"].get("reset_at")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": (
+                        "Protection temporaire de generation d'images Neura+ active. "
+                        "Le Chat et les autres fonctions restent disponibles."
+                    ),
+                    "reset_at": reset_at,
+                    "quota": generation_reservation["quota"],
+                },
+            )
+        neura_plus_generation_reserved = generation_reservation["reserved_units"]
     
     # VIP and pro/developer keep their existing unlimited entitlement.
-    if not is_vip and subscription not in ("mongo", "pro", "developer"):
+    if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus"):
         # Plans without unlimited image entitlement: 3 total free generations
         used = user.get("image_generations_count", 0)
         if used >= 3:
@@ -4289,7 +4937,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
             image_base64 = images[0]
             
             # Increment the legacy free counter. Mongo was reserved atomically above.
-            if not is_vip and subscription not in ("mongo", "pro", "developer"):
+            if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus"):
                 await db.users.update_one(
                     {"id": user["id"]},
                     {"$inc": {"image_generations_count": 1}}
@@ -4304,6 +4952,10 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
                 result["generation_quota"] = _plus_generation_quota_public(
                     await _get_plus_generation_quota_doc(user["id"], False)
                 )
+            elif subscription == "neura_plus" and not is_vip:
+                result["generation_quota"] = _neura_plus_generation_quota_public(
+                    await _get_neura_plus_generation_doc(user["id"], False)
+                )
             return result
         else:
             raise HTTPException(status_code=500, detail="Aucune image générée")
@@ -4312,12 +4964,16 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
             await _release_mongo_generation(user["id"])
         if plus_generation_reserved:
             await _release_plus_generation(user["id"])
+        if neura_plus_generation_reserved:
+            await _release_neura_plus_generation(user["id"], neura_plus_generation_reserved)
         raise
     except Exception as e:
         if mongo_generation_reserved:
             await _release_mongo_generation(user["id"])
         if plus_generation_reserved:
             await _release_plus_generation(user["id"])
+        if neura_plus_generation_reserved:
+            await _release_neura_plus_generation(user["id"], neura_plus_generation_reserved)
         logger.error(f"Image generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
 
@@ -7410,6 +8066,8 @@ async def get_eid_info(eid_type: str = "fitr"):
 class DevMessageCreate(BaseModel):
     content: str
     session_id: Optional[str] = None
+    request_id: Optional[str] = None
+    project_id: Optional[str] = None
     image_base64: Optional[str] = None
     web_search: Optional[bool] = False
     role: Optional[str] = None
@@ -7522,7 +8180,12 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     unlimited = _dev_is_unlimited(user)
 
     # Enforce quota (founders/VIP are never blocked)
-    if not unlimited and used >= tier["requests"]:
+    if (
+        tier_name != "plus"
+        and not unlimited
+        and tier["requests"] is not None
+        and used >= tier["requests"]
+    ):
         raise HTTPException(status_code=429, detail={
             "message": (
                 "Tu as atteint la limite de génération de code de ton abonnement actuel. "
@@ -7535,10 +8198,16 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         })
 
     session_id = message.session_id or str(uuid.uuid4())
+    project_id = (message.project_id or "default").strip()[:120] or "default"
 
     # Project memory: recent turns of this developer session (bounded by tier)
     history = await db.dev_messages.find(
-        {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
+        {
+            "session_id": session_id,
+            "user_id": user["id"],
+            "project_id": {"$in": [project_id, None]},
+        },
+        {"_id": 0},
     ).sort("created_at", 1).to_list(tier["memory_turns"])
 
     system_prompt = _build_dev_system_prompt(tier_name) + current_ai_context()
@@ -7549,8 +8218,12 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             "Adopte l'expertise, le vocabulaire, les priorités et les bonnes pratiques de ce rôle."
         )
     # Project analysis: give premium users' workspace files to the model as context.
+    wf = []
     if _is_premium_ai(user):
-        wf = await db.dev_files.find({"user_id": user["id"]}, {"_id": 0}).sort("path", 1).to_list(40)
+        wf = await db.dev_files.find(
+            {"user_id": user["id"], "project_id": {"$in": [project_id, None]}},
+            {"_id": 0},
+        ).sort("path", 1).to_list(40)
         if wf:
             ctx = "\n\n=== PROJET ACTUEL DE L'UTILISATEUR (analyse ces fichiers, tiens-en compte) ===\n"
             for f in wf:
@@ -7568,7 +8241,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     now_iso = datetime.now(timezone.utc).isoformat()
     await db.dev_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
-        "role": "user", "content": message.content, "created_at": now_iso,
+        "project_id": project_id, "role": "user", "content": message.content, "created_at": now_iso,
     })
     await _dev_action_log(user, "chat_request", {"session_id": session_id, "tier": tier_name, "role": message.role or "general"})
 
@@ -7598,9 +8271,44 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     else:
         user_msg_obj = UserMessage(text=user_text)
 
+    agent_guard = None
+    if _neura_plus_quota_applies(user):
+        estimated_agent_units = min(
+            60,
+            max(
+                1,
+                1
+                + (_weighted_text_units(system_prompt, message.content) + 2499) // 2500
+                + min(10, len(wf))
+                + (2 if message.web_search else 0)
+                + (3 if message.image_base64 else 0),
+            ),
+        )
+        agent_guard = await _reserve_neura_plus_agent_usage(
+            user,
+            estimated_agent_units,
+            reservation_id=message.request_id or str(uuid.uuid4()),
+            task_type="developer",
+        )
+        if not agent_guard["allowed"]:
+            quota = agent_guard["quota"]
+            raise HTTPException(status_code=429, detail={
+                "message": (
+                    "Le lancement d'une nouvelle tache Developpeur est temporairement restreint "
+                    "par les garde-fous Neura+. Le Chat reste disponible."
+                ),
+                "reason": agent_guard.get("reason"),
+                "reset_at": quota.get("reset_at"),
+                "quota": quota,
+            })
+
     # Code model by tier: premium (Neura+/Ultra) -> Claude Sonnet (best for code);
     # free stays on Gemini for cost. Images stay on Gemini (vision proven).
-    if tier_name in ("plus", "ultra") and not message.image_base64:
+    if (
+        tier_name in ("plus", "ultra")
+        and not message.image_base64
+        and not (agent_guard and agent_guard.get("degraded"))
+    ):
         dev_provider, dev_model = "anthropic", "claude-sonnet-4-5"
     else:
         dev_provider, dev_model = "gemini", "gemini-2.5-flash"
@@ -7631,10 +8339,20 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             break
 
     if last_err is not None:
+        if agent_guard and agent_guard.get("allowed"):
+            await _release_neura_plus_agent_usage(
+                user,
+                agent_guard["reservation_id"],
+                agent_guard["reserved_units"],
+            )
         es = str(last_err)
         logger.error(f"Developer chat error: {es[:300]}")
         quota_info = {"tier": tier_name, "limit": tier["requests"], "used": used,
-                      "remaining": (None if unlimited else max(0, tier["requests"] - used)),
+                      "remaining": (
+                          None
+                          if unlimited or tier["requests"] is None
+                          else max(0, tier["requests"] - used)
+                      ),
                       "reset_at": reset_at, "window_hours": tier["window_hours"], "unlimited": unlimited}
         if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
             # Gemini free-tier limit reached (shared across the whole app, not a per-plan limit)
@@ -7651,7 +8369,8 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
 
     await db.dev_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
-        "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
+        "project_id": project_id, "role": "assistant", "content": response,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     })
     await _dev_action_log(user, "chat_response", {"session_id": session_id, "model": dev_model, "tier": tier_name})
     await db.dev_sessions.update_one(
@@ -7669,13 +8388,44 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         upsert=True,
     )
 
+    if agent_guard and agent_guard.get("allowed"):
+        actual_agent_units = min(
+            60,
+            max(
+                1,
+                1
+                + (_weighted_text_units(system_prompt, message.content, response) + 2499) // 2500
+                + min(10, len(wf))
+                + min(5, len(sources))
+                + (3 if message.image_base64 else 0),
+            ),
+        )
+        developer_quota = await _finish_neura_plus_agent_usage(
+            user,
+            agent_guard["reservation_id"],
+            agent_guard["reserved_units"],
+            actual_agent_units,
+        )
+    else:
+        developer_quota = {
+            "tier": tier_name,
+            "limit": tier["requests"],
+            "used": used + 1,
+            "remaining": (
+                None
+                if unlimited or tier["requests"] is None
+                else max(0, tier["requests"] - used - 1)
+            ),
+            "reset_at": reset_at,
+            "window_hours": tier["window_hours"],
+            "unlimited": unlimited,
+        }
+
     return {
         "response": response,
         "session_id": session_id,
         "sources": sources,
-        "quota": {"tier": tier_name, "limit": tier["requests"], "used": used + 1,
-                  "remaining": (None if unlimited else max(0, tier["requests"] - used - 1)),
-                  "reset_at": reset_at, "window_hours": tier["window_hours"], "unlimited": unlimited},
+        "quota": developer_quota,
     }
 
 
@@ -7683,13 +8433,30 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
 async def developer_status(user: dict = Depends(get_current_user)):
     tier_name, tier, used, reset_at, _ = await _dev_quota_state(user)
     unlimited = _dev_is_unlimited(user)
+    if _neura_plus_quota_applies(user):
+        guard = _neura_plus_agent_public(
+            await _get_neura_plus_agent_doc(user["id"], False)
+        )
+        return {
+            "tier": tier_name,
+            "label": tier["label"],
+            "is_founder": False,
+            "max_files": tier["max_files"],
+            "max_tokens": tier["max_tokens"],
+            "project_analysis": tier["project_analysis"],
+            **guard,
+        }
     return {
         "tier": tier_name,
         "label": tier["label"],
         "is_founder": bool(user.get("is_vip") or is_vip_email(user.get("email"))),
         "limit": tier["requests"],
         "used": used,
-        "remaining": (None if unlimited else max(0, tier["requests"] - used)),
+        "remaining": (
+            None
+            if unlimited or tier["requests"] is None
+            else max(0, tier["requests"] - used)
+        ),
         "unlimited": unlimited,
         "window_hours": tier["window_hours"],
         "reset_at": reset_at,

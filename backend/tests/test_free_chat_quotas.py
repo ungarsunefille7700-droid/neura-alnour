@@ -37,14 +37,22 @@ def _value(doc, expression):
     return expression
 
 
+def _expr_matches(doc, expression):
+    if "$and" in expression:
+        return all(_expr_matches(doc, item) for item in expression["$and"])
+    operator, values = next(iter(expression.items()))
+    left, right = (_value(doc, value) for value in values)
+    if operator == "$lte":
+        return left <= right
+    if operator == "$lt":
+        return left < right
+    raise AssertionError(f"Unsupported expression operator: {operator}")
+
+
 def _matches(doc, query):
     for key, expected in query.items():
         if key == "$expr":
-            operator, values = next(iter(expected.items()))
-            left, right = (_value(doc, value) for value in values)
-            if operator == "$lte" and not left <= right:
-                return False
-            if operator == "$lt" and not left < right:
+            if not _expr_matches(doc, expected):
                 return False
             continue
         actual = _value(doc, f"${key}")
@@ -123,6 +131,11 @@ class FakeCollection:
                     item for item in values
                     if not (item.get("accepted_at") is not None and item.get("accepted_at") <= cutoff)
                 ]
+            elif isinstance(condition, dict) and "id" in condition:
+                document[key] = [
+                    item for item in values
+                    if not (isinstance(item, dict) and item.get("id") == condition["id"])
+                ]
             else:
                 document[key] = [item for item in values if item != condition]
         self.docs[existing_key] = document
@@ -148,6 +161,7 @@ class FakeDB:
         self.mongo_image_generation_quotas = FakeCollection()
         self.plus_image_generation_quotas = FakeCollection()
         self.plus_work_quotas = FakeCollection()
+        self.neura_plus_guardrails = FakeCollection()
         self.messages = FakeCollection()
         self.chat_request_results = FakeCollection()
         self.conversations = FakeCollection()
@@ -172,6 +186,13 @@ def quota_db(monkeypatch):
     monkeypatch.setattr(server, "PLUS_IMAGE_ANALYSIS_BUDGET_UNITS", 60)
     monkeypatch.setattr(server, "PLUS_IMAGE_GENERATION_LIMIT", 5)
     monkeypatch.setattr(server, "PLUS_WORK_BUDGET_UNITS", 10)
+    monkeypatch.setattr(server, "NEURA_PLUS_TEXT_ADVANCED_BUDGET_UNITS", 300)
+    monkeypatch.setattr(server, "NEURA_PLUS_TEXT_MEDIUM_BUDGET_UNITS", 150)
+    monkeypatch.setattr(server, "NEURA_PLUS_AGENT_SOFT_UNITS", 20)
+    monkeypatch.setattr(server, "NEURA_PLUS_AGENT_HARD_UNITS", 30)
+    monkeypatch.setattr(server, "NEURA_PLUS_AGENT_MAX_CONCURRENT", 2)
+    monkeypatch.setattr(server, "NEURA_PLUS_IMAGE_GENERATION_SOFT_UNITS", 10)
+    monkeypatch.setattr(server, "NEURA_PLUS_IMAGE_GENERATION_HARD_UNITS", 20)
     return fake
 
 
@@ -306,12 +327,30 @@ def test_active_model_tracks_mongo_fallback_reset_and_legacy_history(quota_db):
 
 
 def test_non_plus_paid_plans_bypass_the_free_quota(quota_db):
-    for subscription in ("comme_toi", "developer", "neura_plus", "neura_ultra"):
+    for subscription in ("comme_toi", "developer", "neura_ultra"):
         user = {"id": subscription, "email": f"{subscription}@example.com", "subscription": subscription, "is_vip": False}
         result = run(server._reserve_text_quota(user, "conversation", 999999))
         assert result["stage"] in ("paid", "advanced", "medium", "economic")
         assert result["quota"]["unlimited"] is True
     assert quota_db.free_chat_quotas.docs == {}
+
+
+def test_neura_plus_text_budget_is_account_wide_and_five_times_plus(quota_db):
+    user = {
+        "id": "neura-plus-text",
+        "email": "neura-plus-text@example.com",
+        "subscription": "neura_plus",
+        "is_vip": False,
+    }
+    assert server._text_quota_config("neura_plus")["advanced_budget"] == 300
+    first = run(server._reserve_text_quota(user, "conversation-a", 250, "high"))
+    second = run(server._reserve_text_quota(user, "conversation-b", 100, "high"))
+    assert first["stage"] == "advanced"
+    assert second["stage"] == "medium"
+    assert first["quota"]["unlimited"] is False
+    assert list(quota_db.free_chat_quotas.docs) == [
+        server._text_quota_key(user["id"], "conversation-a", "neura_plus")
+    ]
 
 
 def test_plus_text_budgets_are_three_times_mongo_and_never_block(quota_db):
@@ -660,6 +699,36 @@ def test_image_size_is_checked_on_the_server(quota_db, monkeypatch):
     assert error.value.status_code == 413
 
 
+def test_neura_plus_media_limits_are_separate_and_not_a_small_visible_quota(quota_db):
+    config = server._image_quota_config("neura_plus")
+    assert config["max_bytes"] == 20 * 1024 * 1024
+    public = server._image_quota_public(
+        {
+            "quota_plan": "neura_plus",
+            "media_units": 3,
+            "period_started_at": datetime.now(timezone.utc),
+            "reset_at": datetime.now(timezone.utc) + timedelta(hours=5),
+        },
+        True,
+        "neura_plus",
+    )
+    assert public["quasi_unlimited"] is True
+    assert public["limit"] is None
+    assert public["remaining"] is None
+    assert public["max_bytes"] == 20 * 1024 * 1024
+
+
+def test_neura_plus_image_generation_uses_a_server_guardrail(quota_db):
+    first = run(server._reserve_neura_plus_generation("neura-plus-images"))
+    second = run(server._reserve_neura_plus_generation("neura-plus-images"))
+    blocked = run(server._reserve_neura_plus_generation("neura-plus-images"))
+    assert first["allowed"] is True
+    assert second["allowed"] is True
+    assert second["quota"]["quasi_unlimited"] is True
+    assert blocked["allowed"] is False
+    assert blocked["quota"]["blocked"] is True
+
+
 def test_request_idempotency_reuses_the_same_server_record(quota_db):
     first = run(server._begin_chat_request("user", "request-123", "conversation", "message"))
     second = run(server._begin_chat_request("user", "request-123", "conversation", "message"))
@@ -681,8 +750,10 @@ def test_work_access_is_server_side_and_superior_plans_are_not_downgraded(quota_
     }
     result = run(server._reserve_work_quota(superior, 6))
     assert result["allowed"] is True
-    assert result["quota"]["unlimited"] is True
+    assert result["quota"]["quasi_unlimited"] is True
+    assert result["quota"]["chat_available"] is True
     assert quota_db.plus_work_quotas.docs == {}
+    assert server._neura_plus_agent_key(superior["id"]) in quota_db.neura_plus_guardrails.docs
 
 
 def test_plus_work_quota_is_weighted_shared_and_renews_after_five_hours(quota_db):

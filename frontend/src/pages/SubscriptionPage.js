@@ -197,19 +197,22 @@ const SubscriptionPage = () => {
       name: 'Neura+',
       icon: Zap,
       price: { monthly: 119.99, yearly: 1199.99 },
-      description: 'Assistant Développeur IA avancé',
+      description: 'Pour les usages professionnels et intensifs',
       features: [
-        'Tout l\'islamique reste gratuit',
-        'Assistant Développeur IA dans le chat',
-        '150 générations de code / heure',
-        'Génération multi-fichiers (jusqu\'à 10)',
+        'Tout du plan Plus',
+        'Usage IA quasi illimité sous garde-fous',
+        'Accès maximal aux modèles avancés',
+        'Work et Assistant Développeur quasi illimités sous garde-fous',
+        'Captures, images et fichiers quasi illimités sous garde-fous',
+        'Génération multi-fichiers (jusqu’à 10)',
         'Analyse approfondie du projet',
         'Mémoire développeur étendue',
-        'Code avancé & réponses longues',
-        'Priorité de traitement'
+        'Génération d’images à très haut quota'
       ],
       highlight: false,
-      current: user?.subscription === 'neura_plus'
+      current: user?.subscription === 'neura_plus',
+      included: user?.subscription === 'neura_ultra',
+      actionLabel: 'Choisir Neura+'
     },
     {
       id: 'neura_ultra',
@@ -387,13 +390,17 @@ const SubscriptionPage = () => {
                   >
                     {plan.current ? 'Votre forfait actuel' : (user ? 'Accéder' : 'Commencer')}
                   </Button>
-                ) : plan.current || user?.is_vip ? (
+                ) : plan.current || plan.included || user?.is_vip ? (
                   <Button 
                     variant="outline" 
                     className="w-full rounded-full"
                     disabled
                   >
-                    {user?.is_vip ? 'Inclus VIP' : 'Plan actuel'}
+                    {user?.is_vip
+                      ? 'Inclus VIP'
+                      : plan.included
+                        ? 'Inclus avec Neura Ultra'
+                        : 'Offre actuelle'}
                   </Button>
                 ) : (
                   <Button 
