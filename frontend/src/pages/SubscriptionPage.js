@@ -182,7 +182,7 @@ const SubscriptionPage = () => {
       price: { monthly: 19.99, yearly: 119.99 },
       description: 'Pour les développeurs',
       features: [
-        'Tout du plan Pro',
+        'Tout du plan Plus',
         'Accès API complet',
         'SDK mobile',
         'Webhooks prière',

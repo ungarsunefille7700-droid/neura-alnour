@@ -49,6 +49,8 @@ describe('free plan quota wording', () => {
     });
     expect(subscription).toContain("id: 'pro'");
     expect(subscription).toContain("actionLabel: 'Choisir Plus'");
+    expect(subscription).toContain('Tout du plan Plus');
+    expect(subscription).not.toContain('Tout du plan Pro');
     expect(subscription).not.toContain("name: 'Pro'");
   });
 
