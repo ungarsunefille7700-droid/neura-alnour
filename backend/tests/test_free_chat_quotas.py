@@ -736,21 +736,62 @@ def test_work_consumption_uses_task_shape_tools_files_and_output():
 def test_web_search_modes_are_decided_on_the_server():
     forced = server._web_search_decision("Explique la photosynthèse", "forced")
     explicit = server._web_search_decision("Regarde sur Internet le dernier score", "auto")
+    natural_explicit = server._web_search_decision("fait une recherche sur dbz", "auto")
+    natural_explicit_polite = server._web_search_decision(
+        "Peux-tu faire une recherche sur Dragon Ball Z ?", "auto"
+    )
+    natural_explicit_hyphen = server._web_search_decision(
+        "Trouve-moi des informations sur DBZ", "auto"
+    )
     current = server._web_search_decision("Quel est le prix actuel de ce produit ?", "auto")
     disabled = server._web_search_decision(
         "Réponds sans utiliser le Web au sujet des actualités", "auto"
     )
+    disabled_overrides_search = server._web_search_decision(
+        "Fais une recherche sur DBZ sans utiliser le Web", "auto"
+    )
     ordinary = server._web_search_decision("Explique la photosynthèse", "auto")
+    ordinary_research_topic = server._web_search_decision(
+        "Les méthodes de recherche sur le cancer sont-elles fiables ?", "auto"
+    )
     assert forced == {
         "mode": "forced",
         "should_search": True,
         "reason": "manual_activation",
     }
     assert explicit["should_search"] and explicit["reason"] == "explicit_request"
+    assert natural_explicit["should_search"] and natural_explicit["reason"] == "explicit_request"
+    assert natural_explicit_polite["should_search"]
+    assert natural_explicit_hyphen["should_search"]
     assert current["should_search"] and current["reason"] == "current_information"
     assert disabled["should_search"] is False
     assert disabled["reason"] == "disabled_by_user"
+    assert disabled_overrides_search["should_search"] is False
     assert ordinary["should_search"] is False
+    assert ordinary_research_topic["should_search"] is False
+
+
+def test_web_search_metadata_never_claims_an_unperformed_search(monkeypatch):
+    decision = server._web_search_decision("Fais une recherche sur DBZ", "auto")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    unavailable = server._web_search_public(decision, performed=False, sources=[])
+    assert unavailable["requested"] is True
+    assert unavailable["performed"] is False
+    assert unavailable["available"] is False
+    assert unavailable["sources"] == []
+
+    sources = [{
+        "title": "Dragon Ball Official Site",
+        "url": "https://en.dragon-ball-official.com",
+        "snippet": "Official Dragon Ball information.",
+    }]
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    performed = server._web_search_public(decision, performed=True, sources=sources)
+    assert performed["requested"] is True
+    assert performed["performed"] is True
+    assert performed["available"] is True
+    assert performed["sources"] == sources
+    assert sources[0]["url"] in server.web_results_context(sources)
 
 
 def test_code_intent_is_server_driven_without_routing_general_chat():

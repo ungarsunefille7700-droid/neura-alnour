@@ -377,6 +377,16 @@ def _web_search_decision(
         "verifie cette information", "consulte le site", "consulte cette page",
         "search the web", "look it up", "check online", "browse the web",
     )
+    explicit_patterns = (
+        r"\b(?:fais|fait|faites|faire|effectue|effectuer|lance|lancer|realise|realiser|mene|mener)"
+        r"(?:[ -]+moi)?\s+(?:une\s+)?recherches?\s+(?:sur|a propos de|concernant)\b",
+        r"^\s*(?:recherche|cherche)\s+(?:sur|des?\s+infos?\s+sur|des?\s+informations?\s+sur)\b",
+        r"\b(?:cherche|trouve)(?:[ -]+moi)?\s+(?:des?\s+)?(?:infos?|informations?)"
+        r"\s+(?:sur|concernant|a propos de)\b",
+        r"\b(?:renseigne|informe)[ -]?toi\s+(?:sur|a propos de|concernant)\b",
+        r"\b(?:do|run|perform)\s+(?:a\s+)?(?:web\s+)?search\s+(?:for|on|about)\b",
+        r"\bsearch\s+(?:the\s+web\s+)?(?:for|about)\b",
+    )
     current_markers = (
         "aujourd'hui", "actuel", "actuelle", "maintenant", "en ce moment",
         "derniere actualite", "dernieres nouvelles", "recent", "recente",
@@ -387,7 +397,10 @@ def _web_search_decision(
         "schedule", "price", "availability", "in stock", "release date",
     )
     has_url = bool(re.search(r"https?://|www\.[a-z0-9.-]+\.[a-z]{2,}", normalized))
-    if any(marker in normalized for marker in explicit_markers):
+    if (
+        any(marker in normalized for marker in explicit_markers)
+        or any(re.search(pattern, normalized) for pattern in explicit_patterns)
+    ):
         return {"mode": "auto", "should_search": True, "reason": "explicit_request"}
     if has_url:
         return {"mode": "auto", "should_search": True, "reason": "source_reference"}
@@ -2931,8 +2944,8 @@ Règles importantes:
     if web_decision["should_search"]:
         try:
             if os.environ.get("TAVILY_API_KEY"):
-                web_performed = True
                 sources = await tavily_search(message.content, max_results=5)
+                web_performed = True
         except Exception as exc:
             logger.error(f"Tavily (message/vision) error: {exc}")
             sources = []
@@ -3390,8 +3403,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 yield sse({"type": "phase", "phase": "searching"})
                 try:
                     if os.environ.get("TAVILY_API_KEY"):
-                        web_performed = True
                         sources = await tavily_search(message.content, max_results=5)
+                        web_performed = True
                 except Exception as e:
                     logger.error(f"Tavily error: {e}")
                     sources = []
@@ -3695,8 +3708,8 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 })
                 try:
                     if os.environ.get("TAVILY_API_KEY"):
-                        web_performed = True
                         sources = await tavily_search(message.content, max_results=8)
+                        web_performed = True
                 except Exception as exc:
                     logger.error("Tavily (work) error: %s", str(exc)[:300])
                     sources = []
