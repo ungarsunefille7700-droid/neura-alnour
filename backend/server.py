@@ -115,8 +115,8 @@ PLUS_WORK_BUDGET_UNITS = int(os.environ.get("PLUS_WORK_BUDGET_UNITS", "90"))
 # Stripe Key
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 
-# AI model selector profiles (text chat only). The 4 routers all run on Gemini via the Google API.
-# Each profile = Gemini model id + a persona overlay (tone only) + sampling params.
+# AI model selector profiles (text chat only), routed to the configured
+# OpenAI, Anthropic, or Google Gemini provider through the shared AI gateway.
 DEFAULT_MODEL = "chatgpt"  # backward compatible: same behaviour as before if no model is sent
 # Applied to every model: the base respect/safety rules always take precedence over the persona style.
 STYLE_PRECEDENCE = (
