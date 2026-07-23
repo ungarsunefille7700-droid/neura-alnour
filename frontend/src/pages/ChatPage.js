@@ -85,12 +85,11 @@ const mdComponents = {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
-const MODELS = [
-  { key: 'chatgpt', label: 'ChatGPT' },
-  { key: 'claude', label: 'Claude' },
-  { key: 'gemini', label: 'Gemini' },
-  { key: 'grok', label: 'Grok' },
-];
+const getStoredModelKey = () => {
+  const stored = localStorage.getItem('neura_model');
+  if (stored === 'grok') return 'gemini';
+  return ['chatgpt', 'claude', 'gemini'].includes(stored) ? stored : 'chatgpt';
+};
 
 // Per-model web-search status labels, translated for the active UI languages.
 const SEARCH_STATUS = {
@@ -196,7 +195,9 @@ const ChatPage = () => {
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [imageGenRemaining, setImageGenRemaining] = useState(null);
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('neura_model') || 'chatgpt');
+  const [selectedModel, setSelectedModel] = useState(getStoredModelKey);
+  const [modelOptions, setModelOptions] = useState([]);
+  const [activeModel, setActiveModel] = useState(null);
   const [webSearch, setWebSearch] = useState(() => localStorage.getItem('neura_websearch') === '1');
   const [devMode, setDevMode] = useState(() => localStorage.getItem('neura_devmode') === '1');
   const [devSessionId, setDevSessionId] = useState(null);
@@ -237,6 +238,14 @@ const ChatPage = () => {
       setCaptureQuota(null);
     }
   }, [conversationId]);
+
+  useEffect(() => {
+    if (currentConversation) {
+      fetchModelState(currentConversation, null);
+    } else {
+      fetchModelState(null, selectedModel);
+    }
+  }, [currentConversation]);
 
   useEffect(() => {
     scrollToBottom();
@@ -363,6 +372,39 @@ const ChatPage = () => {
     }
   };
 
+  const applyServerModel = (model) => {
+    if (!model?.model_id || !model?.provider || !model?.label) return;
+    setActiveModel(model);
+    if (model.selection_key && model.selection_key !== selectedModel) {
+      setSelectedModel(model.selection_key);
+      localStorage.setItem('neura_model', model.selection_key);
+    }
+  };
+
+  const fetchModelState = async (convId, requestedModel) => {
+    try {
+      const params = {};
+      if (convId) params.conversation_id = convId;
+      if (requestedModel) params.model = requestedModel;
+      const response = await axios.get(`${API}/chat/models`, {
+        headers: getAuthHeader(),
+        params
+      });
+      if (Array.isArray(response.data?.options)) setModelOptions(response.data.options);
+      applyServerModel(response.data?.active_model);
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching model state:', error);
+      return null;
+    }
+  };
+
+  const handleModelChange = (nextModel) => {
+    setSelectedModel(nextModel);
+    localStorage.setItem('neura_model', nextModel);
+    fetchModelState(currentConversation, nextModel);
+  };
+
   const fetchMessages = async (convId) => {
     try {
       const [messagesResponse, quotaResponse] = await Promise.all([
@@ -371,6 +413,7 @@ const ChatPage = () => {
       ]);
       setMessages(messagesResponse.data);
       setConversationQuota(quotaResponse.data);
+      applyServerModel(quotaResponse.data?.active_model);
       setCaptureQuota(quotaResponse.data?.capture || null);
       setActiveCaptureId(
         isMongoPlan && quotaResponse.data?.capture?.blocked
@@ -430,10 +473,13 @@ const ChatPage = () => {
           } else if (evt.type === 'delta') {
             acc += evt.content || '';
             setStreamContent(acc);
+          } else if (evt.type === 'model') {
+            applyServerModel(evt.model);
           } else if (evt.type === 'done') {
             if (Array.isArray(evt.sources)) sources = evt.sources;
             if (evt.conversation_id) convId = evt.conversation_id;
             if (evt.quota) setConversationQuota(evt.quota);
+            applyServerModel(evt.active_model || evt.model);
           } else if (evt.type === 'quota_limit') {
             quotaLimited = true;
             if (evt.quota) setConversationQuota(evt.quota);
@@ -568,6 +614,7 @@ const ChatPage = () => {
         lang: languageName,
         web_search: false
       }, { headers: getAuthHeader(), timeout: 15000 }).then((response) => {
+        applyServerModel(response.data?.active_model);
         if (!currentConversation && response.data?.conversation_id) {
           setCurrentConversation(response.data.conversation_id);
           navigate(`/chat/${response.data.conversation_id}`, { replace: true });
@@ -619,6 +666,7 @@ const ChatPage = () => {
       };
       setMessages(prev => [...prev, aiMessage]);
       if (response.data.quota) setConversationQuota(response.data.quota);
+      applyServerModel(response.data.active_model || response.data.model);
       if (response.data.image_quota) setChatImageQuota(response.data.image_quota);
       if (response.data.capture_id) setActiveCaptureId(response.data.capture_id);
       if (response.data.capture_quota) setCaptureQuota(response.data.capture_quota);
@@ -745,11 +793,13 @@ const ChatPage = () => {
     setCurrentConversation(null);
     setMessages([]);
     setConversationQuota(null);
+    setActiveModel(null);
     setActiveCaptureId(null);
     setCaptureQuota(null);
     setSelectedImage(null);
     setImagePreview(null);
     setSelectedDocument(null);
+    fetchModelState(null, selectedModel);
     navigate('/chat');
     setSidebarOpen(false);
   };
@@ -1168,13 +1218,24 @@ const ChatPage = () => {
               <span className="text-xs text-muted-foreground">{t('chat.model')}</span>
               <select
                 value={selectedModel}
-                onChange={(e) => { setSelectedModel(e.target.value); localStorage.setItem('neura_model', e.target.value); }}
+                onChange={(e) => handleModelChange(e.target.value)}
                 className="text-xs rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
                 data-testid="model-selector"
+                data-provider={activeModel?.provider || ''}
+                data-model-id={activeModel?.model_id || ''}
+                data-level={activeModel?.stage || ''}
+                disabled={!modelOptions.length}
               >
-                {MODELS.map((m) => (
-                  <option key={m.key} value={m.key}>{m.label}</option>
-                ))}
+                {modelOptions.length ? modelOptions.map((option) => {
+                  const model = option.key === selectedModel && activeModel
+                    ? activeModel
+                    : option.model;
+                  return (
+                    <option key={option.key} value={option.key}>{model.label}</option>
+                  );
+                }) : (
+                  <option value={selectedModel}>Modèle indisponible</option>
+                )}
               </select>
               <button
                 type="button"

@@ -256,7 +256,14 @@ async def _save_direct_chat_answer(conversation_id: str, user_id: str, answer: s
     )
 
 
-async def _save_direct_chat_exchange(conversation_id: str, user_id: str, user_text: str, answer: str, create_conversation: bool):
+async def _save_direct_chat_exchange(
+    conversation_id: str,
+    user_id: str,
+    user_text: str,
+    answer: str,
+    create_conversation: bool,
+    selected_model: str,
+):
     now = datetime.now(timezone.utc).isoformat()
     if create_conversation:
         title = user_text[:50] + "..." if len(user_text) > 50 else user_text
@@ -264,9 +271,15 @@ async def _save_direct_chat_exchange(conversation_id: str, user_id: str, user_te
             "id": conversation_id,
             "user_id": user_id,
             "title": title or "Discussion",
+            "selected_model": selected_model,
             "created_at": now,
             "updated_at": now
         })
+    else:
+        await db.conversations.update_one(
+            {"id": conversation_id, "user_id": user_id},
+            {"$set": {"selected_model": selected_model, "updated_at": now}},
+        )
     await db.messages.insert_one({
         "id": str(uuid.uuid4()),
         "conversation_id": conversation_id,
@@ -353,7 +366,7 @@ MODEL_PROFILES = {
         "medium_provider": "gemini",
         "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
         "mongo_medium_provider": "gemini",
-        "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash"),
+        "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
         "economic_provider": "gemini",
         "economic_model_id": os.environ.get("MONGO_GEMINI_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
         "persona": (
@@ -388,6 +401,35 @@ MODEL_PROFILES = {
         "params": {"max_tokens": 1024, "temperature": 0.9},
     },
 }
+
+SELECTABLE_MODEL_KEYS = ("chatgpt", "claude", "gemini")
+MODEL_DISPLAY_NAMES = {
+    "gpt-4o": "GPT-4o",
+    "gpt-4o-mini": "GPT-4o mini",
+    "gpt-4.1-nano": "GPT-4.1 nano",
+    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "claude-haiku-4-5": "Claude Haiku 4.5",
+    "claude-3-5-haiku-20241022": "Claude 3.5 Haiku",
+    "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-2.0-flash": "Gemini 2.0 Flash",
+    "gemini-2.0-flash-lite": "Gemini 2.0 Flash Lite",
+}
+MODEL_STAGE_LABELS = {
+    "advanced": "IA avancée",
+    "medium": "IA moyenne",
+    "economic": "IA économique",
+}
+
+
+def _normalize_model_key(requested_model: Optional[str]) -> str:
+    if requested_model in SELECTABLE_MODEL_KEYS:
+        return requested_model
+    # Old Grok conversations remain stored, but new requests use the real
+    # Gemini route instead of presenting that fallback as an xAI model.
+    if requested_model == "grok":
+        return "gemini"
+    return DEFAULT_MODEL
+
 
 # VIP Admin accounts - loaded from environment variables
 VIP_ADMINS = [
@@ -511,8 +553,10 @@ def _chat_history_limit(user: dict) -> int:
 
 def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_stage: str = "advanced") -> dict:
     """Resolve the multi-provider router and the quota stage for free/Mongo users."""
-    base = MODEL_PROFILES.get(requested_model, MODEL_PROFILES[DEFAULT_MODEL])
+    selection_key = _normalize_model_key(requested_model)
+    base = MODEL_PROFILES[selection_key]
     profile = {**base, "params": dict(base.get("params", {}))}
+    profile["selection_key"] = selection_key
     if _free_quota_applies(user):
         profile["model_id"] = base.get("free_advanced_model_id", base.get("model_id"))
         if quota_stage == "medium":
@@ -546,6 +590,68 @@ def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_sta
         profile["provider"] = "gemini"
         profile["model_id"] = "gemini-2.5-flash"
     return profile
+
+
+def _model_public(profile: dict, quota_stage: str) -> dict:
+    stage = quota_stage if quota_stage in MODEL_STAGE_LABELS else "advanced"
+    model_id = str(profile.get("model_id") or "")
+    display_name = MODEL_DISPLAY_NAMES.get(model_id, model_id)
+    level_label = MODEL_STAGE_LABELS[stage]
+    return {
+        "selection_key": profile.get("selection_key", DEFAULT_MODEL),
+        "provider": profile.get("provider", "gemini"),
+        "model_id": model_id,
+        "display_name": display_name,
+        "stage": stage,
+        "level_label": level_label,
+        "label": f"{display_name} — {level_label}",
+    }
+
+
+def _resolved_model_public(user: dict, requested_model: Optional[str], quota_stage: str) -> dict:
+    return _model_public(
+        _chat_profile_for_user(user, requested_model, quota_stage),
+        quota_stage,
+    )
+
+
+def _model_options_public(user: dict) -> list[dict]:
+    return [
+        {
+            "key": key,
+            "model": _resolved_model_public(user, key, "advanced"),
+        }
+        for key in SELECTABLE_MODEL_KEYS
+    ]
+
+
+async def _active_model_for_conversation(
+    user: dict,
+    conversation_id: Optional[str],
+    requested_model: Optional[str] = None,
+    conversation: Optional[dict] = None,
+) -> dict:
+    if conversation_id and conversation is None:
+        conversation = await db.conversations.find_one(
+            {"id": conversation_id, "user_id": user["id"]},
+            {"_id": 1, "selected_model": 1},
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation non trouvée")
+    selection_key = _normalize_model_key(
+        requested_model if requested_model is not None else (conversation or {}).get("selected_model")
+    )
+    stage = "advanced"
+    plan = _quota_plan(user)
+    if plan and conversation_id:
+        quota_doc = await _get_text_quota_doc(user["id"], conversation_id, False, plan)
+        if quota_doc:
+            stored_stage = quota_doc.get("stage", "advanced")
+            if stored_stage in MODEL_STAGE_LABELS:
+                stage = stored_stage
+            elif stored_stage == "blocked":
+                stage = "medium"
+    return _resolved_model_public(user, selection_key, stage)
 
 
 def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -1748,6 +1854,7 @@ async def _ai_memory_context(user: dict) -> str:
 async def send_message(message: MessageCreate, user: dict = Depends(get_current_user)):
     from emergentintegrations.llm.chat import LlmChat, UserMessage
 
+    selected_model = _normalize_model_key(message.model)
     early_direct_answer = None
     if not message.image_base64 and not message.document_text:
         early_direct_answer = _current_date_direct_answer(message.content, message.lang)
@@ -1760,14 +1867,22 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
                 message.content,
                 early_direct_answer,
                 not bool(message.conversation_id),
+                selected_model,
             ),
             "direct_date_chat_save",
         ))
+        active_model = (
+            await _active_model_for_conversation(user, direct_conversation_id, selected_model)
+            if message.conversation_id
+            else _resolved_model_public(user, selected_model, "advanced")
+        )
         return {
             "message": early_direct_answer,
             "conversation_id": direct_conversation_id,
             "sources": [],
             "direct": True,
+            "model": None,
+            "active_model": active_model,
         }
     
     # Create or get conversation
@@ -1779,6 +1894,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             "id": conversation_id,
             "user_id": user["id"],
             "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
+            "selected_model": selected_model,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }}, upsert=True)
@@ -1788,6 +1904,10 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         )
         if not owned_conversation:
             raise HTTPException(status_code=404, detail="Conversation non trouvée")
+        await db.conversations.update_one(
+            {"id": conversation_id, "user_id": user["id"]},
+            {"$set": {"selected_model": selected_model}},
+        )
 
     request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "message")
     request_record = request_gate["record"]
@@ -1956,6 +2076,8 @@ Règles importantes:
     # attempt so no message is ever duplicated.
     response = None
     last_err = None
+    routed_profile = None
+    routed_stage = "advanced"
     for attempt in range(3):
         try:
             if effective_image_data:
@@ -1982,6 +2104,13 @@ Règles importantes:
                     session_id=f"neura_{conversation_id}_vision",
                     system_message=vision_system
                 ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=1024)
+                routed_profile = {
+                    **MODEL_PROFILES["gemini"],
+                    "selection_key": "gemini",
+                    "provider": "gemini",
+                    "model_id": "gemini-2.5-flash",
+                }
+                routed_stage = "advanced"
             
                 # Add text message first, then image
                 text_content = message.content if message.content else "Analyse cette image s'il te plaît."
@@ -1996,7 +2125,9 @@ Règles importantes:
                 # Resolve the existing multi-provider router. Free conversations use
                 # the selected advanced profile first, then that profile's medium model.
                 # Paid subscriptions never enter the free fallback stage.
-                profile = _chat_profile_for_user(user, message.model, text_reservation["stage"])
+                profile = _chat_profile_for_user(user, selected_model, text_reservation["stage"])
+                routed_profile = profile
+                routed_stage = text_reservation["stage"]
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
                 if message.lang:
                     persona_system += (
@@ -2050,6 +2181,7 @@ Règles importantes:
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
     
     # Save AI response
+    routed_model = _model_public(routed_profile, routed_stage)
     ai_msg_id = f"chat-assistant:{request_record['_id']}"
     assistant_message = {
         "id": ai_msg_id,
@@ -2057,6 +2189,7 @@ Règles importantes:
         "user_id": user["id"],
         "role": "assistant",
         "content": response,
+        "model": routed_model,
         "request_id": request_record.get("request_id"),
         "created_at": datetime.now(timezone.utc).isoformat()
     }
@@ -2096,13 +2229,21 @@ Règles importantes:
     # Update conversation
     await db.conversations.update_one(
         {"id": conversation_id},
-        {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}}
+        {"$set": {
+            "selected_model": selected_model,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }}
+    )
+    active_model = await _active_model_for_conversation(
+        user, conversation_id, selected_model
     )
     
     result = {
         "message": response,
         "conversation_id": conversation_id,
         "sources": sources,
+        "model": routed_model,
+        "active_model": active_model,
         "quota": text_reservation.get("quota"),
         "quota_notices": quota_notices,
         "image_quota": image_quota,
@@ -2174,6 +2315,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
     async def event_generator():
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         request_record = None
+        selected_model = _normalize_model_key(message.model)
         text_reservation = {
             "applies": False,
             "stage": "paid",
@@ -2191,6 +2333,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     "id": conversation_id,
                     "user_id": user["id"],
                     "title": message.content[:50] + "..." if len(message.content) > 50 else message.content,
+                    "selected_model": selected_model,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }}, upsert=True)
@@ -2201,6 +2344,10 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 if not owned_conversation:
                     yield sse({"type": "error", "detail": "Conversation non trouvée."})
                     return
+                await db.conversations.update_one(
+                    {"id": conversation_id, "user_id": user["id"]},
+                    {"$set": {"selected_model": selected_model}},
+                )
 
             request_gate = await _begin_chat_request(user["id"], message.request_id, conversation_id, "stream")
             request_record = request_gate["record"]
@@ -2250,6 +2397,10 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     "message": direct_answer,
                     "conversation_id": conversation_id,
                     "sources": [],
+                    "model": None,
+                    "active_model": await _active_model_for_conversation(
+                        user, conversation_id, selected_model
+                    ),
                     "quota": _text_quota_public(
                         await _get_text_quota_doc(user["id"], conversation_id, False, _quota_plan(user)),
                         True,
@@ -2295,7 +2446,9 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             history = previous_history + [user_doc]
 
             # Build the system prompt (model persona + precedence + active language)
-            profile = _chat_profile_for_user(user, message.model, text_reservation["stage"])
+            profile = _chat_profile_for_user(user, selected_model, text_reservation["stage"])
+            routed_model = _model_public(profile, text_reservation["stage"])
+            yield sse({"type": "model", "model": routed_model})
             memory_result = await _save_ai_memory_from_text(user, message.content)
             memory_context = await _ai_memory_context(user)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
@@ -2354,6 +2507,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "user_id": user["id"],
                 "role": "assistant",
                 "content": answer,
+                "model": routed_model,
                 "request_id": request_record.get("request_id"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -2373,13 +2527,21 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             )
             await db.conversations.update_one(
                 {"id": conversation_id},
-                {"$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+                {"$set": {
+                    "selected_model": selected_model,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
+            active_model = await _active_model_for_conversation(
+                user, conversation_id, selected_model
             )
 
             result = {
                 "message": answer,
                 "conversation_id": conversation_id,
                 "sources": sources,
+                "model": routed_model,
+                "active_model": active_model,
                 "quota": quota_finish["quota"],
                 "quota_notices": text_reservation.get("notices", []) + quota_finish.get("notices", []),
             }
@@ -2397,6 +2559,33 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             yield sse({"type": "error", "detail": "Service IA temporairement indisponible."})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@api_router.get("/chat/models")
+async def get_chat_models(
+    conversation_id: Optional[str] = None,
+    model: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    conversation = None
+    if conversation_id:
+        conversation = await db.conversations.find_one(
+            {"id": conversation_id, "user_id": user["id"]},
+            {"_id": 1, "selected_model": 1},
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation non trouvée")
+    active_model = await _active_model_for_conversation(
+        user,
+        conversation_id,
+        model,
+        conversation,
+    )
+    return {
+        "options": _model_options_public(user),
+        "active_model": active_model,
+    }
+
 
 @api_router.get("/chat/conversations")
 async def get_conversations(user: dict = Depends(get_current_user)):
@@ -2437,13 +2626,20 @@ async def get_conversation_messages(conversation_id: str, user: dict = Depends(g
 @api_router.get("/chat/conversations/{conversation_id}/quota")
 async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_current_user)):
     conversation = await db.conversations.find_one(
-        {"id": conversation_id, "user_id": user["id"]}, {"_id": 1}
+        {"id": conversation_id, "user_id": user["id"]},
+        {"_id": 1, "selected_model": 1},
     )
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation non trouvée")
     plan = _quota_plan(user)
     if not plan:
-        return {**_text_quota_public(None, False), "capture": None}
+        return {
+            **_text_quota_public(None, False),
+            "capture": None,
+            "active_model": await _active_model_for_conversation(
+                user, conversation_id, conversation=conversation
+            ),
+        }
     doc = await _get_text_quota_doc(user["id"], conversation_id, False, plan)
     await _get_image_quota_doc(user["id"], False, plan)
     capture_scope = {"quota_plan": plan}
@@ -2453,7 +2649,13 @@ async def get_conversation_quota(conversation_id: str, user: dict = Depends(get_
         {"user_id": user["id"], "conversation_id": conversation_id, **capture_scope},
         sort=[("accepted_at", -1)],
     )
-    return {**_text_quota_public(doc, True, plan), "capture": _capture_quota_public(capture, True, plan)}
+    return {
+        **_text_quota_public(doc, True, plan),
+        "capture": _capture_quota_public(capture, True, plan),
+        "active_model": await _active_model_for_conversation(
+            user, conversation_id, conversation=conversation
+        ),
+    }
 
 
 @api_router.get("/chat/quota/images")

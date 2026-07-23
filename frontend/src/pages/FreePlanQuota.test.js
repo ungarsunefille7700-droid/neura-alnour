@@ -69,3 +69,17 @@ describe('quota client helpers', () => {
     expect(formatQuotaReset('invalid')).toBeNull();
   });
 });
+
+describe('server-driven model selector', () => {
+  test('uses backend model metadata and does not offer Grok', () => {
+    const chat = readPage('ChatPage.js');
+    expect(chat).toContain('`${API}/chat/models`');
+    expect(chat).toContain('response.data?.active_model');
+    expect(chat).toContain('evt.active_model || evt.model');
+    expect(chat).toContain('data-model-id={activeModel?.model_id');
+    expect(chat).toContain('data-provider={activeModel?.provider');
+    expect(chat).toContain('data-level={activeModel?.stage');
+    expect(chat).not.toContain("{ key: 'grok', label: 'Grok' }");
+    expect(chat).not.toContain('<option value="grok">');
+  });
+});

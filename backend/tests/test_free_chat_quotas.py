@@ -125,6 +125,7 @@ class FakeDB:
         self.mongo_image_generation_quotas = FakeCollection()
         self.messages = FakeCollection()
         self.chat_request_results = FakeCollection()
+        self.conversations = FakeCollection()
 
 
 @pytest.fixture
@@ -170,11 +171,91 @@ def test_multi_provider_router_and_paid_behavior_are_preserved():
     assert server._chat_profile_for_user(mongo_user(), "chatgpt", "economic")["model_id"] == "gpt-4.1-nano"
     assert server._chat_profile_for_user(mongo_user(), "claude", "advanced")["provider"] == "anthropic"
     assert server._chat_profile_for_user(mongo_user(), "claude", "economic")["model_id"] == "claude-3-5-haiku-20241022"
-    assert server._chat_profile_for_user(mongo_user(), "gemini", "medium")["model_id"] == "gemini-2.0-flash"
+    assert server._chat_profile_for_user(mongo_user(), "gemini", "medium")["model_id"] == "gemini-2.0-flash-lite"
     assert server._chat_profile_for_user(mongo_user(), "gemini", "economic")["model_id"] == "gemini-2.0-flash-lite"
     assert server._chat_profile_for_user(mongo_user(), "grok", "advanced")["provider"] == "gemini"
     assert server._chat_profile_for_user(standard_paid, "claude", "advanced")["provider"] == "gemini"
     assert server._chat_profile_for_user(neura_plus, "claude", "advanced")["provider"] == "anthropic"
+
+
+def test_model_metadata_comes_from_the_real_router_and_hides_grok():
+    user = mongo_user()
+    options = server._model_options_public(user)
+    assert [option["key"] for option in options] == ["chatgpt", "claude", "gemini"]
+    assert [option["model"]["label"] for option in options] == [
+        "GPT-4o — IA avancée",
+        "Claude Sonnet 4.5 — IA avancée",
+        "Gemini 2.5 Flash — IA avancée",
+    ]
+    assert server._resolved_model_public(user, "chatgpt", "medium") == {
+        "selection_key": "chatgpt",
+        "provider": "openai",
+        "model_id": "gpt-4o-mini",
+        "display_name": "GPT-4o mini",
+        "stage": "medium",
+        "level_label": "IA moyenne",
+        "label": "GPT-4o mini — IA moyenne",
+    }
+    assert server._resolved_model_public(user, "claude", "economic")["label"] == (
+        "Claude 3.5 Haiku — IA économique"
+    )
+    assert server._resolved_model_public(user, "gemini", "medium")["label"] == (
+        "Gemini 2.0 Flash Lite — IA moyenne"
+    )
+    legacy_grok = server._resolved_model_public(user, "grok", "advanced")
+    assert legacy_grok["selection_key"] == "gemini"
+    assert legacy_grok["provider"] == "gemini"
+    assert legacy_grok["model_id"] == "gemini-2.5-flash"
+
+
+def test_active_model_tracks_mongo_fallback_reset_and_legacy_history(quota_db):
+    user = mongo_user()
+    quota_db.conversations.docs["conversation"] = {
+        "id": "conversation",
+        "user_id": user["id"],
+        "selected_model": "claude",
+    }
+    advanced = run(server._active_model_for_conversation(user, "conversation"))
+    assert advanced["label"] == "Claude Sonnet 4.5 — IA avancée"
+
+    run(server._reserve_text_quota(user, "conversation", 8))
+    run(server._reserve_text_quota(user, "conversation", 8))
+    assert run(server._reserve_text_quota(user, "conversation", 8))["stage"] == "medium"
+    medium = run(server._active_model_for_conversation(user, "conversation"))
+    assert medium["provider"] == "anthropic"
+    assert medium["model_id"] == "claude-haiku-4-5"
+    assert medium["label"] == "Claude Haiku 4.5 — IA moyenne"
+
+    assert run(server._reserve_text_quota(user, "conversation", 8))["stage"] == "economic"
+    economic = run(server._active_model_for_conversation(user, "conversation"))
+    assert economic["model_id"] == "claude-3-5-haiku-20241022"
+    assert economic["label"] == "Claude 3.5 Haiku — IA économique"
+
+    quota_key = server._text_quota_key(user["id"], "conversation", "mongo")
+    quota_db.free_chat_quotas.docs[quota_key]["reset_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    renewed = run(server._active_model_for_conversation(user, "conversation"))
+    assert renewed["label"] == "Claude Sonnet 4.5 — IA avancée"
+
+    quota_db.conversations.docs["new-conversation"] = {
+        "id": "new-conversation",
+        "user_id": user["id"],
+        "selected_model": "gemini",
+    }
+    new_conversation = run(
+        server._active_model_for_conversation(user, "new-conversation")
+    )
+    assert new_conversation["label"] == "Gemini 2.5 Flash — IA avancée"
+
+    quota_db.conversations.docs["legacy-grok"] = {
+        "id": "legacy-grok",
+        "user_id": user["id"],
+        "selected_model": "grok",
+    }
+    legacy = run(server._active_model_for_conversation(user, "legacy-grok"))
+    assert legacy["label"] == "Gemini 2.5 Flash — IA avancée"
+    assert quota_db.conversations.docs["legacy-grok"]["selected_model"] == "grok"
 
 
 def test_every_paid_plan_bypasses_the_free_quota(quota_db):
