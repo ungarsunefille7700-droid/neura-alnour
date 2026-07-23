@@ -64,13 +64,6 @@ const LandingPage = () => {
       highlight: false
     },
     {
-      name: "Comme Toi",
-      price: "4,99€",
-      period: "/mois",
-      features: ["Historique 50 conversations", "1 image IA/jour", "Mode clair/sombre", "Conversations chiffrées"],
-      highlight: false
-    },
-    {
       name: "Mongo",
       price: "8,99€",
       period: "/mois",

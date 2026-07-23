@@ -366,7 +366,6 @@ VIP_ADMINS = [
 # Subscription Plans
 SUBSCRIPTION_PLANS = {
     "free": {"name": "Gratuit", "price_monthly": 0, "price_yearly": 0, "features": ["quota_text", "limited_screens", "islamic_module", "quiz"]},
-    "comme_toi": {"name": "Comme Toi", "price_monthly": 4.99, "price_yearly": 49.99, "features": ["history_50", "image_1_day", "themes", "encrypted"]},
     "mongo": {"name": "Mongo", "price_monthly": 8.99, "price_yearly": 89.99, "features": ["unlimited_screens", "unlimited_images", "full_history", "detailed_responses", "export"]},
     "pro": {"name": "Pro", "price_monthly": 14.99, "price_yearly": 89.99, "features": ["priority", "fast_responses", "coaching", "premium_themes", "adhan_hd", "offline", "memorization", "stats"]},
     "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
@@ -2314,7 +2313,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
     
     # VIP and mongo/pro/developer get unlimited
     if not is_vip and subscription not in ("mongo", "pro", "developer"):
-        # Free and comme_toi: 3 total free generations
+        # Plans without unlimited image entitlement: 3 total free generations
         used = user.get("image_generations_count", 0)
         if used >= 3:
             raise HTTPException(

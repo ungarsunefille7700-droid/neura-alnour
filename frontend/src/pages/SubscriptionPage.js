@@ -10,7 +10,6 @@ import { toast } from 'sonner';
 import { 
   CreditCard, 
   Check,
-  Star,
   Zap,
   Crown,
   Code,
@@ -137,29 +136,13 @@ const SubscriptionPage = () => {
       current: user?.subscription === 'free'
     },
     {
-      id: 'comme_toi',
-      name: 'Comme Toi',
-      icon: Star,
-      price: { monthly: 4.99, yearly: 49.99 },
-      description: 'Pour les utilisateurs réguliers',
-      features: [
-        'Tout du plan Gratuit',
-        'Historique 50 conversations',
-        '1 image IA par jour',
-        'Mode clair / sombre',
-        'Conversations chiffrées'
-      ],
-      highlight: false,
-      current: user?.subscription === 'comme_toi'
-    },
-    {
       id: 'mongo',
       name: 'Mongo',
       icon: Zap,
       price: { monthly: 8.99, yearly: 89.99 },
       description: 'Le plus populaire',
       features: [
-        'Tout du plan Comme Toi',
+        'Tout du plan Gratuit',
         'Screens illimités',
         'Images IA illimitées',
         'Historique complet',

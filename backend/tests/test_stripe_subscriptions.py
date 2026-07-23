@@ -97,17 +97,17 @@ class TestSubscriptionPlans:
         assert response.status_code == 200
         print("Plans endpoint returns 200 OK")
     
-    def test_get_subscription_plans_returns_all_5_plans(self, api_client):
-        """Plans endpoint should return all 5 subscription plans"""
+    def test_get_subscription_plans_excludes_retired_plan(self, api_client):
+        """Plans endpoint should return active plans without Comme Toi"""
         response = api_client.get(f"{BASE_URL}/api/subscriptions/plans")
         data = response.json()
         
-        expected_plans = ["free", "comme_toi", "mongo", "pro", "developer"]
+        expected_plans = ["free", "mongo", "pro", "developer", "neura_plus", "neura_ultra"]
         for plan_id in expected_plans:
             assert plan_id in data, f"Plan {plan_id} not found"
-        
-        assert len(data) == 5
-        print(f"All 5 plans found: {list(data.keys())}")
+        assert "comme_toi" not in data
+        assert len(data) == len(expected_plans)
+        print(f"Active plans found: {list(data.keys())}")
     
     def test_subscription_plan_structure(self, api_client):
         """Each plan should have name, price_monthly, price_yearly, features"""
@@ -130,10 +130,11 @@ class TestSubscriptionPlans:
         
         expected_prices = {
             "free": (0, 0),
-            "comme_toi": (4.99, 49.99),
             "mongo": (8.99, 89.99),
             "pro": (14.99, 89.99),
-            "developer": (19.99, 119.99)
+            "developer": (19.99, 119.99),
+            "neura_plus": (119.99, 1199.99),
+            "neura_ultra": (299.99, 2999.99),
         }
         
         for plan_id, (monthly, yearly) in expected_prices.items():
@@ -149,7 +150,7 @@ class TestCheckoutSession:
     def test_checkout_requires_auth(self, api_client):
         """Checkout endpoint should require authentication"""
         response = api_client.post(f"{BASE_URL}/api/subscriptions/checkout", json={
-            "plan": "comme_toi",
+            "plan": "mongo",
             "billing_period": "monthly",
             "origin_url": "https://noor-dev.preview.emergentagent.com"
         })
@@ -176,24 +177,15 @@ class TestCheckoutSession:
         assert response.status_code == 400
         print("Free plan correctly rejected from checkout")
     
-    def test_checkout_creates_session_monthly(self, test_user_client):
-        """Checkout should create Stripe session for monthly billing"""
+    def test_checkout_rejects_retired_plan(self, test_user_client):
+        """Checkout should reject the retired Comme Toi plan"""
         response = test_user_client.post(f"{BASE_URL}/api/subscriptions/checkout", json={
             "plan": "comme_toi",
             "billing_period": "monthly",
             "origin_url": "https://noor-dev.preview.emergentagent.com"
         })
-        
-        assert response.status_code == 200
-        data = response.json()
-        
-        assert "url" in data, "Response should contain 'url'"
-        assert "session_id" in data, "Response should contain 'session_id'"
-        assert data["url"].startswith("https://checkout.stripe.com"), f"URL should be Stripe checkout URL, got: {data['url'][:50]}"
-        assert len(data["session_id"]) > 0, "session_id should not be empty"
-        
-        print(f"Checkout session created: {data['session_id'][:30]}...")
-        print(f"Stripe URL: {data['url'][:80]}...")
+        assert response.status_code == 400
+        assert response.json().get("detail") == "Plan invalide"
     
     def test_checkout_creates_session_yearly(self, test_user_client):
         """Checkout should create Stripe session for yearly billing"""

@@ -17,12 +17,18 @@ describe('free plan quota wording', () => {
     expect(landing).not.toContain('Messages illimités');
   });
 
-  test('keeps the paid cards and their prices present', () => {
+  test('removes Comme Toi while keeping every other paid card and price', () => {
     const subscription = readPage('SubscriptionPage.js');
-    ['Comme Toi', 'Mongo', 'Pro', 'Développeur', 'Neura+', 'Neura Ultra'].forEach((name) => {
+    const landing = readPage('LandingPage.js');
+    expect(subscription).not.toContain("id: 'comme_toi'");
+    expect(subscription).not.toContain("name: 'Comme Toi'");
+    expect(subscription).not.toContain('price: { monthly: 4.99');
+    expect(landing).not.toContain('name: "Comme Toi"');
+    expect(landing).not.toContain('price: "4,99€"');
+    ['Mongo', 'Pro', 'Développeur', 'Neura+', 'Neura Ultra'].forEach((name) => {
       expect(subscription).toContain(`name: '${name}'`);
     });
-    ['4.99', '8.99', '14.99', '19.99', '119.99', '299.99'].forEach((price) => {
+    ['8.99', '14.99', '19.99', '119.99', '299.99'].forEach((price) => {
       expect(subscription).toContain(price);
     });
   });
