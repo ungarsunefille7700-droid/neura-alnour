@@ -46,6 +46,33 @@ type HomeChatMessage = {
 };
 
 const GENERAL_CHAT_PROJECT_ID = '000000000000000000000001';
+const SESSION_RESTORE_TIMEOUT_MS = 15 * 1000;
+
+const restoreSessionBeforeDeadline = async (
+  restore: () => Promise<NeuraCoSession>
+): Promise<NeuraCoSession> => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      restore(),
+      new Promise<NeuraCoSession>((resolve) => {
+        timeout = setTimeout(() => resolve({
+          status: 'error',
+          error: 'La restauration de session a expiré. Vérifiez votre connexion puis réessayez.'
+        }), SESSION_RESTORE_TIMEOUT_MS);
+      })
+    ]);
+  } catch (error) {
+    return {
+      status: 'error',
+      error: error instanceof Error
+        ? error.message
+        : 'Impossible de restaurer la session NeuraCo.'
+    };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
 
 const DEFAULT_ACCESSIBILITY: NeuraCoAccessibilitySettings = {
   theme: 'system',
@@ -129,6 +156,7 @@ const copy = {
     language: 'Langue',
     signOut: 'Se déconnecter',
     connecting: 'Connexion sécurisée...',
+    retrySession: 'Réessayer la connexion',
     signInTitle: 'Connectez-vous à NeuraCo',
     signInText:
       'Utilisez votre compte Neura Al Nour. Le serveur vérifie votre abonnement avant tout accès.',
@@ -234,6 +262,7 @@ const copy = {
     language: 'Language',
     signOut: 'Sign out',
     connecting: 'Secure sign-in...',
+    retrySession: 'Retry connection',
     signInTitle: 'Sign in to NeuraCo',
     signInText:
       'Use your Neura Al Nour account. The server checks your plan before granting access.',
@@ -284,6 +313,7 @@ interface AuthScreenProps {
   onRegister: (registration: NeuraCoRegistration) => Promise<void>;
   onGoogle: () => Promise<void>;
   onLogout: () => Promise<void>;
+  onRetrySession: () => Promise<void>;
 }
 
 const AuthScreen = ({
@@ -294,7 +324,8 @@ const AuthScreen = ({
   onLogin,
   onRegister,
   onGoogle,
-  onLogout
+  onLogout,
+  onRetrySession
 }: AuthScreenProps) => {
   const text = copy[locale];
   const [email, setEmail] = useState('');
@@ -584,7 +615,17 @@ const AuthScreen = ({
                 </>
               )}
               {!resetMode && session.status === 'error' && (
-                <p className="auth-error" role="alert">{session.error}</p>
+                <>
+                  <p className="auth-error" role="alert">{session.error}</p>
+                  <button
+                    className="button button-secondary button-full"
+                    type="button"
+                    onClick={() => void onRetrySession()}
+                    disabled={busy}
+                  >
+                    {text.retrySession}
+                  </button>
+                </>
               )}
               {formError && <p className="auth-error" role="alert">{formError}</p>}
               {resetError && <p className="auth-error" role="alert">{resetError}</p>}
@@ -889,7 +930,8 @@ function App() {
     }).catch(() => {
       if (active) setAppInfo(browserInfo);
     });
-    window.neuraco?.restoreSession().then((restored) => {
+    const desktop = window.neuraco;
+    if (desktop) restoreSessionBeforeDeadline(() => desktop.restoreSession()).then((restored) => {
       if (active) setSession(restored);
     }).catch(() => {
       if (active) {
@@ -1138,6 +1180,9 @@ function App() {
         onRegister={(registration) => runAuthAction(() => window.neuraco!.register(registration))}
         onGoogle={() => runAuthAction(() => window.neuraco!.loginWithGoogle())}
         onLogout={() => runAuthAction(() => window.neuraco!.logout())}
+        onRetrySession={() => runAuthAction(
+          () => restoreSessionBeforeDeadline(() => window.neuraco!.restoreSession())
+        )}
       />
     );
   }

@@ -203,6 +203,70 @@ describe('NeuraCo desktop foundation', () => {
     await act(async () => root.unmount());
     container.remove();
     delete window.neuraco;
+    vi.useRealTimers();
+  });
+
+  it('quitte le chargement bloque et permet de retenter la session', async () => {
+    vi.useFakeTimers();
+    const restoreSession = vi.fn()
+      .mockImplementationOnce(() => new Promise<never>(() => undefined))
+      .mockResolvedValueOnce({
+        status: 'authenticated',
+        user: {
+          id: 'user-retry',
+          email: 'member@example.com',
+          name: 'Member',
+          subscription: 'neura_ultra',
+          is_vip: false
+        },
+        entitlement: {
+          neuraco_access: true,
+          plan: 'neura_ultra',
+          reason: 'subscription_active'
+        },
+        persistent: true
+      });
+    window.neuraco = {
+      ...createWorkspaceMocks(),
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.4',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession,
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Connexion sécurisée');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(container.textContent).toContain('La restauration de session a expiré');
+    expect(container.textContent).toContain('Réessayer la connexion');
+    expect(container.textContent).not.toContain('Connexion sécurisée...');
+
+    const retryButton = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Réessayer la connexion')
+    );
+    await act(async () => {
+      retryButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('NeuraCo est prêt');
   });
 
   it('renders the real foundation without exposing unavailable tools', async () => {

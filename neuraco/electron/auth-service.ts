@@ -25,6 +25,7 @@ const WEBSITE_URL = (
   || 'https://neura-alnour.vercel.app'
 ).replace(/\/$/, '');
 const GOOGLE_TIMEOUT_MS = 90 * 1000;
+const AUTH_API_TIMEOUT_MS = 12 * 1000;
 
 interface LoginResponse {
   token: string;
@@ -50,26 +51,60 @@ const tokenPath = () => path.join(app.getPath('userData'), 'session.bin');
 const apiRequest = async <T>(
   route: string,
   options: RequestInit = {},
-  token?: string
+  token?: string,
+  timeoutMs?: number
 ): Promise<T> => {
   const headers = new Headers(options.headers);
   headers.set('Accept', 'application/json');
   if (options.body) headers.set('Content-Type', 'application/json');
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const response = await net.fetch(`${API_BASE_URL}${route}`, {
-    ...options,
-    headers
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = payload?.detail;
-    const message = typeof detail === 'string'
-      ? detail
-      : detail?.message || 'La requête NeuraCo a échoué.';
-    throw new ApiError(message, response.status, detail);
+  const timeoutController = timeoutMs ? new AbortController() : null;
+  let timedOut = false;
+  const abortFromCaller = () => timeoutController?.abort(options.signal?.reason);
+  if (timeoutController && options.signal) {
+    if (options.signal.aborted) abortFromCaller();
+    else options.signal.addEventListener('abort', abortFromCaller, { once: true });
   }
-  return payload as T;
+  const timeout = timeoutController && timeoutMs
+    ? setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort();
+    }, timeoutMs)
+    : null;
+
+  try {
+    const response = await net.fetch(`${API_BASE_URL}${route}`, {
+      ...options,
+      headers,
+      signal: timeoutController?.signal || options.signal
+    });
+    let payload: any = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (timedOut) throw error;
+    }
+    if (!response.ok) {
+      const detail = payload?.detail;
+      const message = typeof detail === 'string'
+        ? detail
+        : detail?.message || 'La requête NeuraCo a échoué.';
+      throw new ApiError(message, response.status, detail);
+    }
+    return payload as T;
+  } catch (error) {
+    if (timedOut) {
+      throw new ApiError(
+        'Le serveur NeuraCo ne repond pas. Verifiez votre connexion puis reessayez.',
+        408
+      );
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abortFromCaller);
+  }
 };
 
 export const publicApiRequest = <T>(
@@ -149,8 +184,13 @@ const sessionFromToken = async (
   persist: boolean
 ): Promise<NeuraCoSession> => {
   const [user, entitlement] = await Promise.all([
-    apiRequest<NeuraCoUser>('/auth/me', {}, token),
-    apiRequest<NeuraCoEntitlement>('/neuraco/access', {}, token)
+    apiRequest<NeuraCoUser>('/auth/me', {}, token, AUTH_API_TIMEOUT_MS),
+    apiRequest<NeuraCoEntitlement>(
+      '/neuraco/access',
+      {},
+      token,
+      AUTH_API_TIMEOUT_MS
+    )
   ]);
   if (!entitlement.neuraco_access) {
     return deniedSession(user, entitlement);
@@ -231,7 +271,7 @@ export const loginWithPassword = async (
         password: credentials.password,
         two_factor_code: credentials.twoFactorCode?.trim() || undefined
       })
-    });
+    }, undefined, AUTH_API_TIMEOUT_MS);
     return await sessionFromToken(response.token, true);
   } catch (error) {
     return sessionError(error);
@@ -262,7 +302,7 @@ export const registerWithPassword = async (
     const response = await apiRequest<LoginResponse>('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ name, email, password: registration.password })
-    });
+    }, undefined, AUTH_API_TIMEOUT_MS);
     return await sessionFromToken(response.token, true);
   } catch (error) {
     return sessionError(error);
@@ -343,7 +383,7 @@ const startGoogleLogin = async (): Promise<NeuraCoSession> => {
     const response = await apiRequest<ExchangeResponse>('/neuraco/auth/exchange', {
       method: 'POST',
       body: JSON.stringify({ code })
-    });
+    }, undefined, AUTH_API_TIMEOUT_MS);
     const persistent = await saveToken(response.token);
     return {
       status: 'authenticated',

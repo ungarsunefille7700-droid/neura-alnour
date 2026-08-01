@@ -598,7 +598,7 @@ const activateAuthenticatedSessionWithAudit = async (
   try {
     const session = await activateAuthenticatedSession(operation);
     const authenticated = session.status === 'authenticated';
-    await audit({
+    void audit({
       category: 'connection',
       action,
       status: authenticated ? 'completed' : 'failed',
@@ -626,7 +626,7 @@ const activateAuthenticatedSessionWithAudit = async (
     }
     return session;
   } catch (error) {
-    await audit({
+    void audit({
       category: 'connection',
       action,
       status: 'failed',
