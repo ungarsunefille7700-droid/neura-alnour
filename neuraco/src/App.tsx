@@ -26,6 +26,7 @@ import type {
   NeuraCoAppInfo,
   NeuraCoAppLockState,
   NeuraCoLoginCredentials,
+  NeuraCoRegistration,
   NeuraCoProjectSnapshot,
   NeuraCoSession,
   NeuraCoSelfCheck
@@ -136,6 +137,15 @@ const copy = {
     resetDone: 'Mot de passe modifié. Vous pouvez vous connecter.',
     signIn: 'Se connecter',
     google: 'Continuer avec Google',
+    or: 'ou',
+    createAccount: 'Créer un compte',
+    createAccountTitle: 'Créez votre compte',
+    createAccountText: 'Commencez avec Google ou votre adresse e-mail.',
+    fullName: 'Nom complet',
+    confirmPassword: 'Confirmer le mot de passe',
+    passwordMismatch: 'Les mots de passe ne correspondent pas.',
+    alreadyRegistered: 'Vous avez déjà un compte ?',
+    newToNeuraCo: 'Nouveau sur NeuraCo ?',
     noAccess: 'Accès NeuraCo non actif',
     noAccessText:
       'Un abonnement Plus ou supérieur actif est nécessaire pour utiliser NeuraCo.',
@@ -232,6 +242,15 @@ const copy = {
     resetDone: 'Password changed. You can sign in.',
     signIn: 'Sign in',
     google: 'Continue with Google',
+    or: 'or',
+    createAccount: 'Create an account',
+    createAccountTitle: 'Create your account',
+    createAccountText: 'Continue with Google or use your email address.',
+    fullName: 'Full name',
+    confirmPassword: 'Confirm password',
+    passwordMismatch: 'The passwords do not match.',
+    alreadyRegistered: 'Already have an account?',
+    newToNeuraCo: 'New to NeuraCo?',
     noAccess: 'NeuraCo access inactive',
     noAccessText:
       'An active Plus or higher plan is required to use NeuraCo.',
@@ -242,7 +261,7 @@ const copy = {
 
 const browserInfo: NeuraCoAppInfo = {
   name: 'NeuraCo',
-  version: '1.0.0',
+  version: '1.0.1',
   platform: 'web',
   architecture: '-',
   packaged: false
@@ -254,6 +273,7 @@ interface AuthScreenProps {
   busy: boolean;
   onLocaleChange: (locale: Locale) => void;
   onLogin: (credentials: NeuraCoLoginCredentials) => Promise<void>;
+  onRegister: (registration: NeuraCoRegistration) => Promise<void>;
   onGoogle: () => Promise<void>;
   onLogout: () => Promise<void>;
 }
@@ -264,12 +284,17 @@ const AuthScreen = ({
   busy,
   onLocaleChange,
   onLogin,
+  onRegister,
   onGoogle,
   onLogout
 }: AuthScreenProps) => {
   const text = copy[locale];
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [name, setName] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [formError, setFormError] = useState('');
   const [twoFactorCode, setTwoFactorCode] = useState('');
   const [resetMode, setResetMode] = useState(false);
   const [resetSent, setResetSent] = useState(false);
@@ -377,20 +402,88 @@ const AuthScreen = ({
           </>
         ) : (
           <>
-            <p className="section-label">NeuraCo Desktop</p>
-            <h1>{resetMode ? text.resetTitle : text.signInTitle}</h1>
-            <p>{resetMode ? text.resetSent : text.signInText}</p>
+            <h1>
+              {resetMode
+                ? text.resetTitle
+                : authMode === 'register'
+                  ? text.createAccountTitle
+                  : text.signInTitle}
+            </h1>
+            <p>
+              {resetMode
+                ? text.resetSent
+                : authMode === 'register'
+                  ? text.createAccountText
+                  : text.signInText}
+            </p>
+            {!resetMode && (
+              <p className="auth-mode-switch">
+                <span>
+                  {authMode === 'register' ? text.alreadyRegistered : text.newToNeuraCo}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(authMode === 'register' ? 'login' : 'register');
+                    setFormError('');
+                    setConfirmPassword('');
+                  }}
+                >
+                  {authMode === 'register' ? text.signIn : text.createAccount}
+                </button>
+              </p>
+            )}
+            {!resetMode && (
+              <>
+                <button
+                  className="button button-google button-full auth-google-primary"
+                  type="button"
+                  onClick={() => void onGoogle()}
+                  disabled={busy}
+                >
+                  <span className="google-mark" aria-hidden="true">G</span>
+                  {text.google}
+                </button>
+                <div className="auth-divider"><span>{text.or}</span></div>
+              </>
+            )}
             <form
               className="auth-form"
               onSubmit={(event) => {
                 event.preventDefault();
+                setFormError('');
                 if (resetMode) {
                   void (resetSent ? confirmReset() : requestReset());
+                  return;
+                }
+                if (authMode === 'register') {
+                  if (password !== confirmPassword) {
+                    setFormError(text.passwordMismatch);
+                    return;
+                  }
+                  void onRegister({ name, email, password });
                   return;
                 }
                 void onLogin({ email, password, twoFactorCode });
               }}
             >
+              {!resetMode && authMode === 'register' && (
+                <label>
+                  <span>{text.fullName}</span>
+                  <span className="input-shell">
+                    <UserRound size={17} aria-hidden="true" />
+                    <input
+                      type="text"
+                      autoComplete="name"
+                      value={name}
+                      onChange={(event) => setName(event.target.value)}
+                      minLength={2}
+                      maxLength={120}
+                      required
+                    />
+                  </span>
+                </label>
+              )}
               <label>
                 <span>{text.email}</span>
                 <span className="input-shell">
@@ -411,16 +504,32 @@ const AuthScreen = ({
                     <KeyRound size={17} aria-hidden="true" />
                     <input
                       type="password"
-                      autoComplete="current-password"
+                      autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
-                      minLength={6}
+                      minLength={authMode === 'register' ? 8 : 6}
                       required
                     />
                   </span>
                 </label>
               )}
-              {!resetMode && session.requiresTwoFactor && (
+              {!resetMode && authMode === 'register' && (
+                <label>
+                  <span>{text.confirmPassword}</span>
+                  <span className="input-shell">
+                    <KeyRound size={17} aria-hidden="true" />
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(event) => setConfirmPassword(event.target.value)}
+                      minLength={8}
+                      required
+                    />
+                  </span>
+                </label>
+              )}
+              {!resetMode && authMode === 'login' && session.requiresTwoFactor && (
                 <label>
                   <span>{text.twoFactorCode}</span>
                   <span className="input-shell">
@@ -469,6 +578,7 @@ const AuthScreen = ({
               {!resetMode && session.status === 'error' && (
                 <p className="auth-error" role="alert">{session.error}</p>
               )}
+              {formError && <p className="auth-error" role="alert">{formError}</p>}
               {resetError && <p className="auth-error" role="alert">{resetError}</p>}
               {resetNotice && <p className="auth-notice" role="status">{resetNotice}</p>}
               <button
@@ -478,32 +588,25 @@ const AuthScreen = ({
               >
                 {resetMode
                   ? (resetSent ? text.resetConfirm : text.resetRequest)
-                  : (busy ? text.connecting : text.signIn)}
+                  : (busy
+                    ? text.connecting
+                    : authMode === 'register'
+                      ? text.createAccount
+                      : text.signIn)}
               </button>
-              <button
-                className="auth-link-button"
-                type="button"
-                onClick={() => {
-                  setResetMode(!resetMode);
-                  setResetError('');
-                  setResetNotice('');
-                }}
-              >
-                {resetMode ? text.backToLogin : text.forgotPassword}
-              </button>
-              {!resetMode && (
-                <>
-                  <div className="auth-divider"><span>ou</span></div>
-                  <button
-                    className="button button-google button-full"
-                    type="button"
-                    onClick={() => void onGoogle()}
-                    disabled={busy}
-                  >
-                    <span className="google-mark" aria-hidden="true">G</span>
-                    {text.google}
-                  </button>
-                </>
+              {(resetMode || authMode === 'login') && (
+                <button
+                  className="auth-link-button"
+                  type="button"
+                  onClick={() => {
+                    setResetMode(!resetMode);
+                    setResetError('');
+                    setResetNotice('');
+                    setFormError('');
+                  }}
+                >
+                  {resetMode ? text.backToLogin : text.forgotPassword}
+                </button>
               )}
             </form>
           </>
@@ -958,6 +1061,7 @@ function App() {
         busy={authBusy}
         onLocaleChange={setLocale}
         onLogin={(credentials) => runAuthAction(() => window.neuraco!.login(credentials))}
+        onRegister={(registration) => runAuthAction(() => window.neuraco!.register(registration))}
         onGoogle={() => runAuthAction(() => window.neuraco!.loginWithGoogle())}
         onLogout={() => runAuthAction(() => window.neuraco!.logout())}
       />

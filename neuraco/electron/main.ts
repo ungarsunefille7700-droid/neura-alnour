@@ -26,6 +26,7 @@ import {
   type NeuraCoAdminPromotionCreate,
   type NeuraCoAdminRefundRecord,
   type NeuraCoLoginCredentials,
+  type NeuraCoRegistration,
   type NeuraCoAppLockSettingsUpdate,
   type NeuraCoAppInfo,
   type NeuraCoArtifactCreate,
@@ -98,6 +99,7 @@ import {
   authenticatedApiRequest,
   loginWithGoogle,
   loginWithPassword,
+  registerWithPassword,
   logout,
   restoreSession
 } from './auth-service';
@@ -589,7 +591,7 @@ const activateAuthenticatedSession = async (
 };
 
 const activateAuthenticatedSessionWithAudit = async (
-  action: 'session_restored' | 'password_login' | 'google_login',
+  action: 'session_restored' | 'password_login' | 'registration' | 'google_login',
   operation: () => Promise<Awaited<ReturnType<typeof restoreSession>>>
 ): Promise<Awaited<ReturnType<typeof restoreSession>>> => {
   const startedAt = Date.now();
@@ -606,6 +608,8 @@ const activateAuthenticatedSessionWithAudit = async (
       details: {
         method: action === 'google_login'
           ? 'google'
+          : action === 'registration'
+            ? 'registration'
           : action === 'password_login'
             ? 'password'
             : 'stored_session',
@@ -2414,6 +2418,17 @@ const registerIpcHandlers = (): void => {
       return activateAuthenticatedSessionWithAudit(
         'password_login',
         () => loginWithPassword(credentials)
+      );
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.authRegister,
+    (event, registration: NeuraCoRegistration) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return activateAuthenticatedSessionWithAudit(
+        'registration',
+        () => registerWithPassword(registration)
       );
     }
   );

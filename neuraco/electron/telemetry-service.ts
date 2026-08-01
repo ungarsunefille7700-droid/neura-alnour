@@ -4,6 +4,7 @@ export type TechnicalTelemetryEvent =
   | 'app_started'
   | 'session_restored'
   | 'password_login'
+  | 'registration'
   | 'google_login'
   | 'self_check_completed'
   | 'update_check_completed'

@@ -12,6 +12,7 @@ import {
   type NeuraCoAppLockSettingsUpdate,
   type NeuraCoAppLockState,
   type NeuraCoLoginCredentials,
+  type NeuraCoRegistration,
   type NeuraCoDesktopApi,
   type NeuraCoAgentRequest,
   type NeuraCoArtifactCreate,
@@ -90,6 +91,8 @@ const desktopApi: NeuraCoDesktopApi = Object.freeze({
   restoreSession: () => ipcRenderer.invoke(IPC_CHANNELS.authRestore),
   login: (credentials: NeuraCoLoginCredentials) =>
     ipcRenderer.invoke(IPC_CHANNELS.authLogin, credentials),
+  register: (registration: NeuraCoRegistration) =>
+    ipcRenderer.invoke(IPC_CHANNELS.authRegister, registration),
   loginWithGoogle: () => ipcRenderer.invoke(IPC_CHANNELS.authGoogle),
   logout: () => ipcRenderer.invoke(IPC_CHANNELS.authLogout),
   getAccount: () => ipcRenderer.invoke(IPC_CHANNELS.accountGet),

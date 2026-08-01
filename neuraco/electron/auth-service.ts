@@ -11,6 +11,7 @@ import { randomBytes } from 'node:crypto';
 import type {
   NeuraCoEntitlement,
   NeuraCoLoginCredentials,
+  NeuraCoRegistration,
   NeuraCoSession,
   NeuraCoUser
 } from './ipc-contract';
@@ -230,6 +231,37 @@ export const loginWithPassword = async (
         password: credentials.password,
         two_factor_code: credentials.twoFactorCode?.trim() || undefined
       })
+    });
+    return await sessionFromToken(response.token, true);
+  } catch (error) {
+    return sessionError(error);
+  }
+};
+
+export const registerWithPassword = async (
+  registration: NeuraCoRegistration
+): Promise<NeuraCoSession> => {
+  const name = registration.name.trim();
+  const email = registration.email.trim().toLowerCase();
+  if (
+    name.length < 2
+    || name.length > 120
+    || email.length < 3
+    || email.length > 254
+    || !email.includes('@')
+    || registration.password.length < 8
+    || registration.password.length > 256
+  ) {
+    return {
+      status: 'error',
+      error: 'Nom, adresse e-mail ou mot de passe invalide.'
+    };
+  }
+
+  try {
+    const response = await apiRequest<LoginResponse>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ name, email, password: registration.password })
     });
     return await sessionFromToken(response.token, true);
   } catch (error) {

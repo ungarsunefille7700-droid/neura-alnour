@@ -7,6 +7,7 @@ export const IPC_CHANNELS = {
   accessibilityUpdate: 'neuraco:accessibility-update',
   authRestore: 'neuraco:auth-restore',
   authLogin: 'neuraco:auth-login',
+  authRegister: 'neuraco:auth-register',
   authGoogle: 'neuraco:auth-google',
   authLogout: 'neuraco:auth-logout',
   authSessionEvent: 'neuraco:auth-session-event',
@@ -316,6 +317,7 @@ export interface NeuraCoDesktopApi {
   runSelfCheck: () => Promise<NeuraCoSelfCheck>;
   restoreSession: () => Promise<NeuraCoSession>;
   login: (credentials: NeuraCoLoginCredentials) => Promise<NeuraCoSession>;
+  register: (registration: NeuraCoRegistration) => Promise<NeuraCoSession>;
   loginWithGoogle: () => Promise<NeuraCoSession>;
   logout: () => Promise<NeuraCoSession>;
   getAccount: () => Promise<NeuraCoAccountDashboard>;
@@ -864,6 +866,12 @@ export interface NeuraCoLoginCredentials {
   email: string;
   password: string;
   twoFactorCode?: string;
+}
+
+export interface NeuraCoRegistration {
+  name: string;
+  email: string;
+  password: string;
 }
 
 export interface NeuraCoUser {

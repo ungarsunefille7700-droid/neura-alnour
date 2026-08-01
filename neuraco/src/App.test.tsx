@@ -251,6 +251,7 @@ describe('NeuraCo desktop foundation', () => {
         persistent: true
       }),
       login: vi.fn(),
+      register: vi.fn(),
       loginWithGoogle: vi.fn(),
       logout: vi.fn()
     };
@@ -314,6 +315,7 @@ describe('NeuraCo desktop foundation', () => {
       runSelfCheck: vi.fn(),
       restoreSession: vi.fn().mockResolvedValue({ status: 'signed_out' }),
       login: vi.fn(),
+      register: vi.fn(),
       loginWithGoogle: vi.fn().mockResolvedValue(authenticatedSession),
       logout: vi.fn()
     };
@@ -339,6 +341,93 @@ describe('NeuraCo desktop foundation', () => {
     expect(window.neuraco?.loginWithGoogle).toHaveBeenCalledOnce();
     expect(container.textContent).toContain('NeuraCo est prêt');
     expect(container.textContent).toContain('Member');
+  });
+
+  it('creates an account through the protected desktop registration bridge', async () => {
+    const registeredSession = {
+      status: 'authenticated' as const,
+      user: {
+        id: 'user-2',
+        email: 'new.member@example.com',
+        name: 'New Member',
+        subscription: 'neura_plus',
+        is_vip: false
+      },
+      entitlement: {
+        neuraco_access: true,
+        plan: 'neura_plus',
+        reason: 'subscription_active'
+      },
+      persistent: true
+    };
+    const register = vi.fn().mockResolvedValue(registeredSession);
+    window.neuraco = {
+      ...createWorkspaceMocks(),
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.1',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({ status: 'signed_out' }),
+      login: vi.fn(),
+      register,
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const createAccountSwitch = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.trim() === 'Créer un compte'
+    );
+    await act(async () => {
+      createAccountSwitch?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Créez votre compte');
+    const nameInput = container.querySelector<HTMLInputElement>('input[autocomplete="name"]');
+    const emailInput = container.querySelector<HTMLInputElement>('input[type="email"]');
+    const passwordInputs = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[type="password"]')
+    );
+    const inputSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value'
+    )?.set;
+
+    await act(async () => {
+      inputSetter?.call(nameInput, 'New Member');
+      nameInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      inputSetter?.call(emailInput, 'new.member@example.com');
+      emailInput?.dispatchEvent(new Event('input', { bubbles: true }));
+      inputSetter?.call(passwordInputs[0], 'StrongPassword42');
+      passwordInputs[0]?.dispatchEvent(new Event('input', { bubbles: true }));
+      inputSetter?.call(passwordInputs[1], 'StrongPassword42');
+      passwordInputs[1]?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const createAccountSubmit = container.querySelector<HTMLButtonElement>(
+      'form button[type="submit"]'
+    );
+    await act(async () => {
+      createAccountSubmit?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(register).toHaveBeenCalledWith({
+      name: 'New Member',
+      email: 'new.member@example.com',
+      password: 'StrongPassword42'
+    });
+    expect(container.textContent).toContain('New Member');
   });
 
   it('applies accessible themes and zoom through the desktop API', async () => {
@@ -369,6 +458,7 @@ describe('NeuraCo desktop foundation', () => {
         persistent: true
       }),
       login: vi.fn(),
+      register: vi.fn(),
       loginWithGoogle: vi.fn(),
       logout: vi.fn()
     };
@@ -466,6 +556,7 @@ describe('NeuraCo desktop foundation', () => {
       }),
       unlockAppWithPin: vi.fn().mockResolvedValue(unlocked),
       login: vi.fn(),
+      register: vi.fn(),
       loginWithGoogle: vi.fn(),
       logout: vi.fn()
     };

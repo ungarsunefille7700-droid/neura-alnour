@@ -215,9 +215,9 @@ a:focus-visible {
   display: grid;
   min-height: 100vh;
   place-items: center;
-  padding: 88px 24px 40px;
+  padding: 76px 24px 24px;
   overflow: auto;
-  background: #fafafa;
+  background: #fff;
 }
 
 .auth-header {
@@ -228,10 +228,10 @@ a:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 66px;
+  min-height: 60px;
   padding: 0 24px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.94);
+  border-bottom: 0;
+  background: rgba(255, 255, 255, 0.97);
 }
 
 .brand-lockup {
@@ -305,35 +305,35 @@ a:focus-visible {
 }
 
 .auth-dialog {
-  width: min(440px, 100%);
-  padding: 34px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: 0 18px 50px rgba(30, 32, 36, 0.08);
+  width: min(400px, 100%);
+  padding: 24px;
+  border: 0;
+  background: transparent;
 }
 
 .auth-logo {
   display: block;
-  width: 68px;
-  height: 68px;
-  margin: 0 0 24px;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 20px;
   border: 1px solid var(--border);
   border-radius: 8px;
   object-fit: cover;
 }
 
 .auth-dialog h1 {
-  margin: 7px 0 0;
-  font-size: 29px;
+  margin: 0;
+  font-size: 30px;
   font-weight: 650;
   line-height: 1.2;
+  text-align: center;
 }
 
 .auth-dialog > p:not(.section-label) {
-  margin: 13px 0 0;
+  margin: 12px 0 0;
   color: var(--text-muted);
   line-height: 1.55;
+  text-align: center;
 }
 
 .section-label {
@@ -349,12 +349,13 @@ a:focus-visible {
   flex-wrap: wrap;
   gap: 9px;
   margin-top: 24px;
+  justify-content: center;
 }
 
 .auth-form {
   display: grid;
-  gap: 16px;
-  margin-top: 25px;
+  gap: 14px;
+  margin-top: 16px;
 }
 
 .auth-form label {
@@ -405,6 +406,7 @@ a:focus-visible {
   gap: 12px;
   color: var(--text-soft);
   font-size: 12px;
+  margin-top: 18px;
 }
 
 .auth-divider::before,
@@ -418,6 +420,41 @@ a:focus-visible {
 .button-google {
   gap: 11px;
   background: var(--surface);
+}
+
+.auth-google-primary {
+  min-height: 50px;
+  margin-top: 24px;
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.auth-form .button-primary {
+  min-height: 50px;
+}
+
+.auth-mode-switch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 20px !important;
+  font-size: 14px;
+}
+
+.auth-mode-switch button {
+  padding: 0;
+  border: 0;
+  color: var(--accent-dark);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.auth-mode-switch button:hover,
+.auth-mode-switch button:focus-visible {
+  text-decoration: underline;
 }
 
 .google-mark {

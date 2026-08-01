@@ -10,7 +10,7 @@ Configuration prise en charge pour cette premiere version :
 - connexion Internet pour l'authentification et les fonctions IA ;
 - compte Neura Al-Nour disposant de l'acces NeuraCo.
 
-1. Telechargez `NeuraCo-Setup-v1.0.0.exe` depuis la page GitHub Releases officielle.
+1. Telechargez `NeuraCo-Setup-v1.0.1.exe` depuis la page GitHub Releases officielle.
 2. Comparez son SHA-256 avec `SHA256SUMS.txt`.
 3. Ouvrez l'installateur et choisissez le dossier d'installation.
 4. Lancez NeuraCo depuis le Bureau ou le menu Demarrer.
@@ -52,7 +52,7 @@ npm run verify:release
 npm run dist:github
 ```
 
-`verify:release` execute les tests, l'audit des dependances, le build complet et le controle anti-secrets. `dist:github` produit ensuite un installateur NSIS x64 autonome et le paquet de publication dans `release-package/v1.0.0/`.
+`verify:release` execute les tests, l'audit des dependances, le build complet et le controle anti-secrets. `dist:github` produit ensuite un installateur NSIS x64 autonome et le paquet de publication dans `release-package/v1.0.1/`.
 
 Pour un build officiel signe, configurez le certificat Authenticode uniquement dans l'environnement de build securise puis utilisez :
 
