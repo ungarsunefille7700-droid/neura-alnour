@@ -4153,6 +4153,60 @@ a:focus-visible {
   line-height: 1.5;
 }
 
+.home-chat-thread {
+  display: grid;
+  gap: 22px;
+}
+
+.home-chat-message {
+  max-width: 760px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.home-chat-message.is-user {
+  justify-self: end;
+  max-width: min(680px, 82%);
+  background: var(--surface-hover);
+}
+
+.home-chat-message.is-system {
+  border-color: #ebcac8;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.home-chat-message header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.home-chat-message header strong {
+  font-size: 13px;
+}
+
+.home-chat-message header span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.home-chat-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.58;
+}
+
+.home-chat-thinking {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 /* Settings */
 
 .settings-page {

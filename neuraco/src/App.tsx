@@ -38,6 +38,14 @@ const AdminPanel = lazy(() => import('./AdminPanel'));
 
 type Locale = 'fr' | 'en';
 type WorkspaceView = 'home' | 'project' | 'security' | 'accessibility' | 'account' | 'admin';
+type HomeChatMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  model?: string;
+};
+
+const GENERAL_CHAT_PROJECT_ID = '000000000000000000000001';
 
 const DEFAULT_ACCESSIBILITY: NeuraCoAccessibilitySettings = {
   theme: 'system',
@@ -89,7 +97,7 @@ const copy = {
     nextTitle: 'Espace projet disponible',
     nextText:
       'Utilisez “Ouvrir un projet” dans la barre latérale. Les secrets et fichiers sensibles restent exclus du contexte IA.',
-    composerPlaceholder: 'Ouvrez un projet pour commencer...',
+    composerPlaceholder: 'Écrivez votre demande...',
     fullAccess: 'Accès protégé',
     securityTitle: 'Sécurité',
     securityIntro:
@@ -194,7 +202,7 @@ const copy = {
     nextTitle: 'Project workspace available',
     nextText:
       'Use “Open a project” in the sidebar. Secrets and sensitive files remain excluded from AI context.',
-    composerPlaceholder: 'Open a project to get started...',
+    composerPlaceholder: 'Write your request...',
     fullAccess: 'Protected access',
     securityTitle: 'Security',
     securityIntro:
@@ -854,6 +862,10 @@ function App() {
     desktopAvailable ? null : { status: 'authenticated' }
   );
   const [authBusy, setAuthBusy] = useState(false);
+  const [homeInput, setHomeInput] = useState('');
+  const [homeMessages, setHomeMessages] = useState<HomeChatMessage[]>([]);
+  const [homeChatBusy, setHomeChatBusy] = useState(false);
+  const [homeSessionId, setHomeSessionId] = useState<string | undefined>();
   const [appLockState, setAppLockState] = useState<NeuraCoAppLockState | null>(
     desktopAvailable ? null : {
       configured: false,
@@ -1053,6 +1065,68 @@ function App() {
     if (snapshot) setProjectSnapshot(snapshot);
   };
 
+  const sendHomeMessage = async () => {
+    const content = homeInput.trim();
+    if (!window.neuraco || !content || homeChatBusy) return;
+
+    const userMessage: HomeChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content
+    };
+    const conversationContext = homeMessages
+      .filter((message) => message.role === 'user' || message.role === 'assistant')
+      .slice(-20)
+      .map((message) => ({
+        id: message.id,
+        role: message.role as 'user' | 'assistant',
+        content: message.content
+      }));
+
+    setHomeInput('');
+    setHomeMessages((current) => [...current, userMessage]);
+    setHomeChatBusy(true);
+    try {
+      const response = await window.neuraco.sendAgentMessage({
+        content,
+        sessionId: homeSessionId,
+        requestId: crypto.randomUUID(),
+        projectId: GENERAL_CHAT_PROJECT_ID,
+        projectName: locale === 'fr' ? 'Conversation générale' : 'General conversation',
+        mode: 'question',
+        model: 'auto',
+        conversationContext,
+        files: [],
+        images: []
+      });
+      setHomeSessionId(response.sessionId);
+      setHomeMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: response.message,
+          model: `${response.modelDisplay} · ${response.provider}`
+        }
+      ]);
+    } catch (error) {
+      setHomeMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: error instanceof Error
+            ? error.message
+            : locale === 'fr'
+              ? 'La réponse IA n’a pas pu être récupérée.'
+              : 'The AI response could not be retrieved.'
+        }
+      ]);
+    } finally {
+      setHomeChatBusy(false);
+    }
+  };
+
   if (desktopAvailable && session?.status !== 'authenticated') {
     return (
       <AuthScreen
@@ -1091,6 +1165,31 @@ function App() {
 
   const renderHome = () => (
     <div className="thread-view">
+      {homeMessages.length > 0 ? (
+        <div className="home-chat-thread" aria-live="polite">
+          {homeMessages.map((message) => (
+            <article key={message.id} className={`home-chat-message is-${message.role}`}>
+              <header>
+                <strong>
+                  {message.role === 'user'
+                    ? session?.user?.name || (locale === 'fr' ? 'Vous' : 'You')
+                    : message.role === 'assistant'
+                      ? 'NeuraCo'
+                      : locale === 'fr' ? 'Système' : 'System'}
+                </strong>
+                {message.model && <span>{message.model}</span>}
+              </header>
+              <p>{message.content}</p>
+            </article>
+          ))}
+          {homeChatBusy && (
+            <div className="home-chat-thinking" role="status">
+              {locale === 'fr' ? 'NeuraCo réfléchit…' : 'NeuraCo is thinking…'}
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
       <div className="thread-activity">
         <span className="activity-icon"><CheckCircle2 size={16} aria-hidden="true" /></span>
         <span>{text.completed}</span>
@@ -1114,6 +1213,8 @@ function App() {
         <span>{text.nextTitle}</span>
         <p>{text.nextText}</p>
       </section>
+        </>
+      )}
     </div>
   );
 
@@ -1336,14 +1437,35 @@ function App() {
 
         {view === 'home' && (
           <footer className="composer-wrap">
-            <div className="composer is-disabled" aria-disabled="true">
+            <form
+              className={`composer ${!desktopAvailable ? 'is-disabled' : ''}`}
+              aria-disabled={!desktopAvailable}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void sendHomeMessage();
+              }}
+            >
               <textarea
-                disabled
+                value={homeInput}
+                disabled={!desktopAvailable || homeChatBusy}
                 aria-label={text.composerPlaceholder}
                 placeholder={text.composerPlaceholder}
+                onChange={(event) => setHomeInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendHomeMessage();
+                  }
+                }}
               />
               <div className="composer-footer">
-                <button type="button" className="icon-button" disabled title={text.noProject}>
+                <button
+                  type="button"
+                  className="icon-button"
+                  disabled={!desktopAvailable || homeChatBusy}
+                  title={locale === 'fr' ? 'Ouvrir un projet' : 'Open a project'}
+                  onClick={() => void openProject()}
+                >
                   <Plus size={20} aria-hidden="true" />
                 </button>
                 <span className="composer-mode">
@@ -1351,11 +1473,16 @@ function App() {
                   {text.fullAccess}
                 </span>
                 <span className="composer-version">v{appInfo.version}</span>
-                <button type="button" className="send-button" disabled title={text.noProject}>
+                <button
+                  type="submit"
+                  className="send-button"
+                  disabled={!desktopAvailable || homeChatBusy || !homeInput.trim()}
+                  title={locale === 'fr' ? 'Envoyer' : 'Send'}
+                >
                   <Send size={18} aria-hidden="true" />
                 </button>
               </div>
-            </div>
+            </form>
           </footer>
         )}
       </main>

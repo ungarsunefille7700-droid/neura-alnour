@@ -214,6 +214,84 @@ describe('NeuraCo desktop foundation', () => {
     expect(container.querySelector('textarea')?.disabled).toBe(true);
   });
 
+  it('allows an authenticated user to chat without opening a project', async () => {
+    const sendAgentMessage = vi.fn().mockResolvedValue({
+      message: 'Réponse générale NeuraCo',
+      sessionId: 'general-session-1',
+      provider: 'openai',
+      model: 'gpt-4o',
+      modelDisplay: 'GPT-4o',
+      mode: 'question',
+      filesUsed: [],
+      imagesUsed: [],
+      entitlementPlan: 'neura_ultra'
+    });
+    window.neuraco = {
+      ...createWorkspaceMocks(),
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.2',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({
+        status: 'authenticated',
+        user: {
+          id: 'vip-1',
+          email: 'founder@example.com',
+          name: 'Founder',
+          subscription: 'neura_ultra',
+          is_vip: true
+        },
+        entitlement: {
+          neuraco_access: true,
+          plan: 'neura_ultra',
+          reason: 'administrator'
+        },
+        persistent: true
+      }),
+      sendAgentMessage,
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>('.composer textarea');
+    expect(textarea?.disabled).toBe(false);
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value'
+    )?.set;
+    await act(async () => {
+      setter?.call(textarea, 'Bonjour NeuraCo');
+      textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      container.querySelector<HTMLFormElement>('.composer')
+        ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: 'Bonjour NeuraCo',
+      projectId: '000000000000000000000001',
+      projectName: 'Conversation générale',
+      files: [],
+      images: []
+    }));
+    expect(container.textContent).toContain('Réponse générale NeuraCo');
+  });
+
   it('reads app information and verifies security through the preload API', async () => {
     window.neuraco = {
       ...createWorkspaceMocks(),
