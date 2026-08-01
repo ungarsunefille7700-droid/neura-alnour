@@ -23,7 +23,8 @@ import {
   Compass,
   Building,
   GraduationCap,
-  Video
+  Video,
+  LockKeyhole
 } from 'lucide-react';
 
 const LandingPage = () => {
@@ -44,7 +45,14 @@ const LandingPage = () => {
     { icon: Compass, title: t('feat.qiblah.title'), description: t('feat.qiblah.desc'), color: "text-primary", path: "/qiblah" },
     { icon: Building, title: t('feat.mosques.title'), description: t('feat.mosques.desc'), color: "text-secondary", path: "/mosques" },
     { icon: GraduationCap, title: t('feat.islam.title'), description: t('feat.islam.desc'), color: "text-primary", path: "/islam-learning" },
-    { icon: Video, title: "Rappels", description: "Regarder des rappels et enseignements directement dans l’application.", color: "text-secondary", path: "/reminders" }
+    { icon: Video, title: "Rappels", description: "Regarder des rappels et enseignements directement dans l’application.", color: "text-secondary", path: "/reminders" },
+    {
+      image: "/images/neuraco-card.png",
+      title: "NeuraCo",
+      description: "Votre agent IA pour développer, créer et travailler directement sur votre PC.",
+      path: user ? "/subscription" : "/auth",
+      locked: !user || (!user.is_vip && !["pro", "neura_plus", "neura_ultra"].includes(user.subscription))
+    }
   ];
 
   const plans = [
@@ -266,10 +274,27 @@ const LandingPage = () => {
                 className="p-8 hover:shadow-lg transition-all duration-300 hover:-translate-y-1 arch group cursor-pointer"
                 data-testid={`feature-card-${index}`}
               >
-                <div className={`w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-6 group-hover:scale-110 transition-transform ${feature.color}`}>
-                  <feature.icon className="w-7 h-7" />
+                <div className={`w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-6 overflow-hidden group-hover:scale-110 transition-transform ${feature.color || ''}`}>
+                  {feature.image ? (
+                    <img
+                      src={feature.image}
+                      alt=""
+                      loading="lazy"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <feature.icon className="w-7 h-7" />
+                  )}
                 </div>
-                <h3 className="text-xl font-semibold mb-3">{feature.title}</h3>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <h3 className="text-xl font-semibold">{feature.title}</h3>
+                  {feature.locked && (
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                      <LockKeyhole className="w-3.5 h-3.5" />
+                      Disponible avec Plus
+                    </span>
+                  )}
+                </div>
                 <p className="text-muted-foreground">{feature.description}</p>
               </Card>
             ))}

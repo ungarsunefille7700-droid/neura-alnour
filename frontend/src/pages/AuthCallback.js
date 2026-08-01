@@ -59,7 +59,12 @@ const AuthCallback = () => {
 
       setUserFromGoogle(user, token);
       toast.success(`Bienvenue ${user.name}!`);
-      navigate('/chat', { replace: true, state: { user } });
+      const requestedReturnPath = sessionStorage.getItem('neura_auth_return_to');
+      sessionStorage.removeItem('neura_auth_return_to');
+      const returnPath = requestedReturnPath?.startsWith('/neuraco/connect?')
+        ? requestedReturnPath
+        : '/chat';
+      navigate(returnPath, { replace: true, state: { user } });
     } catch (err) {
       console.error('Google auth error:', err);
       const detail = err.response?.data?.detail;

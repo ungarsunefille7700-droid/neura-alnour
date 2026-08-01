@@ -12,6 +12,14 @@ import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import DevWorkspace from '@/components/DevWorkspace';
 import { createChatRequestId, formatQuotaReset } from '@/utils/chatQuota';
+import {
+  MAX_CHAT_IMAGES,
+  clipboardImageFiles,
+  composeImageAttachments,
+  droppedImageFiles,
+  formatImageBytes,
+  prepareImageAttachment
+} from '@/utils/imageAttachments';
 import { toast } from 'sonner';
 import { 
   Send, 
@@ -210,6 +218,9 @@ const ChatPage = () => {
   const [currentConversation, setCurrentConversation] = useState(conversationId);
   const [selectedImage, setSelectedImage] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [imagesProcessing, setImagesProcessing] = useState(false);
+  const [imageDropActive, setImageDropActive] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [imageGenRemaining, setImageGenRemaining] = useState(null);
@@ -245,6 +256,7 @@ const ChatPage = () => {
   const documentInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const toolsMenuRef = useRef(null);
+  const imageBatchRef = useRef(0);
   const webSearch = webMode === 'forced';
   const cameraAvailable = typeof navigator !== 'undefined'
     && Boolean(navigator.mediaDevices?.getUserMedia);
@@ -252,6 +264,9 @@ const ChatPage = () => {
   const captureQuotaBlocked = Boolean(currentConversation && captureQuota?.applies && captureQuota?.blocked);
   const conversationBlocked = textQuotaBlocked || (!isMongoPlan && captureQuotaBlocked);
   const imageUploadBlocked = Boolean(chatImageQuota?.applies && chatImageQuota?.remaining <= 0);
+  const imageMaxBytes = (
+    user?.is_vip || ['neura_plus', 'neura_ultra'].includes(user?.subscription)
+  ) ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
 
   useEffect(() => {
     fetchConversations();
@@ -754,7 +769,12 @@ const ChatPage = () => {
 
   const sendMessage = async (e) => {
     e.preventDefault();
-    if ((!inputMessage.trim() && !selectedImage && !selectedDocument) || loading || streaming) return;
+    if (
+      (!inputMessage.trim() && !selectedImage && !selectedDocument)
+      || loading
+      || streaming
+      || imagesProcessing
+    ) return;
     if (
       conversationMode === 'chat'
       && !selectedImage
@@ -778,10 +798,13 @@ const ChatPage = () => {
     const tempUserMsg = {
       id: `temp-${Date.now()}`,
       role: 'user',
-      content: userMessage || (selectedImage ? '[Image envoyée]' : selectedDocument ? `[Document envoyé : ${selectedDocument.name}]` : ''),
+      content: userMessage || (selectedImage
+        ? `[${selectedImages.length > 1 ? `${selectedImages.length} images envoyées` : 'Image envoyée'}]`
+        : selectedDocument ? `[Document envoyé : ${selectedDocument.name}]` : ''),
       has_image: !!selectedImage,
       document_name: selectedDocument?.name,
       image_preview: imagePreview,
+      image_previews: selectedImages.map((image) => image.preview),
       created_at: new Date().toISOString()
     };
     setMessages(prev => [...prev, tempUserMsg]);
@@ -791,6 +814,7 @@ const ChatPage = () => {
     const documentToSend = selectedDocument;
     setSelectedImage(null);
     setImagePreview(null);
+    setSelectedImages([]);
     setSelectedDocument(null);
 
     if (conversationMode === 'work') {
@@ -945,11 +969,53 @@ const ChatPage = () => {
     }
   };
 
-  const handleImageSelect = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const addImageFiles = async (files) => {
+    if (!files.length || imagesProcessing) return;
+    if (imageUploadBlocked) {
+      const reset = formatQuotaReset(chatImageQuota?.reset_at);
+      toast.error(`Limite de captures atteinte${reset ? `. Renouvellement : ${reset}` : ''}.`);
+      return;
+    }
+    if (selectedImages.length + files.length > MAX_CHAT_IMAGES) {
+      toast.error(`Vous pouvez joindre jusqu’à ${MAX_CHAT_IMAGES} images par message.`);
+      return;
+    }
 
-    const isImage = file.type.startsWith('image/');
+    const batchId = imageBatchRef.current + 1;
+    imageBatchRef.current = batchId;
+    setImagesProcessing(true);
+    try {
+      const prepared = [];
+      for (const file of files) {
+        prepared.push(await prepareImageAttachment(file, imageMaxBytes));
+        if (imageBatchRef.current !== batchId) return;
+      }
+      const nextImages = [...selectedImages, ...prepared];
+      const composed = await composeImageAttachments(nextImages, imageMaxBytes);
+      if (imageBatchRef.current !== batchId) return;
+      setSelectedImages(nextImages);
+      setSelectedImage(composed);
+      setImagePreview(nextImages[0]?.preview || null);
+      setSelectedDocument(null);
+    } catch (error) {
+      toast.error(error.message || 'Impossible d’ajouter cette image.');
+    } finally {
+      if (imageBatchRef.current === batchId) setImagesProcessing(false);
+    }
+  };
+
+  const handleImageSelect = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length) {
+      await addImageFiles(imageFiles);
+      return;
+    }
+
+    const file = files[0];
     const textLike = (
       file.type.startsWith('text/') ||
       [
@@ -961,58 +1027,74 @@ const ChatPage = () => {
       ].includes(file.type) ||
       /\.(txt|md|csv|json|xml|html|css|js|jsx|ts|tsx|py|java|php|sql|yml|yaml|toml|ini|log)$/i.test(file.name)
     );
-
-    if (isImage && imageUploadBlocked) {
-      const reset = formatQuotaReset(chatImageQuota?.reset_at);
-      toast.error(`Limite de captures atteinte${reset ? `. Renouvellement : ${reset}` : ''}.`);
-      e.target.value = '';
-      return;
-    }
-
-    // Check file size (max 5MB for images, 1MB for text/code documents)
-    if (isImage && file.size > 5 * 1024 * 1024) {
-      toast.error('L\'image ne doit pas dépasser 5 Mo');
-      return;
-    }
-
-    if (!isImage && file.size > 1024 * 1024) {
+    if (file.size > 1024 * 1024) {
       toast.error('Le document texte ne doit pas dépasser 1 Mo');
       return;
     }
-
-    if (!isImage && !textLike) {
+    if (!textLike) {
       toast.error('Format non pris en charge. Utilise une image ou un fichier texte/code.');
       return;
     }
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      if (isImage) {
-        const base64 = event.target.result;
-        setImagePreview(base64);
-        setSelectedDocument(null);
-        // Remove the data:image/xxx;base64, prefix for the API
-        const base64Data = base64.split(',')[1];
-        setSelectedImage(base64Data);
-      } else {
-        setSelectedImage(null);
-        setImagePreview(null);
-        setSelectedDocument({
-          name: file.name,
-          type: file.type || 'text/plain',
-          content: String(event.target.result || '').slice(0, 20000)
-        });
-      }
+      setSelectedImage(null);
+      setImagePreview(null);
+      setSelectedImages([]);
+      setSelectedDocument({
+        name: file.name,
+        type: file.type || 'text/plain',
+        content: String(event.target.result || '').slice(0, 20000)
+      });
     };
-    if (isImage) reader.readAsDataURL(file);
-    else reader.readAsText(file);
+    reader.onerror = () => toast.error('Impossible de lire ce document.');
+    reader.readAsText(file);
   };
 
-  const removeSelectedImage = () => {
-    setSelectedImage(null);
-    setImagePreview(null);
-    if (photoInputRef.current) photoInputRef.current.value = '';
-    if (cameraInputRef.current) cameraInputRef.current.value = '';
+  const handleImagePaste = async (event) => {
+    const files = clipboardImageFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+
+    const pastedText = event.clipboardData.getData('text/plain');
+    if (pastedText) {
+      const start = event.currentTarget.selectionStart ?? inputMessage.length;
+      const end = event.currentTarget.selectionEnd ?? start;
+      setInputMessage(`${inputMessage.slice(0, start)}${pastedText}${inputMessage.slice(end)}`);
+    }
+    await addImageFiles(files);
+  };
+
+  const handleImageDrop = async (event) => {
+    event.preventDefault();
+    setImageDropActive(false);
+    await addImageFiles(droppedImageFiles(event.dataTransfer));
+  };
+
+  const cancelImageProcessing = () => {
+    imageBatchRef.current += 1;
+    setImagesProcessing(false);
+  };
+
+  const removeSelectedImage = async (imageId) => {
+    const nextImages = selectedImages.filter((image) => image.id !== imageId);
+    setSelectedImages(nextImages);
+    if (!nextImages.length) {
+      setSelectedImage(null);
+      setImagePreview(null);
+      if (photoInputRef.current) photoInputRef.current.value = '';
+      if (cameraInputRef.current) cameraInputRef.current.value = '';
+      return;
+    }
+    setImagesProcessing(true);
+    try {
+      setSelectedImage(await composeImageAttachments(nextImages, imageMaxBytes));
+      setImagePreview(nextImages[0].preview);
+    } catch (error) {
+      toast.error(error.message || 'Impossible de mettre à jour les images.');
+    } finally {
+      setImagesProcessing(false);
+    }
   };
 
   const removeSelectedDocument = () => {
@@ -1048,6 +1130,9 @@ const ChatPage = () => {
     setCaptureQuota(null);
     setSelectedImage(null);
     setImagePreview(null);
+    setSelectedImages([]);
+    imageBatchRef.current += 1;
+    setImagesProcessing(false);
     setSelectedDocument(null);
     setImageCreationMode(false);
     setToolsMenuOpen(false);
@@ -1342,14 +1427,25 @@ const ChatPage = () => {
                         </div>
                       )}
                       {/* Show image preview if message has image */}
-                      {msg.image_preview && (
+                      {msg.image_previews?.length > 0 ? (
+                        <div className="mb-2 grid max-w-sm grid-cols-2 gap-2">
+                          {msg.image_previews.map((preview, imageIndex) => (
+                            <img
+                              key={`${msg.id || index}-image-${imageIndex}`}
+                              src={preview}
+                              alt={`Pièce jointe ${imageIndex + 1}`}
+                              className="aspect-square w-full rounded-lg object-cover"
+                            />
+                          ))}
+                        </div>
+                      ) : msg.image_preview ? (
                         <img
                           src={msg.image_preview}
-                          alt="Uploaded"
+                          alt="Image envoyée"
                           className="max-w-[200px] rounded-lg mb-2"
                         />
-                      )}
-                      {msg.has_image && !msg.image_preview && (
+                      ) : null}
+                      {msg.has_image && !msg.image_preview && !msg.image_previews?.length && (
                         <div className="flex items-center gap-2 mb-2 text-xs opacity-70">
                           <ImageIcon className="w-4 h-4" />
                           <span>Image envoyée</span>
@@ -1458,22 +1554,52 @@ const ChatPage = () => {
 
         {/* Input Area */}
         <div className="p-4 border-t border-border">
-          <form onSubmit={sendMessage} className="max-w-3xl mx-auto">
-            {/* Image Preview */}
-            {imagePreview && (
-              <div className="mb-3 relative inline-block">
-                <img 
-                  src={imagePreview} 
-                  alt="Preview" 
-                  className="h-20 w-20 object-cover rounded-lg border border-border"
-                />
-                <button
-                  type="button"
-                  onClick={removeSelectedImage}
-                  className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center hover:bg-destructive/90"
-                  data-testid="remove-image-btn"
-                >
-                  <X className="w-4 h-4" />
+          <form
+            onSubmit={sendMessage}
+            onDragEnter={(event) => {
+              if (Array.from(event.dataTransfer?.types || []).includes('Files')) setImageDropActive(true);
+            }}
+            onDragOver={(event) => {
+              if (Array.from(event.dataTransfer?.types || []).includes('Files')) event.preventDefault();
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
+            }}
+            onDrop={handleImageDrop}
+            className={`max-w-3xl mx-auto transition-shadow ${imageDropActive ? 'rounded-lg ring-2 ring-primary ring-offset-4 ring-offset-background' : ''}`}
+          >
+            {selectedImages.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-3" data-testid="image-attachments">
+                {selectedImages.map((image, index) => (
+                  <div key={image.id} className="relative w-36 rounded-lg border border-border bg-muted/40 p-2">
+                    <img
+                      src={image.preview}
+                      alt={`Pièce jointe ${index + 1}`}
+                      className="h-20 w-full rounded-md object-cover"
+                    />
+                    <p className="mt-1 truncate text-xs font-medium">{image.name}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {image.width}×{image.height} · {formatImageBytes(image.size)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => removeSelectedImage(image.id)}
+                      className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      data-testid={`remove-image-btn-${index}`}
+                      aria-label={`Retirer l’image ${index + 1}`}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {imagesProcessing && (
+              <div className="mb-3 inline-flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-xs">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                Préparation des images…
+                <button type="button" onClick={cancelImageProcessing} className="font-medium text-primary hover:underline">
+                  Annuler
                 </button>
               </div>
             )}
@@ -1635,6 +1761,7 @@ const ChatPage = () => {
                 ref={photoInputRef}
                 onChange={handleImageSelect}
                 accept="image/*"
+                multiple
                 className="hidden"
                 data-testid="photo-input"
               />
@@ -1744,6 +1871,7 @@ const ChatPage = () => {
                   ref={inputRef}
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
+                  onPaste={handleImagePaste}
                   placeholder={conversationBlocked
                     ? 'Limite atteinte pour cette conversation'
                     : selectedImage || selectedDocument
@@ -1754,7 +1882,7 @@ const ChatPage = () => {
                           ? "Décrivez la tâche à exécuter..."
                           : t('chat.placeholder')}
                   className="pr-4 h-12 rounded-full bg-muted border-0"
-                  disabled={loading || conversationBlocked}
+                  disabled={loading || conversationBlocked || imagesProcessing}
                   data-testid="chat-input"
                 />
               </div>
@@ -1762,7 +1890,7 @@ const ChatPage = () => {
                 type="submit" 
                 size="icon" 
                 className="h-12 w-12 rounded-full"
-                disabled={loading || generatingImage || conversationBlocked || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
+                disabled={loading || generatingImage || imagesProcessing || conversationBlocked || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
                 data-testid="send-message-btn"
               >
                 <Send className="w-5 h-5" />

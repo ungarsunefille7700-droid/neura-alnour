@@ -1,8 +1,16 @@
 # --- Secrets / environnement (NE JAMAIS committer) ---
 .env
+.env.*
+!.env.example
 backend/.env
 frontend/.env
 *.keystore
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
 
 # --- Dépendances ---
 node_modules/
@@ -15,7 +23,25 @@ __pycache__/
 # --- Builds ---
 build/
 frontend/build/
+neuraco/dist/
+neuraco/dist-electron/
+neuraco/dist-cli/
+neuraco/dist-sdk/
+neuraco/release/
+neuraco/release-github/
+neuraco/release-package/
+neuraco/.tooling/
+neuraco/.neuraco-push-*/
+neuraco/.release-smoke-install-*/
+neuraco/.release-smoke-install-path.txt
+neuraco/extensions/jetbrains/.gradle/
+neuraco/extensions/jetbrains/.intellijPlatform/
+neuraco/extensions/jetbrains/build/
 
 # --- OS / éditeur / outils ---
 .DS_Store
 .claude/
+*.log
+*.exe
+*.msi
+*.blockmap

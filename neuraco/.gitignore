@@ -1,0 +1,40 @@
+node_modules/
+
+# Sorties de compilation et installateurs
+dist/
+dist-electron/
+dist-cli/
+dist-sdk/
+release/
+release-github/
+release-package/
+.tooling/
+.neuraco-push-*/
+.release-smoke-install-*/
+.release-smoke-install-path.txt
+
+# Caches d'extensions
+extensions/jetbrains/.gradle/
+extensions/jetbrains/.intellijPlatform/
+extensions/jetbrains/build/
+
+# Secrets et certificats
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+*.keystore
+
+# Fichiers locaux
+*.log
+*.tmp
+*.exe
+*.msi
+*.blockmap
+.DS_Store
+Thumbs.db

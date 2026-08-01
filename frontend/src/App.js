@@ -35,6 +35,7 @@ import RemindersPage from "@/pages/RemindersPage";
 import MultiplayerQuizPage from "@/pages/MultiplayerQuizPage";
 import FounderAdminPage from "@/pages/FounderAdminPage";
 import GamificationPage from "@/pages/GamificationPage";
+import NeuraCoConnectPage from "@/pages/NeuraCoConnectPage";
 
 // Protected Route Component
 const ProtectedRoute = ({ children }) => {
@@ -56,7 +57,13 @@ const ProtectedRoute = ({ children }) => {
   }
   
   if (!user) {
-    return <Navigate to="/auth" replace />;
+    return (
+      <Navigate
+        to="/auth"
+        replace
+        state={{ from: `${location.pathname}${location.search}` }}
+      />
+    );
   }
   
   return children;
@@ -100,6 +107,7 @@ function AppRouter() {
       <Route path="/reminders" element={<RemindersPage />} />
       <Route path="/founder-admin" element={<ProtectedRoute><FounderAdminPage /></ProtectedRoute>} />
       <Route path="/rewards" element={<ProtectedRoute><GamificationPage /></ProtectedRoute>} />
+      <Route path="/neuraco/connect" element={<ProtectedRoute><NeuraCoConnectPage /></ProtectedRoute>} />
     </Routes>
   );
 }

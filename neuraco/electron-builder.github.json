@@ -1,0 +1,37 @@
+{
+  "appId": "com.neura.neuraco",
+  "productName": "NeuraCo",
+  "asar": true,
+  "forceCodeSigning": false,
+  "electronDist": "node_modules/electron/dist",
+  "directories": {
+    "output": "release-github"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "dist-cli/**/*",
+    "dist-sdk/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "icon": "build/icon.ico",
+    "artifactName": "NeuraCo-Setup-v${version}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "NeuraCo",
+    "deleteAppDataOnUninstall": false
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "name": "neuraco",
+  "productName": "NeuraCo",
+  "version": "1.0.0",
+  "private": true,
+  "author": "NEURA AL-NOUR",
+  "description": "Agent de développement et de travail local pour Windows",
+  "main": "dist-electron/main.js",
+  "bin": {
+    "neuraco": "dist-cli/cli/index.js"
+  },
+  "exports": {
+    "./sdk": {
+      "types": "./dist-sdk/sdk/index.d.ts",
+      "require": "./dist-sdk/sdk/index.js"
+    }
+  },
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.js\"",
+    "build:electron": "node scripts/clean-directory.mjs dist-electron && tsc -p tsconfig.electron.json && esbuild electron/preload.ts --bundle --platform=node --format=cjs --target=node22 --external:electron --outfile=dist-electron/preload.js",
+    "build:cli": "node scripts/clean-directory.mjs dist-cli && tsc -p tsconfig.cli.json",
+    "build:sdk": "node scripts/clean-directory.mjs dist-sdk && tsc -p tsconfig.sdk.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:electron && npm run build:cli && npm run build:sdk && npm run build:renderer",
+    "test": "vitest run",
+    "verify:release": "npm test -- --run && npm audit --omit=dev --audit-level=high && npm run build && node scripts/verify-release-safety.mjs",
+    "dist:win": "npm run verify:release && electron-builder --win nsis --x64",
+    "dist:github": "npm run verify:release && node scripts/clean-directory.mjs release-github && electron-builder --config electron-builder.github.json --win nsis --x64 && node scripts/prepare-github-release.mjs"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "docx": "^9.7.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.468.0",
+    "monaco-editor": "^0.56.0",
+    "pdf-lib": "^1.17.1",
+    "pptxgenjs": "^4.0.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "0.28.1",
+    "jsdom": "^27.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.0",
+    "wait-on": "^9.0.4"
+  },
+  "overrides": {
+    "dompurify": "3.4.12",
+    "brace-expansion@<1.1.17": "1.1.17",
+    "brace-expansion@>=2.0.0 <2.1.3": "2.1.3"
+  },
+  "build": {
+    "appId": "com.neura.neuraco",
+    "productName": "NeuraCo",
+    "asar": true,
+    "forceCodeSigning": true,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "dist-cli/**/*",
+      "dist-sdk/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "NeuraCo-Setup-v${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NeuraCo",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

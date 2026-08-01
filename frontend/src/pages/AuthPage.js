@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -21,6 +21,12 @@ const AuthPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { t } = useLanguage();
   const navigate = useNavigate();
+  const location = useLocation();
+  const requestedReturnPath = location.state?.from;
+  const returnPath = typeof requestedReturnPath === 'string'
+    && requestedReturnPath.startsWith('/neuraco/connect?')
+    ? requestedReturnPath
+    : '/chat';
 
   // Login form
   const [loginEmail, setLoginEmail] = useState('');
@@ -34,6 +40,11 @@ const AuthPage = () => {
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   const handleGoogleLogin = async () => {
     const redirectUrl = window.location.origin + '/auth/callback';
+    if (returnPath.startsWith('/neuraco/connect?')) {
+      sessionStorage.setItem('neura_auth_return_to', returnPath);
+    } else {
+      sessionStorage.removeItem('neura_auth_return_to');
+    }
     setLoading(true);
     // Reuse the wake-up started on application load. After 8 seconds the user
     // continues to Google while the keepalive request finishes in background.
@@ -51,7 +62,7 @@ const AuthPage = () => {
     try {
       await login(loginEmail, loginPassword);
       toast.success('Connexion réussie!');
-      navigate('/chat');
+      navigate(returnPath);
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Erreur de connexion');
     } finally {
@@ -73,7 +84,7 @@ const AuthPage = () => {
     try {
       await register(registerEmail, registerPassword, registerName);
       toast.success('Compte créé avec succès!');
-      navigate('/chat');
+      navigate(returnPath);
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Erreur lors de l\'inscription');
     } finally {

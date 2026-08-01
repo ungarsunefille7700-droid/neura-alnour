@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "rootDir": ".",
+    "outDir": "dist-cli"
+  },
+  "include": [
+    "cli/**/*.ts",
+    "electron/ipc-contract.ts",
+    "electron/workspace-core.ts"
+  ],
+  "exclude": [
+    "cli/**/*.test.ts"
+  ]
+}

@@ -1,0 +1,20 @@
+<idea-plugin>
+    <id>com.neura.neuraco.jetbrains</id>
+    <name>NeuraCo</name>
+    <vendor email="support@neura-alnour.app">NEURA AL-NOUR</vendor>
+
+    <description>
+        Connecte l'IDE JetBrains à NeuraCo Desktop pour partager les sessions,
+        agents, règles, modèles et consommations sans stocker de clé API dans l'IDE.
+    </description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="NeuraCo"
+            anchor="right"
+            secondary="false"
+            factoryClass="com.neura.neuraco.NeuraCoToolWindowFactory"/>
+    </extensions>
+</idea-plugin>
