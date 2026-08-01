@@ -46,9 +46,9 @@ const AuthPage = () => {
       sessionStorage.removeItem('neura_auth_return_to');
     }
     setLoading(true);
-    // Reuse the wake-up started on application load. After 8 seconds the user
+    // Reuse the wake-up started on application load. After 2.5 seconds the user
     // continues to Google while the keepalive request finishes in background.
-    await waitForBackendWarmup(8000);
+    await waitForBackendWarmup(2500);
     window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
 

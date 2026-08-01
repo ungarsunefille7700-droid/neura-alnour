@@ -818,6 +818,7 @@ FOUNDER_EMAILS = {
     "kaddanaminpro@gmail.com",
     "kaddanwalidpro@gmail.com",
     "zeroxigamer@gmail.com",
+    "zeroxigamer0@gmail.com",
 }
 
 def is_founder(email: Optional[str]) -> bool:

@@ -55,6 +55,21 @@ def test_founder_vip_and_explicit_test_accounts_are_eligible():
     assert test_account["reason"] == "explicit_test_access"
 
 
+@pytest.mark.parametrize("email", [
+    "kaddanaminpro@gmail.com",
+    "kaddanwalidpro@gmail.com",
+    "zeroxigamer0@gmail.com",
+])
+def test_requested_founder_emails_have_neura_ultra_access(email):
+    result = entitlement(email=email)
+    assert server.is_vip_email(email) is True
+    assert result == {
+        "neuraco_access": True,
+        "plan": "neura_ultra",
+        "reason": "administrator",
+    }
+
+
 def test_suspended_or_revoked_accounts_are_denied():
     assert entitlement(subscription="pro", suspended=True)["reason"] == "account_suspended"
     assert entitlement(subscription="pro", account_status="blocked")["neuraco_access"] is False

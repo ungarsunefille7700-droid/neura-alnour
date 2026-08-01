@@ -24,7 +24,7 @@ const WEBSITE_URL = (
   process.env.NEURACO_WEBSITE_URL
   || 'https://neura-alnour.vercel.app'
 ).replace(/\/$/, '');
-const GOOGLE_TIMEOUT_MS = 5 * 60 * 1000;
+const GOOGLE_TIMEOUT_MS = 90 * 1000;
 
 interface LoginResponse {
   token: string;
