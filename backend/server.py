@@ -13148,6 +13148,15 @@ def _build_neuraco_agent_prompt(
         f"aleatoire propre a cette requete : {untrusted_boundary}."
         + current_ai_context()
         + MODERATION_GUARD
+        + (
+            "\n\nPRECISION NEURACO POUR LES DEMANDES DE DEVELOPPEMENT : "
+            "une demande legale de programmation, de jeu video, de mod, de serveur ou de script "
+            "FiveM n'est pas en elle-meme une demande illegale, dangereuse ou explicite. Reponds "
+            "normalement a ces demandes techniques. N'applique le refus de moderation que si "
+            "l'objectif concret demande reellement un delit, une intrusion, une fraude, un contenu "
+            "sexuel explicite ou une autre action dangereuse interdite. Ne transforme jamais une "
+            "simple demande de code licite en sermon religieux.\n"
+        )
         + IDENTITY_GUARD
     )
     context_parts = []

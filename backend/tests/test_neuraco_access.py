@@ -1151,3 +1151,18 @@ def test_neuraco_prompt_separates_untrusted_project_instructions():
     boundary = re.search(r"NEURACO_UNTRUSTED_[a-f0-9]{32}", system)
     assert boundary is not None
     assert boundary.group(0) in prompt
+
+
+def test_neuraco_prompt_allows_legal_fivem_development_requests():
+    message = server.NeuraCoAgentMessage(
+        content="Peux-tu me faire un script FiveM ?",
+        project_id="000000000000000000000001",
+        project_name="Conversation generale",
+    )
+
+    system, prompt = server._build_neuraco_agent_prompt(message, [], [], [])
+
+    assert "une demande legale de programmation" in system
+    assert "script FiveM n'est pas en elle-meme" in system
+    assert "Ne transforme jamais une simple demande de code licite" in system
+    assert "Peux-tu me faire un script FiveM ?" in prompt

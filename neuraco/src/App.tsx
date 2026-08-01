@@ -1133,6 +1133,7 @@ function App() {
         content,
         sessionId: homeSessionId,
         requestId: crypto.randomUUID(),
+        scope: 'general',
         projectId: GENERAL_CHAT_PROJECT_ID,
         projectName: locale === 'fr' ? 'Conversation générale' : 'General conversation',
         mode: 'question',

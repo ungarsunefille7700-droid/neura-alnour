@@ -26,6 +26,20 @@ interface AgentApiResponse {
   reservation?: NeuraCoAgentResponse['reservation'];
 }
 
+export const GENERAL_CHAT_PROJECT_ID = '000000000000000000000001';
+
+export const isGeneralChatRequest = (
+  request: Partial<NeuraCoAgentRequest> | null | undefined
+): boolean => (
+  request?.scope === 'general'
+  && request.projectId === GENERAL_CHAT_PROJECT_ID
+  && request.mode === 'question'
+  && Array.isArray(request.files)
+  && request.files.length === 0
+  && Array.isArray(request.images)
+  && request.images.length === 0
+);
+
 const IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
@@ -116,6 +130,12 @@ const validateAgentRequest = (request: NeuraCoAgentRequest): NeuraCoAgentRequest
   }
   if (!['question', 'plan'].includes(request.mode)) {
     throw new Error('Mode NeuraCo invalide.');
+  }
+  if (request.scope && !['project', 'general'].includes(request.scope)) {
+    throw new Error('Portée de demande NeuraCo invalide.');
+  }
+  if (request.scope === 'general' && !isGeneralChatRequest(request)) {
+    throw new Error('La conversation générale ne peut pas accéder aux fichiers du projet.');
   }
   if (
     request.model

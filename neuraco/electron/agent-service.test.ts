@@ -5,11 +5,67 @@ vi.mock('./auth-service', () => ({
   authenticatedApiRequest: requestMock
 }));
 
-import { sendAgentMessage } from './agent-service';
+import {
+  GENERAL_CHAT_PROJECT_ID,
+  isGeneralChatRequest,
+  sendAgentMessage
+} from './agent-service';
 
 beforeEach(() => requestMock.mockReset());
 
 describe('agent-service conversation context', () => {
+  it('autorise une conversation générale sans projet ni fichier local', async () => {
+    requestMock.mockResolvedValue({
+      message: 'Je peux vous aider sans ouvrir de dossier.',
+      session_id: 'session_general_12345678',
+      provider: 'openai',
+      model: 'gpt-4o',
+      model_display: 'GPT-4o',
+      mode: 'question',
+      files_used: [],
+      images_used: [],
+      entitlement_plan: 'neura_ultra'
+    });
+    const request = {
+      content: 'Peux-tu me proposer un script FiveM ?',
+      scope: 'general' as const,
+      projectId: GENERAL_CHAT_PROJECT_ID,
+      projectName: 'Conversation générale',
+      mode: 'question' as const,
+      model: 'auto' as const,
+      files: [],
+      images: []
+    };
+
+    expect(isGeneralChatRequest(request)).toBe(true);
+    await expect(sendAgentMessage(request)).resolves.toMatchObject({
+      message: 'Je peux vous aider sans ouvrir de dossier.'
+    });
+    expect(JSON.parse(requestMock.mock.calls[0][1].body)).toMatchObject({
+      project_id: GENERAL_CHAT_PROJECT_ID,
+      files: [],
+      images: []
+    });
+  });
+
+  it('refuse tout fichier local dans une conversation générale', async () => {
+    const request = {
+      content: 'Lis ce fichier.',
+      scope: 'general' as const,
+      projectId: GENERAL_CHAT_PROJECT_ID,
+      projectName: 'Conversation générale',
+      mode: 'question' as const,
+      files: [{ path: 'secret.txt', content: 'secret' }],
+      images: []
+    };
+
+    expect(isGeneralChatRequest(request)).toBe(false);
+    await expect(sendAgentMessage(request)).rejects.toThrow(
+      'ne peut pas accéder aux fichiers'
+    );
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
   it('transmet le contexte d’une branche sans révéler les secrets locaux', async () => {
     requestMock.mockResolvedValue({
       message: 'Alternative analysée.',

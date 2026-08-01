@@ -130,7 +130,10 @@ import {
   validateTerminalCommand,
   type TerminalTask
 } from './terminal-service';
-import { sendAgentMessage } from './agent-service';
+import {
+  isGeneralChatRequest,
+  sendAgentMessage
+} from './agent-service';
 import {
   isSensitiveTerminalCommand,
   assessTerminalCommand,
@@ -3875,6 +3878,26 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.agentChat, async (event, request) => {
     ensureTrustedSender(event.senderFrame?.url ?? '');
     ensureEmergencyRunning();
+    if (request?.scope === 'general') {
+      if (!isGeneralChatRequest(request)) {
+        throw new Error(
+          'La conversation générale ne peut pas accéder aux fichiers du projet.'
+        );
+      }
+      const requestId = typeof request.requestId === 'string'
+        ? request.requestId
+        : randomUUID();
+      const controller = new AbortController();
+      agentControllers.set(requestId, controller);
+      try {
+        return await sendRemoteAgentMessage(
+          { ...request, requestId },
+          controller.signal
+        );
+      } finally {
+        agentControllers.delete(requestId);
+      }
+    }
     if (!activeProject || request?.projectId !== activeProject.id) {
       throw new Error('Le projet NeuraCo actif ne correspond pas à la demande.');
     }
@@ -4022,12 +4045,12 @@ const registerIpcHandlers = (): void => {
 
   ipcMain.handle(IPC_CHANNELS.agentCancel, async (event, requestId: string) => {
     ensureTrustedSender(event.senderFrame?.url ?? '');
-    if (!activeProject) throw new Error('Aucun projet NeuraCo actif.');
     const safeRequestId = String(requestId || '').trim();
     if (!safeRequestId) throw new Error('Identifiant de tâche manquant.');
     const controller = agentControllers.get(safeRequestId);
     if (!controller) return false;
     controller.abort(new Error('Tâche redirigée par l’utilisateur.'));
+    if (!activeProject) return true;
     await audit({
       taskId: safeRequestId,
       projectId: activeProject.id,

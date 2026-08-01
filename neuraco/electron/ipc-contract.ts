@@ -2246,6 +2246,7 @@ export interface NeuraCoAgentRequest {
   content: string;
   sessionId?: string;
   requestId?: string;
+  scope?: 'project' | 'general';
   projectId: string;
   projectName: string;
   mode: 'question' | 'plan';
