@@ -80,6 +80,8 @@ const createWorkspaceMocks = () => ({
   setControlledMemoryEnabled: vi.fn(),
   exportControlledMemories: vi.fn(),
   sendAgentMessage: vi.fn(),
+  streamAgentMessage: vi.fn(),
+  onAgentStreamEvent: vi.fn().mockReturnValue(() => undefined),
   cancelAgentMessage: vi.fn(),
   listSecondaryConversations: vi.fn().mockResolvedValue([]),
   createSecondaryConversation: vi.fn(),
@@ -281,7 +283,7 @@ describe('NeuraCo desktop foundation', () => {
   });
 
   it('allows an authenticated user to chat without opening a project', async () => {
-    const sendAgentMessage = vi.fn().mockResolvedValue({
+    const streamAgentMessage = vi.fn().mockResolvedValue({
       message: 'Réponse générale NeuraCo',
       sessionId: 'general-session-1',
       provider: 'openai',
@@ -318,7 +320,7 @@ describe('NeuraCo desktop foundation', () => {
         },
         persistent: true
       }),
-      sendAgentMessage,
+      streamAgentMessage,
       login: vi.fn(),
       register: vi.fn(),
       loginWithGoogle: vi.fn(),
@@ -348,7 +350,7 @@ describe('NeuraCo desktop foundation', () => {
       await Promise.resolve();
     });
 
-    expect(sendAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
+    expect(streamAgentMessage).toHaveBeenCalledWith(expect.objectContaining({
       content: 'Bonjour NeuraCo',
       projectId: '000000000000000000000001',
       projectName: 'Conversation générale',

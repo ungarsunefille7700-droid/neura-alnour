@@ -107,7 +107,7 @@ function AppRouter() {
       <Route path="/reminders" element={<RemindersPage />} />
       <Route path="/founder-admin" element={<ProtectedRoute><FounderAdminPage /></ProtectedRoute>} />
       <Route path="/rewards" element={<ProtectedRoute><GamificationPage /></ProtectedRoute>} />
-      <Route path="/neuraco/connect" element={<ProtectedRoute><NeuraCoConnectPage /></ProtectedRoute>} />
+      <Route path="/neuraco/connect" element={<NeuraCoConnectPage />} />
     </Routes>
   );
 }

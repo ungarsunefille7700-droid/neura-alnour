@@ -1,4 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Accessibility,
   Check,
@@ -937,6 +939,7 @@ function App() {
   const [homeInput, setHomeInput] = useState('');
   const [homeMessages, setHomeMessages] = useState<HomeChatMessage[]>([]);
   const [homeChatBusy, setHomeChatBusy] = useState(false);
+  const [homeStreamHasContent, setHomeStreamHasContent] = useState(false);
   const [homeSessionId, setHomeSessionId] = useState<string | undefined>();
   const [appLockState, setAppLockState] = useState<NeuraCoAppLockState | null>(
     desktopAvailable ? null : {
@@ -1203,11 +1206,28 @@ function App() {
     setHomeInput('');
     setHomeMessages((current) => [...current, userMessage]);
     setHomeChatBusy(true);
+    setHomeStreamHasContent(false);
+    const requestId = crypto.randomUUID();
+    const assistantId = crypto.randomUUID();
+    let removeStreamListener: (() => void) | undefined;
     try {
-      const response = await window.neuraco.sendAgentMessage({
+      setHomeMessages((current) => [
+        ...current,
+        { id: assistantId, role: 'assistant', content: '' }
+      ]);
+      removeStreamListener = window.neuraco.onAgentStreamEvent((event) => {
+        if (event.requestId !== requestId || event.type !== 'delta' || !event.content) return;
+        setHomeStreamHasContent(true);
+        setHomeMessages((current) => current.map((message) => (
+          message.id === assistantId
+            ? { ...message, content: `${message.content}${event.content}` }
+            : message
+        )));
+      });
+      const response = await window.neuraco.streamAgentMessage({
         content,
         sessionId: homeSessionId,
-        requestId: crypto.randomUUID(),
+        requestId,
         scope: 'general',
         projectId: GENERAL_CHAT_PROJECT_ID,
         projectName: locale === 'fr' ? 'Conversation générale' : 'General conversation',
@@ -1218,18 +1238,18 @@ function App() {
         images: []
       });
       setHomeSessionId(response.sessionId);
-      setHomeMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: response.message,
-          model: `${response.modelDisplay} · ${response.provider}`
-        }
-      ]);
+      setHomeMessages((current) => current.map((message) => (
+        message.id === assistantId
+          ? {
+            ...message,
+            content: response.message || message.content,
+            model: `${response.modelDisplay} · ${response.provider}`
+          }
+          : message
+      )));
     } catch (error) {
       setHomeMessages((current) => [
-        ...current,
+        ...current.filter((message) => message.id !== assistantId),
         {
           id: crypto.randomUUID(),
           role: 'system',
@@ -1241,7 +1261,9 @@ function App() {
         }
       ]);
     } finally {
+      removeStreamListener?.();
       setHomeChatBusy(false);
+      setHomeStreamHasContent(false);
     }
   };
 
@@ -1300,10 +1322,14 @@ function App() {
                 </strong>
                 {message.model && <span>{message.model}</span>}
               </header>
-              <p>{message.content}</p>
+              {message.role === 'assistant' ? (
+                <div className="home-chat-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                </div>
+              ) : <p>{message.content}</p>}
             </article>
           ))}
-          {homeChatBusy && (
+          {homeChatBusy && !homeStreamHasContent && (
             <div className="home-chat-thinking" role="status">
               {locale === 'fr' ? 'NeuraCo réfléchit…' : 'NeuraCo is thinking…'}
             </div>

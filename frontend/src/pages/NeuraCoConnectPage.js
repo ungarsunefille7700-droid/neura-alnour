@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { CheckCircle2, Loader2, ShieldAlert } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
@@ -7,7 +7,8 @@ import { useAuth } from '@/contexts/AuthContext';
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const NeuraCoConnectPage = () => {
-  const { token } = useAuth();
+  const { token, loading } = useAuth();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const [status, setStatus] = useState('Vérification de votre accès NeuraCo...');
   const [error, setError] = useState('');
@@ -29,7 +30,7 @@ const NeuraCoConnectPage = () => {
         const response = await axios.post(
           `${API}/neuraco/auth/code`,
           { state, callback_url: callbackUrl },
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+          { headers: { Authorization: `Bearer ${token}` }, timeout: 12000 }
         );
         setStatus('Accès validé. Retour vers NeuraCo...');
         window.location.replace(response.data.redirect_url);
@@ -49,6 +50,10 @@ const NeuraCoConnectPage = () => {
 
     connect();
   }, [searchParams, token]);
+
+  if (!token && !loading) {
+    return <Navigate to="/auth" replace state={{ from: `${location.pathname}${location.search}` }} />;
+  }
 
   return (
     <main className="min-h-screen bg-background flex items-center justify-center p-6">

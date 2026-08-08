@@ -134,7 +134,8 @@ import {
 } from './terminal-service';
 import {
   isGeneralChatRequest,
-  sendAgentMessage
+  sendAgentMessage,
+  streamAgentMessage
 } from './agent-service';
 import {
   isSensitiveTerminalCommand,
@@ -4086,6 +4087,29 @@ const registerIpcHandlers = (): void => {
         dedupeKey: `task-failed-${requestId}`
       });
       throw error;
+    } finally {
+      agentControllers.delete(requestId);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.agentStream, async (event, request) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    ensureEmergencyRunning();
+    if (!isGeneralChatRequest(request)) {
+      throw new Error('La diffusion directe est réservée à la conversation générale NeuraCo.');
+    }
+    const requestId = typeof request?.requestId === 'string' ? request.requestId : randomUUID();
+    const controller = new AbortController();
+    agentControllers.set(requestId, controller);
+    const sender = event.sender;
+    try {
+      return await streamAgentMessage(
+        { ...request, requestId },
+        (streamEvent) => {
+          if (!sender.isDestroyed()) sender.send(IPC_CHANNELS.agentStreamEvent, streamEvent);
+        },
+        controller.signal
+      );
     } finally {
       agentControllers.delete(requestId);
     }

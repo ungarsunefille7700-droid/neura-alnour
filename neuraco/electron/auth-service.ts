@@ -121,6 +121,28 @@ export const authenticatedApiRequest = async <T>(
   return apiRequest<T>(route, options, token);
 };
 
+export const authenticatedApiStream = async (
+  route: string,
+  options: RequestInit = {}
+): Promise<Response> => {
+  const token = await loadToken();
+  if (!token) throw new ApiError('Session NeuraCo expirée.', 401);
+  const headers = new Headers(options.headers);
+  headers.set('Accept', 'text/event-stream');
+  headers.set('Content-Type', 'application/json');
+  headers.set('Authorization', `Bearer ${token}`);
+  const response = await net.fetch(`${API_BASE_URL}${route}`, { ...options, headers });
+  if (!response.ok) {
+    let detail = 'La diffusion NeuraCo a échoué.';
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === 'string' ? payload.detail : payload?.detail?.message || detail;
+    } catch {}
+    throw new ApiError(detail, response.status);
+  }
+  return response;
+};
+
 export const authenticatedApiDownload = async (
   absoluteUrl: string,
   signal?: AbortSignal

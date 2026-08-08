@@ -1,19 +1,55 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { requestMock } = vi.hoisted(() => ({ requestMock: vi.fn() }));
+const { requestMock, streamMock } = vi.hoisted(() => ({
+  requestMock: vi.fn(),
+  streamMock: vi.fn()
+}));
 vi.mock('./auth-service', () => ({
-  authenticatedApiRequest: requestMock
+  authenticatedApiRequest: requestMock,
+  authenticatedApiStream: streamMock
 }));
 
 import {
   GENERAL_CHAT_PROJECT_ID,
   isGeneralChatRequest,
-  sendAgentMessage
+  sendAgentMessage,
+  streamAgentMessage
 } from './agent-service';
 
-beforeEach(() => requestMock.mockReset());
+beforeEach(() => {
+  requestMock.mockReset();
+  streamMock.mockReset();
+});
 
 describe('agent-service conversation context', () => {
+  it('diffuse les fragments avant la réponse finale', async () => {
+    const frames = [
+      { type: 'model', provider: 'openai', model: 'gpt-4o' },
+      { type: 'delta', content: 'Bonjour ' },
+      { type: 'delta', content: 'depuis NeuraCo.' },
+      {
+        type: 'done', completion: 'Bonjour depuis NeuraCo.',
+        session_id: 'stream-session', provider: 'openai', model: 'gpt-4o',
+        model_display: 'GPT-4o', mode: 'question', files_used: [], images_used: [],
+        entitlement_plan: 'neura_ultra'
+      }
+    ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
+    streamMock.mockResolvedValue(new Response(frames, {
+      headers: { 'Content-Type': 'text/event-stream' }
+    }));
+    const events: string[] = [];
+    const result = await streamAgentMessage({
+      content: 'Bonjour', requestId: 'request-stream', scope: 'general',
+      projectId: GENERAL_CHAT_PROJECT_ID, projectName: 'Conversation générale',
+      mode: 'question', files: [], images: []
+    }, (event) => events.push(`${event.type}:${event.content || ''}`));
+
+    expect(events).toEqual([
+      'model:', 'delta:Bonjour ', 'delta:depuis NeuraCo.', 'done:'
+    ]);
+    expect(result.message).toBe('Bonjour depuis NeuraCo.');
+  });
+
   it('autorise une conversation générale sans projet ni fichier local', async () => {
     requestMock.mockResolvedValue({
       message: 'Je peux vous aider sans ouvrir de dossier.',

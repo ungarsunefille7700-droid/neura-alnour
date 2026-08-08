@@ -92,6 +92,8 @@ export const IPC_CHANNELS = {
   routineRun: 'neuraco:routine-run',
   routineTrigger: 'neuraco:routine-trigger',
   agentChat: 'neuraco:agent-chat',
+  agentStream: 'neuraco:agent-stream',
+  agentStreamEvent: 'neuraco:agent-stream-event',
   agentCancel: 'neuraco:agent-cancel',
   localSessionGet: 'neuraco:local-session-get',
   localSessionSave: 'neuraco:local-session-save',
@@ -501,6 +503,12 @@ export interface NeuraCoDesktopApi {
   sendAgentMessage: (
     request: NeuraCoAgentRequest
   ) => Promise<NeuraCoAgentResponse>;
+  streamAgentMessage: (
+    request: NeuraCoAgentRequest
+  ) => Promise<NeuraCoAgentResponse>;
+  onAgentStreamEvent: (
+    listener: (event: NeuraCoAgentStreamEvent) => void
+  ) => () => void;
   cancelAgentMessage: (requestId: string) => Promise<boolean>;
   getLocalSession: () => Promise<NeuraCoLocalSession | null>;
   saveLocalSession: (
@@ -2303,6 +2311,14 @@ export interface NeuraCoAgentResponse {
     reserved_included: number;
     reserved_purchased: number;
   };
+}
+
+export interface NeuraCoAgentStreamEvent {
+  requestId: string;
+  type: 'model' | 'delta' | 'done' | 'error';
+  content?: string;
+  detail?: string;
+  response?: NeuraCoAgentResponse;
 }
 
 export type NeuraCoExecutionMode = 'local' | 'cloud' | 'hybrid';

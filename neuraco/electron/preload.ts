@@ -15,6 +15,7 @@ import {
   type NeuraCoRegistration,
   type NeuraCoDesktopApi,
   type NeuraCoAgentRequest,
+  type NeuraCoAgentStreamEvent,
   type NeuraCoArtifactCreate,
   type NeuraCoArtifactUpdate,
   type NeuraCoBrowserAction,
@@ -332,6 +333,15 @@ const desktopApi: NeuraCoDesktopApi = Object.freeze({
   ) => ipcRenderer.invoke(IPC_CHANNELS.routineTrigger, trigger, metadata),
   sendAgentMessage: (request: NeuraCoAgentRequest) =>
     ipcRenderer.invoke(IPC_CHANNELS.agentChat, request),
+  streamAgentMessage: (request: NeuraCoAgentRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.agentStream, request),
+  onAgentStreamEvent: (listener: (event: NeuraCoAgentStreamEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, streamEvent: NeuraCoAgentStreamEvent) => {
+      listener(streamEvent);
+    };
+    ipcRenderer.on(IPC_CHANNELS.agentStreamEvent, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.agentStreamEvent, handler);
+  },
   cancelAgentMessage: (requestId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.agentCancel, requestId),
   getLocalSession: () =>

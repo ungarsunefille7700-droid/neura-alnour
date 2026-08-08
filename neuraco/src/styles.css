@@ -4225,20 +4225,27 @@ a:focus-visible {
 }
 
 .home-chat-message {
-  max-width: 760px;
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  width: min(920px, 100%);
+  max-width: 100%;
+  padding: 4px 0 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .home-chat-message.is-user {
   justify-self: end;
   max-width: min(680px, 82%);
+  width: auto;
+  padding: 14px 16px;
+  border-radius: 8px;
   background: var(--surface-hover);
 }
 
 .home-chat-message.is-system {
+  padding: 16px 18px;
+  border: 1px solid #ebcac8;
+  border-radius: 8px;
   border-color: #ebcac8;
   color: var(--danger);
   background: var(--danger-soft);
@@ -4266,6 +4273,22 @@ a:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.58;
+}
+
+.home-chat-markdown {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.home-chat-markdown > :first-child { margin-top: 0; }
+.home-chat-markdown > :last-child { margin-bottom: 0; }
+.home-chat-markdown pre {
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-hover);
 }
 
 .home-chat-thinking {

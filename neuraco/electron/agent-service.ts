@@ -1,7 +1,8 @@
-import { authenticatedApiRequest } from './auth-service';
+import { authenticatedApiRequest, authenticatedApiStream } from './auth-service';
 import type {
   NeuraCoAgentRequest,
-  NeuraCoAgentResponse
+  NeuraCoAgentResponse,
+  NeuraCoAgentStreamEvent
 } from './ipc-contract';
 import { redactSecrets } from './secret-redaction';
 
@@ -122,8 +123,8 @@ const validateAgentRequest = (request: NeuraCoAgentRequest): NeuraCoAgentRequest
     throw new Error('Demande NeuraCo invalide.');
   }
   const content = request.content.trim();
-  if (content.length === 0 || content.length > 12_000) {
-    throw new Error('La demande doit contenir entre 1 et 12 000 caractères.');
+  if (content.length === 0 || content.length > 50_000) {
+    throw new Error('La demande doit contenir entre 1 et 50 000 caractères.');
   }
   if (!/^[a-f0-9]{24}$/i.test(request.projectId)) {
     throw new Error('Identifiant de projet NeuraCo invalide.');
@@ -155,6 +156,51 @@ const validateAgentRequest = (request: NeuraCoAgentRequest): NeuraCoAgentRequest
   };
 };
 
+const agentApiBody = (request: NeuraCoAgentRequest) => JSON.stringify({
+  content: request.content,
+  session_id: request.sessionId,
+  request_id: request.requestId,
+  project_id: request.projectId,
+  project_name: request.projectName,
+  mode: request.mode,
+  model: request.model || 'auto',
+  conversation_context: request.conversationContext?.map((message) => ({
+    role: message.role,
+    content: message.content
+  })),
+  files: request.files,
+  images: request.images.map((image) => ({
+    id: image.id,
+    name: image.name,
+    mime_type: image.mimeType,
+    data_base64: image.dataBase64,
+    width: image.width,
+    height: image.height,
+    size: image.size
+  }))
+});
+
+const mapAgentResponse = (response: AgentApiResponse): NeuraCoAgentResponse => ({
+  message: response.message,
+  sessionId: response.session_id,
+  provider: response.provider,
+  model: response.model,
+  modelDisplay: response.model_display,
+  mode: response.mode,
+  filesUsed: response.files_used,
+  imagesUsed: (response.images_used || []).map((image) => ({
+    id: image.id,
+    name: image.name,
+    mimeType: image.mime_type,
+    width: image.width,
+    height: image.height,
+    size: image.size
+  })),
+  entitlementPlan: response.entitlement_plan,
+  usage: response.usage,
+  reservation: response.reservation
+});
+
 export const sendAgentMessage = async (
   rawRequest: NeuraCoAgentRequest,
   signal?: AbortSignal
@@ -163,48 +209,68 @@ export const sendAgentMessage = async (
   const response = await authenticatedApiRequest<AgentApiResponse>('/neuraco/agent/chat', {
     method: 'POST',
     signal,
-    body: JSON.stringify({
-      content: request.content,
-      session_id: request.sessionId,
-      request_id: request.requestId,
-      project_id: request.projectId,
-      project_name: request.projectName,
-      mode: request.mode,
-      model: request.model || 'auto',
-      conversation_context: request.conversationContext?.map((message) => ({
-        role: message.role,
-        content: message.content
-      })),
-      files: request.files,
-      images: request.images.map((image) => ({
-        id: image.id,
-        name: image.name,
-        mime_type: image.mimeType,
-        data_base64: image.dataBase64,
-        width: image.width,
-        height: image.height,
-        size: image.size
-      }))
-    })
+    body: agentApiBody(request)
   });
-  return {
-    message: response.message,
-    sessionId: response.session_id,
-    provider: response.provider,
-    model: response.model,
-    modelDisplay: response.model_display,
-    mode: response.mode,
-    filesUsed: response.files_used,
-    imagesUsed: (response.images_used || []).map((image) => ({
-      id: image.id,
-      name: image.name,
-      mimeType: image.mime_type,
-      width: image.width,
-      height: image.height,
-      size: image.size
-    })),
-    entitlementPlan: response.entitlement_plan,
-    usage: response.usage,
-    reservation: response.reservation
-  };
+  return mapAgentResponse(response);
+};
+
+export const streamAgentMessage = async (
+  rawRequest: NeuraCoAgentRequest,
+  onEvent: (event: NeuraCoAgentStreamEvent) => void,
+  signal?: AbortSignal
+): Promise<NeuraCoAgentResponse> => {
+  const request = validateAgentRequest(rawRequest);
+  const requestId = request.requestId || '';
+  const response = await authenticatedApiStream('/neuraco/agent/stream', {
+    method: 'POST',
+    signal,
+    body: agentApiBody(request)
+  });
+  if (!response.body) throw new Error('Le serveur NeuraCo n’a pas ouvert le flux de réponse.');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResponse: NeuraCoAgentResponse | null = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for (const frame of frames) {
+      const data = frame.split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      if (payload.type === 'delta') {
+        onEvent({ requestId, type: 'delta', content: String(payload.content || '') });
+      } else if (payload.type === 'model') {
+        onEvent({ requestId, type: 'model' });
+      } else if (payload.type === 'error') {
+        const detail = String(payload.detail || 'La diffusion NeuraCo a échoué.');
+        onEvent({ requestId, type: 'error', detail });
+        throw new Error(detail);
+      } else if (payload.type === 'done') {
+        finalResponse = mapAgentResponse({
+          message: payload.completion || '',
+          session_id: payload.session_id,
+          provider: payload.provider,
+          model: payload.model,
+          model_display: payload.model_display,
+          mode: payload.mode,
+          files_used: payload.files_used || [],
+          images_used: payload.images_used || [],
+          entitlement_plan: payload.entitlement_plan,
+          usage: payload.usage,
+          reservation: payload.reservation
+        });
+        onEvent({ requestId, type: 'done', response: finalResponse });
+      }
+    }
+    if (done) break;
+  }
+  if (!finalResponse) throw new Error('Le flux NeuraCo s’est terminé sans réponse finale.');
+  return finalResponse;
 };

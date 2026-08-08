@@ -1411,15 +1411,12 @@ const ChatPage = () => {
                     className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                     data-testid={`message-${index}`}
                   >
-                    <div className={`
-                      max-w-[85%] rounded-2xl p-4
-                      ${msg.role === 'user'
-                        ? 'bg-primary text-primary-foreground rounded-br-md'
-                        : isQuotaNotice
-                          ? 'border border-amber-500/40 bg-amber-500/10 rounded-bl-md'
-                          : 'glass rounded-bl-md'
-                      }
-                    `}>
+                    <div className={msg.role === 'user'
+                      ? 'max-w-[85%] rounded-2xl rounded-br-md bg-primary p-4 text-primary-foreground'
+                      : isQuotaNotice
+                        ? 'max-w-[85%] rounded-2xl rounded-bl-md border border-amber-500/40 bg-amber-500/10 p-4'
+                        : 'w-full max-w-[85%] py-2'
+                    }>
                       {msg.role === 'assistant' && (
                         <div className="flex items-center gap-2 mb-2 text-primary">
                           <Sparkles className="w-4 h-4" />
@@ -1504,7 +1501,7 @@ const ChatPage = () => {
             )}
             {streaming && (
               <div className="flex justify-start">
-                <div className="glass rounded-2xl rounded-bl-md p-4 max-w-[85%]">
+                <div className="w-full max-w-[85%] py-2">
                   <div className="flex items-center gap-2 mb-2 text-primary">
                     <Sparkles className="w-4 h-4" />
                     <span className="text-xs font-medium">NEURA AL-NOUR</span>
@@ -1530,7 +1527,7 @@ const ChatPage = () => {
             )}
             {loading && (
               <div className="flex justify-start">
-                <div className="glass rounded-2xl rounded-bl-md p-4">
+                <div className="py-2">
                   <div className="flex items-center gap-2 text-primary">
                     <Loader2 className="w-4 h-4 animate-spin" />
                     <span className="text-sm">{t('chat.thinking')}</span>

@@ -1166,3 +1166,16 @@ def test_neuraco_prompt_allows_legal_fivem_development_requests():
     assert "script FiveM n'est pas en elle-meme" in system
     assert "Ne transforme jamais une simple demande de code licite" in system
     assert "Peux-tu me faire un script FiveM ?" in prompt
+
+
+def test_neuraco_prompt_uses_the_neuraco_identity_only():
+    message = server.NeuraCoAgentMessage(
+        content="Présente-toi.",
+        project_id="000000000000000000000001",
+        project_name="Conversation generale",
+    )
+
+    system, _ = server._build_neuraco_agent_prompt(message, [], [], [])
+
+    assert "tu es exclusivement « NeuraCo »" in system
+    assert "Présente-toi TOUJOURS comme « NEURA AL-NOUR »" not in system

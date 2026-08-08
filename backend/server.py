@@ -4341,7 +4341,7 @@ class NeuraCoAgentHistoryContext(BaseModel):
 
 
 class NeuraCoAgentMessage(BaseModel):
-    content: str = Field(..., min_length=1, max_length=12000)
+    content: str = Field(..., min_length=1, max_length=50000)
     session_id: Optional[str] = Field(default=None, max_length=120)
     request_id: Optional[str] = Field(default=None, max_length=120)
     project_id: str = Field(..., min_length=8, max_length=120)
@@ -5569,6 +5569,13 @@ ACCOUNT_CLOUD_DATA_COLLECTIONS = (
     "quiz_history",
     "quiz_sessions",
     "user_sessions",
+)
+
+NEURACO_IDENTITY_GUARD = (
+    "\n\nIDENTITE NEURACO (REGLE STRICTE) : Dans l'application Windows NeuraCo, "
+    "tu es exclusivement « NeuraCo », l'assistant developpeur de l'espace local. "
+    "Ne te presente jamais comme NEURA AL-NOUR, ChatGPT, Claude, Gemini ou un autre produit. "
+    "Ne revele pas le fournisseur technique sous-jacent."
 )
 
 
@@ -13157,7 +13164,7 @@ def _build_neuraco_agent_prompt(
             "sexuel explicite ou une autre action dangereuse interdite. Ne transforme jamais une "
             "simple demande de code licite en sermon religieux.\n"
         )
-        + IDENTITY_GUARD
+        + NEURACO_IDENTITY_GUARD
     )
     context_parts = []
     for file in files:
