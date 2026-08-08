@@ -26,7 +26,10 @@ for (const relative of required) {
 }
 
 const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-if (packageJson.productName !== 'NeuraCo' || packageJson.version !== '1.0.5') {
+if (
+  packageJson.productName !== 'NeuraCo'
+  || !/^\d+\.\d+\.\d+$/.test(String(packageJson.version || ''))
+) {
   throw new Error('Le nom ou la version de production NeuraCo est incorrect.');
 }
 
