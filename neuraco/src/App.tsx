@@ -7,6 +7,7 @@ import {
   CircleAlert,
   FolderClosed,
   FolderOpen,
+  GitFork,
   Home,
   KeyRound,
   Languages,
@@ -694,6 +695,7 @@ interface SidebarProps {
   onViewChange: (view: WorkspaceView) => void;
   onOpenProject: () => Promise<void>;
   onCreateProject: () => void;
+  onCloneProject: () => void;
   onLocaleChange: (locale: Locale) => void;
   onLogout: () => void;
 }
@@ -707,6 +709,7 @@ const Sidebar = ({
   onViewChange,
   onOpenProject,
   onCreateProject,
+  onCloneProject,
   onLocaleChange,
   onLogout
 }: SidebarProps) => {
@@ -832,6 +835,15 @@ const Sidebar = ({
           <Plus size={14} aria-hidden="true" />
           {'Cr\u00e9er un nouveau projet'}
         </button>
+        <button
+          className="open-project-button"
+          type="button"
+          onClick={onCloneProject}
+          disabled={!desktopAvailable}
+        >
+          <GitFork size={14} aria-hidden="true" />
+          {'Cloner un d\u00e9p\u00f4t Git'}
+        </button>
       </div>
 
       <div className="sidebar-account">
@@ -909,6 +921,10 @@ function App() {
   const [newProjectName, setNewProjectName] = useState('');
   const [createProjectBusy, setCreateProjectBusy] = useState(false);
   const [createProjectError, setCreateProjectError] = useState('');
+  const [cloneProjectOpen, setCloneProjectOpen] = useState(false);
+  const [repositoryUrl, setRepositoryUrl] = useState('');
+  const [cloneProjectBusy, setCloneProjectBusy] = useState(false);
+  const [cloneProjectError, setCloneProjectError] = useState('');
   const [accessibility, setAccessibility] = useState<NeuraCoAccessibilitySettings>(
     DEFAULT_ACCESSIBILITY
   );
@@ -1141,6 +1157,28 @@ function App() {
       );
     } finally {
       setCreateProjectBusy(false);
+    }
+  };
+
+  const cloneProject = async () => {
+    if (!window.neuraco || !repositoryUrl.trim() || cloneProjectBusy) return;
+    setCloneProjectBusy(true);
+    setCloneProjectError('');
+    setProjectError(null);
+    try {
+      const snapshot = await window.neuraco.cloneProject(repositoryUrl.trim());
+      if (snapshot) {
+        setProjectSnapshot(snapshot);
+        setView('project');
+        setCloneProjectOpen(false);
+        setRepositoryUrl('');
+      }
+    } catch (error) {
+      setCloneProjectError(
+        error instanceof Error ? error.message : 'Le d\u00e9p\u00f4t n\u2019a pas pu \u00eatre clon\u00e9.'
+      );
+    } finally {
+      setCloneProjectBusy(false);
     }
   };
 
@@ -1467,6 +1505,10 @@ function App() {
           setCreateProjectError('');
           setCreateProjectOpen(true);
         }}
+        onCloneProject={() => {
+          setCloneProjectError('');
+          setCloneProjectOpen(true);
+        }}
         onLocaleChange={setLocale}
         onLogout={() => {
           if (window.neuraco && session?.user) {
@@ -1617,6 +1659,56 @@ function App() {
                   disabled={createProjectBusy || !newProjectName.trim()}
                 >
                   {createProjectBusy ? 'Cr\u00e9ation\u2026' : 'Choisir le dossier parent'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+      {cloneProjectOpen && (
+        <div className="project-create-backdrop" role="presentation">
+          <section
+            className="project-create-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="project-clone-title"
+          >
+            <h2 id="project-clone-title">{'Cloner un d\u00e9p\u00f4t Git'}</h2>
+            <p>
+              {'Collez une URL HTTPS GitHub, GitLab ou compatible. NeuraCo vous demandera ensuite le dossier parent.'}
+            </p>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void cloneProject();
+              }}
+            >
+              <label htmlFor="repository-url">{'URL HTTPS du d\u00e9p\u00f4t'}</label>
+              <input
+                id="repository-url"
+                type="url"
+                value={repositoryUrl}
+                autoFocus
+                disabled={cloneProjectBusy}
+                placeholder="https://github.com/organisation/projet.git"
+                onChange={(event) => setRepositoryUrl(event.target.value)}
+              />
+              {cloneProjectError && <p className="project-create-error" role="alert">{cloneProjectError}</p>}
+              <div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={cloneProjectBusy}
+                  onClick={() => setCloneProjectOpen(false)}
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={cloneProjectBusy || !repositoryUrl.trim()}
+                >
+                  {cloneProjectBusy ? 'Clonage\u2026' : 'Choisir le dossier parent'}
                 </button>
               </div>
             </form>

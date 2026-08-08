@@ -38,6 +38,7 @@ export const IPC_CHANNELS = {
   securityDeviceRevoke: 'neuraco:security-device-revoke',
   projectOpen: 'neuraco:project-open',
   projectCreate: 'neuraco:project-create',
+  projectClone: 'neuraco:project-clone',
   projectRefresh: 'neuraco:project-refresh',
   projectReadFile: 'neuraco:project-read-file',
   projectSaveFile: 'neuraco:project-save-file',
@@ -368,6 +369,7 @@ export interface NeuraCoDesktopApi {
   ) => Promise<NeuraCoConnectedDevice[]>;
   openProject: () => Promise<NeuraCoProjectSnapshot | null>;
   createProject: (name: string) => Promise<NeuraCoProjectSnapshot | null>;
+  cloneProject: (repositoryUrl: string) => Promise<NeuraCoProjectSnapshot | null>;
   refreshProject: () => Promise<NeuraCoProjectSnapshot | null>;
   readProjectFile: (relativePath: string) => Promise<NeuraCoProjectFile>;
   saveProjectFile: (

@@ -125,6 +125,7 @@ import {
   scanProjectCached,
   writeProjectTextFile
 } from './workspace-core';
+import { cloneGitRepository } from './project-clone-service';
 import {
   listTerminalProfiles,
   startTerminalTask,
@@ -2695,6 +2696,29 @@ const registerIpcHandlers = (): void => {
       action: 'project_created',
       status: 'completed',
       summary: `Projet cr\u00e9\u00e9 : ${activeProject.name}`,
+      details: { indexedFiles: snapshot.indexedFiles }
+    });
+    return snapshot;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.projectClone, async (event, repositoryUrl: string) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    if (!mainWindow) throw new Error('Fen\u00eatre NeuraCo indisponible.');
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choisir o\u00f9 cloner le d\u00e9p\u00f4t Git',
+      buttonLabel: 'Cloner dans ce dossier',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    activeProject = await cloneGitRepository(selection.filePaths[0], repositoryUrl);
+    sessionAllowedSignatures.clear();
+    const snapshot = await scanProjectCached(activeProject, { force: true });
+    await audit({
+      projectId: activeProject.id,
+      category: 'project',
+      action: 'project_cloned',
+      status: 'completed',
+      summary: `D\u00e9p\u00f4t clon\u00e9 : ${activeProject.name}`,
       details: { indexedFiles: snapshot.indexedFiles }
     });
     return snapshot;

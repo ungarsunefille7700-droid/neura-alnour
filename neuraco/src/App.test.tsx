@@ -42,6 +42,7 @@ const createWorkspaceMocks = () => ({
   revokeConnectedDevice: vi.fn().mockResolvedValue([]),
   openProject: vi.fn().mockResolvedValue(null),
   createProject: vi.fn().mockResolvedValue(null),
+  cloneProject: vi.fn().mockResolvedValue(null),
   refreshProject: vi.fn().mockResolvedValue(null),
   readProjectFile: vi.fn(),
   saveProjectFile: vi.fn(),
@@ -369,9 +370,21 @@ describe('NeuraCo desktop foundation', () => {
       excludedEntries: 0,
       truncated: false
     });
+    const cloneProject = vi.fn().mockResolvedValue({
+      project: {
+        id: 'project-cloned',
+        name: 'Hello-World',
+        rootPath: 'C:\\Users\\member\\Projects\\Hello-World'
+      },
+      files: [],
+      indexedFiles: 1,
+      excludedEntries: 1,
+      truncated: false
+    });
     window.neuraco = {
       ...createWorkspaceMocks(),
       createProject,
+      cloneProject,
       getAppInfo: vi.fn().mockResolvedValue({
         name: 'NeuraCo',
         version: '1.0.5',
@@ -433,6 +446,31 @@ describe('NeuraCo desktop foundation', () => {
     expect(createProject).toHaveBeenCalledWith('Mon Application');
     expect(container.textContent).toContain('Mon Application');
     expect(container.querySelector('#new-project-name')).toBeNull();
+
+    const cloneButton = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Cloner un d\u00e9p\u00f4t Git')
+    );
+    expect(cloneButton).toBeDefined();
+    await act(async () => {
+      cloneButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const repositoryInput = container.querySelector<HTMLInputElement>('#repository-url');
+    await act(async () => {
+      setter?.call(repositoryInput, 'https://github.com/octocat/Hello-World.git');
+      repositoryInput?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      repositoryInput?.closest('form')?.dispatchEvent(new Event('submit', {
+        bubbles: true,
+        cancelable: true
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(cloneProject).toHaveBeenCalledWith('https://github.com/octocat/Hello-World.git');
+    expect(container.textContent).toContain('Hello-World');
+    expect(container.querySelector('#repository-url')).toBeNull();
   });
 
   it('reads app information and verifies security through the preload API', async () => {
