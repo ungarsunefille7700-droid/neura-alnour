@@ -162,6 +162,8 @@ const desktopApi: NeuraCoDesktopApi = Object.freeze({
   revokeConnectedDevice: (deviceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.securityDeviceRevoke, deviceId),
   openProject: () => ipcRenderer.invoke(IPC_CHANNELS.projectOpen),
+  createProject: (name: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.projectCreate, name),
   refreshProject: () => ipcRenderer.invoke(IPC_CHANNELS.projectRefresh),
   readProjectFile: (relativePath: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.projectReadFile, relativePath),

@@ -693,6 +693,7 @@ interface SidebarProps {
   desktopAvailable: boolean;
   onViewChange: (view: WorkspaceView) => void;
   onOpenProject: () => Promise<void>;
+  onCreateProject: () => void;
   onLocaleChange: (locale: Locale) => void;
   onLogout: () => void;
 }
@@ -705,6 +706,7 @@ const Sidebar = ({
   desktopAvailable,
   onViewChange,
   onOpenProject,
+  onCreateProject,
   onLocaleChange,
   onLogout
 }: SidebarProps) => {
@@ -821,6 +823,15 @@ const Sidebar = ({
             Changer de projet
           </button>
         )}
+        <button
+          className="open-project-button"
+          type="button"
+          onClick={onCreateProject}
+          disabled={!desktopAvailable}
+        >
+          <Plus size={14} aria-hidden="true" />
+          {'Cr\u00e9er un nouveau projet'}
+        </button>
       </div>
 
       <div className="sidebar-account">
@@ -894,6 +905,10 @@ function App() {
   const [checking, setChecking] = useState(false);
   const [projectSnapshot, setProjectSnapshot] = useState<NeuraCoProjectSnapshot | null>(null);
   const [projectError, setProjectError] = useState<ActionableErrorDetails | null>(null);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [createProjectBusy, setCreateProjectBusy] = useState(false);
+  const [createProjectError, setCreateProjectError] = useState('');
   const [accessibility, setAccessibility] = useState<NeuraCoAccessibilitySettings>(
     DEFAULT_ACCESSIBILITY
   );
@@ -1105,6 +1120,28 @@ function App() {
     if (!window.neuraco) return;
     const snapshot = await window.neuraco.refreshProject();
     if (snapshot) setProjectSnapshot(snapshot);
+  };
+
+  const createProject = async () => {
+    if (!window.neuraco || !newProjectName.trim() || createProjectBusy) return;
+    setCreateProjectBusy(true);
+    setCreateProjectError('');
+    setProjectError(null);
+    try {
+      const snapshot = await window.neuraco.createProject(newProjectName.trim());
+      if (snapshot) {
+        setProjectSnapshot(snapshot);
+        setView('project');
+        setCreateProjectOpen(false);
+        setNewProjectName('');
+      }
+    } catch (error) {
+      setCreateProjectError(
+        error instanceof Error ? error.message : 'Le projet n\u2019a pas pu \u00eatre cr\u00e9\u00e9.'
+      );
+    } finally {
+      setCreateProjectBusy(false);
+    }
   };
 
   const sendHomeMessage = async () => {
@@ -1426,6 +1463,10 @@ function App() {
         desktopAvailable={desktopAvailable}
         onViewChange={setView}
         onOpenProject={openProject}
+        onCreateProject={() => {
+          setCreateProjectError('');
+          setCreateProjectOpen(true);
+        }}
         onLocaleChange={setLocale}
         onLogout={() => {
           if (window.neuraco && session?.user) {
@@ -1532,6 +1573,56 @@ function App() {
           </footer>
         )}
       </main>
+      {createProjectOpen && (
+        <div className="project-create-backdrop" role="presentation">
+          <section
+            className="project-create-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="project-create-title"
+          >
+            <h2 id="project-create-title">{'Cr\u00e9er un nouveau projet'}</h2>
+            <p>
+              {'Donnez un nom au projet. Windows vous demandera ensuite dans quel dossier le cr\u00e9er.'}
+            </p>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createProject();
+              }}
+            >
+              <label htmlFor="new-project-name">Nom du projet</label>
+              <input
+                id="new-project-name"
+                value={newProjectName}
+                maxLength={80}
+                autoFocus
+                disabled={createProjectBusy}
+                placeholder="Mon application"
+                onChange={(event) => setNewProjectName(event.target.value)}
+              />
+              {createProjectError && <p className="project-create-error" role="alert">{createProjectError}</p>}
+              <div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={createProjectBusy}
+                  onClick={() => setCreateProjectOpen(false)}
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={createProjectBusy || !newProjectName.trim()}
+                >
+                  {createProjectBusy ? 'Cr\u00e9ation\u2026' : 'Choisir le dossier parent'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

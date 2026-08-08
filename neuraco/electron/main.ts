@@ -119,6 +119,7 @@ import {
   updatePrivacySettings
 } from './account-service';
 import {
+  createProjectRoot,
   openProjectRoot,
   readProjectTextFile,
   scanProjectCached,
@@ -2672,6 +2673,29 @@ const registerIpcHandlers = (): void => {
       projectName: activeProject.name
     }).catch((error) => {
       console.error('NeuraCo app-open routines failed', error);
+    });
+    return snapshot;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.projectCreate, async (event, name: string) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    if (!mainWindow) throw new Error('Fen\u00eatre NeuraCo indisponible.');
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choisir le dossier parent du nouveau projet',
+      buttonLabel: 'Cr\u00e9er le projet ici',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    activeProject = await createProjectRoot(selection.filePaths[0], name);
+    sessionAllowedSignatures.clear();
+    const snapshot = await scanProjectCached(activeProject, { force: true });
+    await audit({
+      projectId: activeProject.id,
+      category: 'project',
+      action: 'project_created',
+      status: 'completed',
+      summary: `Projet cr\u00e9\u00e9 : ${activeProject.name}`,
+      details: { indexedFiles: snapshot.indexedFiles }
     });
     return snapshot;
   });

@@ -41,6 +41,7 @@ const createWorkspaceMocks = () => ({
   listConnectedDevices: vi.fn().mockResolvedValue([]),
   revokeConnectedDevice: vi.fn().mockResolvedValue([]),
   openProject: vi.fn().mockResolvedValue(null),
+  createProject: vi.fn().mockResolvedValue(null),
   refreshProject: vi.fn().mockResolvedValue(null),
   readProjectFile: vi.fn(),
   saveProjectFile: vi.fn(),
@@ -354,6 +355,84 @@ describe('NeuraCo desktop foundation', () => {
       images: []
     }));
     expect(container.textContent).toContain('Réponse générale NeuraCo');
+  });
+
+  it('creates and opens a new local project from the sidebar', async () => {
+    const createProject = vi.fn().mockResolvedValue({
+      project: {
+        id: 'project-created',
+        name: 'Mon Application',
+        rootPath: 'C:\\Users\\member\\Projects\\Mon Application'
+      },
+      files: [],
+      indexedFiles: 0,
+      excludedEntries: 0,
+      truncated: false
+    });
+    window.neuraco = {
+      ...createWorkspaceMocks(),
+      createProject,
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.5',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({
+        status: 'authenticated',
+        user: {
+          id: 'member-1',
+          email: 'member@example.com',
+          name: 'Member',
+          subscription: 'neura_plus',
+          is_vip: false
+        },
+        entitlement: {
+          neuraco_access: true,
+          plan: 'neura_plus',
+          reason: 'subscription_active'
+        },
+        persistent: true
+      }),
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const createButton = Array.from(container.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.includes('Cr\u00e9er un nouveau projet')
+    );
+    expect(createButton).toBeDefined();
+    await act(async () => {
+      createButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const input = container.querySelector<HTMLInputElement>('#new-project-name');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    await act(async () => {
+      setter?.call(input, 'Mon Application');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input?.closest('form')?.dispatchEvent(new Event('submit', {
+        bubbles: true,
+        cancelable: true
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(createProject).toHaveBeenCalledWith('Mon Application');
+    expect(container.textContent).toContain('Mon Application');
+    expect(container.querySelector('#new-project-name')).toBeNull();
   });
 
   it('reads app information and verifies security through the preload API', async () => {

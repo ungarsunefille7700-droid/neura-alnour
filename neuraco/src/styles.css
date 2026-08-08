@@ -677,6 +677,72 @@ a:focus-visible {
   text-align: left;
 }
 
+.project-create-backdrop {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 38%);
+}
+
+.project-create-dialog {
+  width: min(440px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 20px 55px rgb(15 23 42 / 18%);
+}
+
+.project-create-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.project-create-dialog > p {
+  margin: 0 0 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.project-create-dialog form,
+.project-create-dialog label {
+  display: grid;
+  gap: 8px;
+}
+
+.project-create-dialog label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-create-dialog input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+}
+
+.project-create-dialog form > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.project-create-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .open-project-button:hover {
   color: var(--text);
   background: var(--surface-hover);

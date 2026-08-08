@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   lstat,
+  mkdir,
   readFile,
   readdir,
   realpath,
@@ -195,6 +196,47 @@ export const openProjectRoot = async (rootPath: string): Promise<NeuraCoProject>
     name: path.basename(resolvedRoot),
     rootPath: resolvedRoot
   };
+};
+
+const WINDOWS_RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
+export const normalizeNewProjectName = (name: string): string => {
+  const normalized = String(name || '').trim();
+  if (
+    normalized.length < 1
+    || normalized.length > 80
+    || normalized === '.'
+    || normalized === '..'
+    || normalized.endsWith('.')
+    || normalized.endsWith(' ')
+    || /[<>:"/\\|?*\0-\x1f]/.test(normalized)
+    || WINDOWS_RESERVED_NAMES.test(normalized)
+  ) {
+    throw new Error('Le nom du nouveau projet n\u2019est pas valide sous Windows.');
+  }
+  return normalized;
+};
+
+export const createProjectRoot = async (
+  parentPath: string,
+  name: string
+): Promise<NeuraCoProject> => {
+  const resolvedParent = await realpath(parentPath);
+  const parentStats = await stat(resolvedParent);
+  if (!parentStats.isDirectory()) {
+    throw new Error('Le dossier parent s\u00e9lectionn\u00e9 n\u2019est pas valide.');
+  }
+  const projectName = normalizeNewProjectName(name);
+  const projectPath = path.join(resolvedParent, projectName);
+  try {
+    await mkdir(projectPath, { recursive: false });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error('Un fichier ou un dossier porte d\u00e9j\u00e0 ce nom.');
+    }
+    throw error;
+  }
+  return openProjectRoot(projectPath);
 };
 
 export const scanProject = async (

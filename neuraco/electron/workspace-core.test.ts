@@ -1,11 +1,13 @@
 // @vitest-environment node
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createProjectRoot,
   invalidateProjectScanCache,
   normalizeProjectPath,
+  normalizeNewProjectName,
   openProjectRoot,
   readProjectTextFile,
   scanProject,
@@ -32,6 +34,24 @@ afterEach(async () => {
 });
 
 describe('NeuraCo workspace boundary', () => {
+  it('creates a real empty project with a Windows-safe name', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'neuraco-new-project-'));
+    temporaryRoots.push(parent);
+    const project = await createProjectRoot(parent, 'Mon Application');
+
+    expect(project.name).toBe('Mon Application');
+    expect((await stat(project.rootPath)).isDirectory()).toBe(true);
+    expect((await scanProject(project)).indexedFiles).toBe(0);
+  });
+
+  it('rejects unsafe or duplicate new project names', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'neuraco-new-project-'));
+    temporaryRoots.push(parent);
+    expect(() => normalizeNewProjectName('../danger')).toThrow(/valide/i);
+    expect(() => normalizeNewProjectName('CON')).toThrow(/valide/i);
+    await createProjectRoot(parent, 'Projet');
+    await expect(createProjectRoot(parent, 'Projet')).rejects.toThrow(/d\u00e9j\u00e0/i);
+  });
   it('indexes only project files that are safe to expose', async () => {
     const { project } = await createProject();
     const snapshot = await scanProject(project);
