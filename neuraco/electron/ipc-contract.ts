@@ -98,6 +98,13 @@ export const IPC_CHANNELS = {
   localSessionGet: 'neuraco:local-session-get',
   localSessionSave: 'neuraco:local-session-save',
   localSessionClear: 'neuraco:local-session-clear',
+  generalSessionGet: 'neuraco:general-session-get',
+  generalSessionSave: 'neuraco:general-session-save',
+  generalThreadsList: 'neuraco:general-threads-list',
+  generalThreadCreate: 'neuraco:general-thread-create',
+  generalThreadSelect: 'neuraco:general-thread-select',
+  generalThreadRename: 'neuraco:general-thread-rename',
+  generalThreadArchive: 'neuraco:general-thread-archive',
   conversationThreadsList: 'neuraco:conversation-threads-list',
   conversationThreadCreate: 'neuraco:conversation-thread-create',
   conversationThreadSelect: 'neuraco:conversation-thread-select',
@@ -515,6 +522,27 @@ export interface NeuraCoDesktopApi {
     session: NeuraCoLocalSessionSave
   ) => Promise<NeuraCoLocalSession>;
   clearLocalSession: () => Promise<boolean>;
+  getGeneralSession: () => Promise<NeuraCoConversationThread>;
+  saveGeneralSession: (
+    session: NeuraCoLocalSessionSave
+  ) => Promise<NeuraCoConversationThread>;
+  listGeneralConversationThreads: (
+    includeArchived?: boolean
+  ) => Promise<NeuraCoConversationThreadSummary[]>;
+  createGeneralConversationThread: (
+    request?: NeuraCoConversationThreadCreate
+  ) => Promise<NeuraCoConversationThread>;
+  selectGeneralConversationThread: (
+    threadId: string
+  ) => Promise<NeuraCoConversationThread>;
+  renameGeneralConversationThread: (
+    threadId: string,
+    title: string
+  ) => Promise<NeuraCoConversationThread>;
+  archiveGeneralConversationThread: (
+    threadId: string,
+    archived: boolean
+  ) => Promise<NeuraCoConversationThreadSummary[]>;
   listConversationThreads: (
     includeArchived?: boolean
   ) => Promise<NeuraCoConversationThreadSummary[]>;
@@ -1697,6 +1725,8 @@ export interface NeuraCoCheckpointTaskSettings {
   communicationStyle: NeuraCoCommunicationStyle;
   executionMode: NeuraCoExecutionMode;
   includeActiveFile: boolean;
+  model?: NeuraCoAgentModel;
+  responseSpeed?: NeuraCoResponseSpeed;
 }
 
 export interface NeuraCoCheckpointCreateRequest {
@@ -2254,6 +2284,14 @@ export interface NeuraCoAgentFileContext {
   language?: string;
 }
 
+export interface NeuraCoProposedFile {
+  path: string;
+  content: string;
+  language?: string;
+  status?: 'pending' | 'applied' | 'failed';
+  error?: string;
+}
+
 export interface NeuraCoAgentRequest {
   content: string;
   sessionId?: string;
@@ -2262,9 +2300,10 @@ export interface NeuraCoAgentRequest {
   projectId: string;
   projectName: string;
   mode: 'question' | 'plan';
-  model?: 'auto' | 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  model?: NeuraCoAgentModel;
   effort?: NeuraCoEffortLevel;
   communicationStyle?: NeuraCoCommunicationStyle;
+  responseSpeed?: NeuraCoResponseSpeed;
   conversationContext?: NeuraCoPersistedChatMessage[];
   files: NeuraCoAgentFileContext[];
   images: NeuraCoAgentImageContext[];
@@ -2288,6 +2327,7 @@ export interface NeuraCoAgentResponse {
   modelDisplay: string;
   mode: 'question' | 'plan';
   filesUsed: string[];
+  proposedFiles?: NeuraCoProposedFile[];
   imagesUsed: Array<{
     id: string;
     name: string;
@@ -2329,6 +2369,7 @@ export interface NeuraCoPersistedChatMessage {
   content: string;
   model?: string;
   files?: string[];
+  proposedFiles?: NeuraCoProposedFile[];
 }
 
 export interface NeuraCoLocalSessionSave {
@@ -2404,9 +2445,10 @@ export interface NeuraCoSecondaryConversationMessageRequest {
   content: string;
   projectId: string;
   projectName: string;
-  model?: 'auto' | 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  model?: NeuraCoAgentModel;
   effort?: NeuraCoEffortLevel;
   communicationStyle?: NeuraCoCommunicationStyle;
+  responseSpeed?: NeuraCoResponseSpeed;
 }
 
 export type NeuraCoEnvironmentKind =
@@ -2751,9 +2793,10 @@ export interface NeuraCoCloudTaskRequest {
   projectId: string;
   projectName: string;
   mode: 'question' | 'plan';
-  model?: 'auto' | 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  model?: NeuraCoAgentModel;
   effort?: NeuraCoEffortLevel;
   communicationStyle?: NeuraCoCommunicationStyle;
+  responseSpeed?: NeuraCoResponseSpeed;
   conversationContext?: NeuraCoPersistedChatMessage[];
   files: NeuraCoAgentFileContext[];
 }
@@ -2817,6 +2860,12 @@ export interface NeuraCoRelayEvent {
 export type NeuraCoAgentAutonomy = 'ask' | 'scoped' | 'full';
 export type NeuraCoAgentMemory = 'off' | 'session' | 'project';
 export type NeuraCoEffortLevel = 'rapid' | 'normal' | 'deep' | 'maximum';
+export type NeuraCoAgentModel =
+  | 'auto'
+  | 'claude-sonnet-4-5'
+  | 'gpt-4o'
+  | 'gemini-2.5-flash';
+export type NeuraCoResponseSpeed = 'standard' | 'fast';
 export type NeuraCoCommunicationStyle =
   | 'direct'
   | 'normal'
@@ -2847,6 +2896,8 @@ export interface NeuraCoTaskRoutingRequest {
   requestedMode: Exclude<NeuraCoTaskMode, 'mixed'>;
   effort?: NeuraCoEffortLevel;
   communicationStyle?: NeuraCoCommunicationStyle;
+  preferredModel?: NeuraCoAgentModel;
+  responseSpeed?: NeuraCoResponseSpeed;
   filePaths: string[];
   imageCount: number;
 }
@@ -2871,6 +2922,7 @@ export interface NeuraCoTaskRoutingPreview {
   agents: NeuraCoTaskRoutingAgent[];
   tools: string[];
   primaryModel: 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  responseSpeed: NeuraCoResponseSpeed;
   effort: NeuraCoEffortLevel;
   effortLabel: string;
   communicationStyle: NeuraCoCommunicationStyle;
@@ -2920,6 +2972,8 @@ export interface NeuraCoMultiAgentRequest {
   budget: number;
   effort?: NeuraCoEffortLevel;
   communicationStyle?: NeuraCoCommunicationStyle;
+  preferredModel?: NeuraCoAgentModel;
+  responseSpeed?: NeuraCoResponseSpeed;
   files: NeuraCoAgentFileContext[];
 }
 

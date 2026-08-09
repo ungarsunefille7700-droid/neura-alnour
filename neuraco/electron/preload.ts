@@ -350,6 +350,20 @@ const desktopApi: NeuraCoDesktopApi = Object.freeze({
     ipcRenderer.invoke(IPC_CHANNELS.localSessionSave, session),
   clearLocalSession: () =>
     ipcRenderer.invoke(IPC_CHANNELS.localSessionClear),
+  getGeneralSession: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalSessionGet),
+  saveGeneralSession: (session: NeuraCoLocalSessionSave) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalSessionSave, session),
+  listGeneralConversationThreads: (includeArchived?: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalThreadsList, includeArchived),
+  createGeneralConversationThread: (request?: NeuraCoConversationThreadCreate) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalThreadCreate, request),
+  selectGeneralConversationThread: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalThreadSelect, threadId),
+  renameGeneralConversationThread: (threadId: string, title: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalThreadRename, threadId, title),
+  archiveGeneralConversationThread: (threadId: string, archived: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.generalThreadArchive, threadId, archived),
   listConversationThreads: (includeArchived?: boolean) =>
     ipcRenderer.invoke(IPC_CHANNELS.conversationThreadsList, includeArchived),
   createConversationThread: (request?: NeuraCoConversationThreadCreate) =>

@@ -78,9 +78,91 @@ describe('agent-service conversation context', () => {
       message: 'Je peux vous aider sans ouvrir de dossier.'
     });
     expect(JSON.parse(requestMock.mock.calls[0][1].body)).toMatchObject({
+      scope: 'general',
       project_id: GENERAL_CHAT_PROJECT_ID,
+      effort: 'normal',
+      communication_style: 'normal',
       files: [],
       images: []
+    });
+  });
+
+  it('transmet les réglages et mappe les fichiers proposés par le serveur', async () => {
+    requestMock.mockResolvedValue({
+      message: 'Deux fichiers sont prêts à être examinés.',
+      session_id: 'session_files_12345678',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      model_display: 'Claude Sonnet 4.5',
+      mode: 'question',
+      files_used: ['src/main.ts'],
+      proposed_files: [{
+        path: 'src/feature.ts',
+        content: 'export const feature = true;',
+        language: 'typescript'
+      }],
+      images_used: [],
+      entitlement_plan: 'neura_ultra'
+    });
+
+    const result = await sendAgentMessage({
+      content: 'Crée la fonctionnalité.',
+      scope: 'project',
+      projectId: '0123456789abcdef01234567',
+      projectName: 'Projet test',
+      mode: 'question',
+      model: 'claude-sonnet-4-5',
+      effort: 'deep',
+      communicationStyle: 'detailed',
+      files: [],
+      images: []
+    });
+
+    expect(JSON.parse(requestMock.mock.calls[0][1].body)).toMatchObject({
+      scope: 'project',
+      effort: 'deep',
+      communication_style: 'detailed'
+    });
+    expect(result.proposedFiles).toEqual([{
+      path: 'src/feature.ts',
+      content: 'export const feature = true;',
+      language: 'typescript',
+      status: 'pending'
+    }]);
+  });
+
+  it('lit le message final et les fichiers proposés du flux serveur', async () => {
+    const frames = [{
+      type: 'done',
+      message: 'Fichier prêt.',
+      session_id: 'stream-files',
+      provider: 'openai',
+      model: 'gpt-4o',
+      model_display: 'GPT-4o',
+      mode: 'question',
+      files_used: [],
+      proposed_files: [{ path: 'src/new.ts', content: 'export {};', language: 'typescript' }],
+      images_used: [],
+      entitlement_plan: 'neura_ultra'
+    }].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
+    streamMock.mockResolvedValue(new Response(frames, {
+      headers: { 'Content-Type': 'text/event-stream' }
+    }));
+
+    const result = await streamAgentMessage({
+      content: 'Crée un fichier.',
+      scope: 'project',
+      projectId: '0123456789abcdef01234567',
+      projectName: 'Projet test',
+      mode: 'question',
+      files: [],
+      images: []
+    }, () => undefined);
+
+    expect(result.message).toBe('Fichier prêt.');
+    expect(result.proposedFiles?.[0]).toMatchObject({
+      path: 'src/new.ts',
+      status: 'pending'
     });
   });
 

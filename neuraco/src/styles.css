@@ -621,6 +621,73 @@ a:focus-visible {
   font-weight: 650;
 }
 
+.sidebar-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 6px 5px 10px;
+}
+
+.sidebar-section-heading > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-section-heading .icon-button {
+  width: 26px;
+  height: 26px;
+}
+
+.sidebar-conversations {
+  display: grid;
+  margin-top: 18px;
+}
+
+.general-thread-list {
+  display: grid;
+  gap: 2px;
+  max-height: 184px;
+  overflow: auto;
+}
+
+.general-thread-list button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.general-thread-list button:hover,
+.general-thread-list button.is-active {
+  color: var(--text);
+  background: var(--surface-active);
+}
+
+.general-thread-list button svg {
+  flex: 0 0 auto;
+}
+
+.general-thread-list button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .workspace-item {
   align-items: flex-start;
   min-height: 54px;
@@ -2622,10 +2689,10 @@ a:focus-visible {
 .agent-message.is-user {
   width: fit-content;
   max-width: min(680px, 82%);
+  margin-left: auto;
   margin-right: 0;
-  padding: 11px 14px;
-  border-radius: 8px;
-  background: var(--surface-hover);
+  padding: 4px 0 18px;
+  background: transparent;
 }
 
 .agent-message.is-system {
@@ -2710,6 +2777,288 @@ a:focus-visible {
   margin-top: 9px;
   color: var(--text-muted);
   font-size: 10px;
+}
+
+.proposed-files-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.proposed-files-summary > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposed-files-summary > div > span,
+.proposed-files-summary strong,
+.proposed-files-summary small {
+  display: block;
+  min-width: 0;
+}
+
+.proposed-files-summary strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.proposed-files-summary small {
+  max-width: 520px;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposed-files-summary > button {
+  min-height: 29px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid var(--text);
+  border-radius: 5px;
+  color: #fff;
+  background: var(--text);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.proposal-review-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  padding: 28px;
+  background: rgb(23 25 28 / 34%);
+  place-items: center;
+}
+
+.proposal-review-dialog {
+  display: grid;
+  width: min(1040px, 100%);
+  height: min(720px, calc(100vh - 56px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 22px 60px rgb(20 23 27 / 20%);
+}
+
+.proposal-review-dialog > header,
+.proposal-review-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proposal-review-dialog > header > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.proposal-review-dialog > header strong,
+.proposal-review-dialog > header span {
+  display: block;
+}
+
+.proposal-review-dialog > header strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.proposal-review-dialog > header span {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.proposal-review-dialog > header > button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  place-items: center;
+}
+
+.proposal-review-content {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+
+.proposal-review-content > nav {
+  min-width: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.proposal-review-content > nav > button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 11px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.proposal-review-content > nav > button.is-active {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.proposal-review-content > nav span {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposal-review-content > nav small {
+  font-size: 9px;
+}
+
+.proposal-code-preview {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.proposal-code-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proposal-code-preview > header strong,
+.proposal-code-preview > header span {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proposal-code-preview > header span {
+  color: var(--text-muted);
+}
+
+.proposal-code-preview pre {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 15px;
+  overflow: auto;
+  background: #f7f8fa;
+}
+
+.proposal-code-preview code {
+  color: #23262a;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  white-space: pre;
+}
+
+.proposal-file-error {
+  margin: 0;
+  padding: 8px 13px;
+  color: #9b3026;
+  background: #fff3f1;
+  font-size: 10px;
+}
+
+.proposal-review-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.proposal-review-dialog > footer > span {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.proposal-review-dialog > footer > button {
+  display: inline-flex;
+  min-height: 31px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.proposal-review-dialog > footer > button.is-primary {
+  border-color: var(--text);
+  color: #fff;
+  background: var(--text);
+}
+
+.proposal-review-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (max-width: 760px) {
+  .proposal-review-backdrop {
+    padding: 10px;
+  }
+
+  .proposal-review-dialog {
+    height: calc(100vh - 20px);
+  }
+
+  .proposal-review-content {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .proposal-review-content > nav {
+    display: flex;
+    max-height: 120px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .proposal-review-content > nav > button {
+    min-width: 210px;
+    border-right: 1px solid var(--border);
+  }
 }
 
 .message-images {
@@ -3526,7 +3875,7 @@ a:focus-visible {
   padding-right: 4px;
 }
 
-.agent-attachment-actions > button {
+.composer-tools > button {
   display: inline-flex;
   height: 28px;
   flex: 0 0 auto;
@@ -3541,9 +3890,77 @@ a:focus-visible {
   font-size: 10px;
 }
 
-.agent-attachment-actions > button:disabled {
+.composer-tools > button:disabled {
   color: var(--text-soft);
   cursor: not-allowed;
+}
+
+.composer-tools,
+.home-tools {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.composer-tools-menu,
+.home-tools-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  width: 290px;
+  max-height: 360px;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgba(32, 33, 36, 0.17);
+}
+
+.composer-tools-menu > button,
+.home-tools-menu > button {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-tools-menu > button:hover,
+.home-tools-menu > button:hover {
+  background: var(--surface-hover);
+}
+
+.composer-tools-menu > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.composer-tools-menu > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.composer-tools-menu strong {
+  font-size: 11px;
+}
+
+.composer-tools-menu small {
+  display: block;
+  overflow: visible;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: initial;
+  white-space: normal;
 }
 
 .agent-attachment-actions small {
@@ -4237,9 +4654,8 @@ a:focus-visible {
   justify-self: end;
   max-width: min(680px, 82%);
   width: auto;
-  padding: 14px 16px;
-  border-radius: 8px;
-  background: var(--surface-hover);
+  padding: 4px 0 18px;
+  background: transparent;
 }
 
 .home-chat-message.is-system {
@@ -5132,6 +5548,39 @@ a:focus-visible {
   color: #a4a7ab;
 }
 
+.home-composer-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 7px 0 10px;
+}
+
+.home-composer-options label {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding-left: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  font-size: 10px;
+}
+
+.home-composer-options select {
+  height: 28px;
+  max-width: 190px;
+  padding: 0 7px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 11px;
+}
+
 .composer-footer {
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr) auto 38px;
@@ -5270,6 +5719,10 @@ a:focus-visible {
     min-width: 0;
     margin: 0;
     padding-left: 170px;
+  }
+
+  .sidebar-conversations {
+    display: none;
   }
 
   .sidebar-section > span,

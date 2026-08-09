@@ -56,6 +56,36 @@ describe('LocalSessionStore', () => {
     expect(await readFile(storePath, 'utf8')).not.toContain('data:image');
   });
 
+  it('conserve uniquement les propositions de fichiers sûres', async () => {
+    const { store } = await createStore();
+    await store.save(project, {
+      executionMode: 'local',
+      messages: [{
+        id: 'proposal-message',
+        role: 'assistant',
+        content: 'Fichiers proposés.',
+        proposedFiles: [
+          {
+            path: 'src/feature.ts',
+            content: 'export const value = 1;',
+            language: 'typescript',
+            status: 'pending'
+          },
+          { path: '../outside.txt', content: 'interdit' },
+          { path: '.env', content: 'API_KEY=secret-value' }
+        ]
+      }]
+    });
+
+    const restored = await store.get(project);
+    expect(restored?.messages[0].proposedFiles).toEqual([{
+      path: 'src/feature.ts',
+      content: 'export const value = 1;',
+      language: 'typescript',
+      status: 'pending'
+    }]);
+  });
+
   it('écrit atomiquement, limite l’historique et peut le supprimer', async () => {
     const { store } = await createStore();
     await store.save(project, {
@@ -192,6 +222,8 @@ describe('LocalSessionStore', () => {
       taskSettings: {
         taskMode: 'code',
         effort: 'deep',
+        model: 'claude-sonnet-4-5',
+        responseSpeed: 'fast',
         communicationStyle: 'detailed',
         executionMode: 'local',
         includeActiveFile: true
@@ -207,6 +239,8 @@ describe('LocalSessionStore', () => {
       taskSettings: {
         taskMode: 'research',
         effort: 'rapid',
+        model: 'gemini-2.5-flash',
+        responseSpeed: 'standard',
         communicationStyle: 'direct',
         executionMode: 'cloud',
         includeActiveFile: false
@@ -221,11 +255,15 @@ describe('LocalSessionStore', () => {
     const conversationOnly = await store.restoreSnapshot(project, original, false);
     expect(conversationOnly.messages[0].id).toBe('before-checkpoint');
     expect(conversationOnly.taskSettings?.taskMode).toBe('research');
+    expect(conversationOnly.taskSettings?.model).toBe('gemini-2.5-flash');
+    expect(conversationOnly.taskSettings?.responseSpeed).toBe('standard');
 
     const complete = await store.restoreSnapshot(project, original, true);
     expect(complete.taskSettings).toMatchObject({
       taskMode: 'code',
       effort: 'deep',
+      model: 'claude-sonnet-4-5',
+      responseSpeed: 'fast',
       communicationStyle: 'detailed'
     });
   });

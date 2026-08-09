@@ -16,6 +16,7 @@ import {
   LockKeyhole,
   LogOut,
   Mail,
+  MessageSquare,
   PanelLeft,
   Plus,
   Search,
@@ -26,11 +27,15 @@ import {
 } from 'lucide-react';
 import type {
   NeuraCoAccessibilitySettings,
+  NeuraCoAgentModel,
   NeuraCoAppInfo,
   NeuraCoAppLockState,
+  NeuraCoConversationThreadSummary,
+  NeuraCoEffortLevel,
   NeuraCoLoginCredentials,
   NeuraCoRegistration,
   NeuraCoProjectSnapshot,
+  NeuraCoResponseSpeed,
   NeuraCoSession,
   NeuraCoSelfCheck
 } from '../electron/ipc-contract';
@@ -694,10 +699,14 @@ interface SidebarProps {
   session: NeuraCoSession | null;
   projectSnapshot: NeuraCoProjectSnapshot | null;
   desktopAvailable: boolean;
+  generalThreads: NeuraCoConversationThreadSummary[];
+  activeGeneralThreadId?: string;
   onViewChange: (view: WorkspaceView) => void;
   onOpenProject: () => Promise<void>;
   onCreateProject: () => void;
   onCloneProject: () => void;
+  onNewGeneralThread: () => void;
+  onSelectGeneralThread: (threadId: string) => void;
   onLocaleChange: (locale: Locale) => void;
   onLogout: () => void;
 }
@@ -708,10 +717,14 @@ const Sidebar = ({
   session,
   projectSnapshot,
   desktopAvailable,
+  generalThreads,
+  activeGeneralThreadId,
   onViewChange,
   onOpenProject,
   onCreateProject,
   onCloneProject,
+  onNewGeneralThread,
+  onSelectGeneralThread,
   onLocaleChange,
   onLogout
 }: SidebarProps) => {
@@ -787,6 +800,35 @@ const Sidebar = ({
           </button>
         )}
       </nav>
+
+      <div className="sidebar-section sidebar-conversations">
+        <div className="sidebar-section-heading">
+          <span>{locale === 'fr' ? 'Discussions NeuraCo' : 'NeuraCo chats'}</span>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onNewGeneralThread}
+            disabled={!desktopAvailable}
+            title={locale === 'fr' ? 'Nouvelle discussion' : 'New chat'}
+          >
+            <Plus size={14} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="general-thread-list">
+          {generalThreads.map((thread) => (
+            <button
+              key={thread.threadId}
+              type="button"
+              className={thread.threadId === activeGeneralThreadId ? 'is-active' : ''}
+              onClick={() => onSelectGeneralThread(thread.threadId)}
+              title={thread.title}
+            >
+              <MessageSquare size={15} aria-hidden="true" />
+              <span>{thread.title}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="sidebar-section">
         <span>{text.localSpace}</span>
@@ -941,6 +983,14 @@ function App() {
   const [homeChatBusy, setHomeChatBusy] = useState(false);
   const [homeStreamHasContent, setHomeStreamHasContent] = useState(false);
   const [homeSessionId, setHomeSessionId] = useState<string | undefined>();
+  const [homeThreadId, setHomeThreadId] = useState<string | undefined>();
+  const [homeThreads, setHomeThreads] = useState<NeuraCoConversationThreadSummary[]>([]);
+  const [homeHistoryReady, setHomeHistoryReady] = useState(false);
+  const [homeModel, setHomeModel] = useState<NeuraCoAgentModel>('auto');
+  const [homeEffort, setHomeEffort] = useState<NeuraCoEffortLevel>('normal');
+  const [homeResponseSpeed, setHomeResponseSpeed] =
+    useState<NeuraCoResponseSpeed>('standard');
+  const [homeToolsOpen, setHomeToolsOpen] = useState(false);
   const [appLockState, setAppLockState] = useState<NeuraCoAppLockState | null>(
     desktopAvailable ? null : {
       configured: false,
@@ -1010,6 +1060,92 @@ function App() {
       unsubscribeSession?.();
     };
   }, []);
+
+  useEffect(() => {
+    const desktop = window.neuraco;
+    if (!desktop || session?.status !== 'authenticated') return;
+    if (!desktop.getGeneralSession || !desktop.listGeneralConversationThreads) {
+      setHomeHistoryReady(true);
+      return;
+    }
+    let active = true;
+    setHomeHistoryReady(false);
+    const restoreGeneralHistory = async () => {
+      try {
+        const restored = await desktop.getGeneralSession();
+        const threads = await desktop.listGeneralConversationThreads();
+        if (!active) return;
+        setHomeThreadId(restored.threadId);
+        setHomeSessionId(restored.sessionId);
+        setHomeModel(restored.taskSettings?.model || 'auto');
+        setHomeEffort(restored.taskSettings?.effort || 'normal');
+        setHomeResponseSpeed(restored.taskSettings?.responseSpeed || 'standard');
+        setHomeMessages(restored.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          model: message.model
+        })));
+        setHomeThreads(threads);
+      } catch (error) {
+        if (!active) return;
+        setHomeMessages([{
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: error instanceof Error
+            ? error.message
+            : 'L\u2019historique NeuraCo n\u2019a pas pu \u00eatre restaur\u00e9.'
+        }]);
+      } finally {
+        if (active) setHomeHistoryReady(true);
+      }
+    };
+    void restoreGeneralHistory();
+    return () => {
+      active = false;
+    };
+  }, [session?.status, session?.user?.email]);
+
+  useEffect(() => {
+    const desktop = window.neuraco;
+    if (
+      !desktop
+      || !desktop.saveGeneralSession
+      || !desktop.listGeneralConversationThreads
+      || !homeHistoryReady
+      || !homeThreadId
+      || homeChatBusy
+    ) return;
+    const timeout = setTimeout(() => {
+      void desktop.saveGeneralSession({
+        threadId: homeThreadId,
+        sessionId: homeSessionId,
+        executionMode: 'local',
+        taskSettings: {
+          taskMode: 'question',
+          effort: homeEffort,
+          model: homeModel,
+          responseSpeed: homeResponseSpeed,
+          communicationStyle: 'normal',
+          executionMode: 'local',
+          includeActiveFile: false
+        },
+        messages: homeMessages
+      }).then(async () => {
+        setHomeThreads(await desktop.listGeneralConversationThreads());
+      }).catch(() => undefined);
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [
+    homeChatBusy,
+    homeEffort,
+    homeHistoryReady,
+    homeMessages,
+    homeModel,
+    homeResponseSpeed,
+    homeSessionId,
+    homeThreadId
+  ]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -1185,6 +1321,46 @@ function App() {
     }
   };
 
+  const createGeneralThread = async () => {
+    const desktop = window.neuraco;
+    if (!desktop || homeChatBusy) return;
+    const thread = await desktop.createGeneralConversationThread({
+      title: locale === 'fr' ? 'Nouvelle discussion' : 'New chat'
+    });
+    setHomeThreadId(thread.threadId);
+    setHomeSessionId(thread.sessionId);
+    setHomeMessages([]);
+    setHomeModel('auto');
+    setHomeEffort('normal');
+    setHomeResponseSpeed('standard');
+    setHomeToolsOpen(false);
+    setHomeThreads(await desktop.listGeneralConversationThreads());
+    setView('home');
+  };
+
+  const selectGeneralThread = async (threadId: string) => {
+    const desktop = window.neuraco;
+    if (!desktop || homeChatBusy || threadId === homeThreadId) {
+      setView('home');
+      return;
+    }
+    const thread = await desktop.selectGeneralConversationThread(threadId);
+    setHomeThreadId(thread.threadId);
+    setHomeSessionId(thread.sessionId);
+    setHomeModel(thread.taskSettings?.model || 'auto');
+    setHomeEffort(thread.taskSettings?.effort || 'normal');
+    setHomeResponseSpeed(thread.taskSettings?.responseSpeed || 'standard');
+    setHomeToolsOpen(false);
+    setHomeMessages(thread.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      model: message.model
+    })));
+    setHomeThreads(await desktop.listGeneralConversationThreads());
+    setView('home');
+  };
+
   const sendHomeMessage = async () => {
     const content = homeInput.trim();
     if (!window.neuraco || !content || homeChatBusy) return;
@@ -1205,6 +1381,13 @@ function App() {
 
     setHomeInput('');
     setHomeMessages((current) => [...current, userMessage]);
+    const currentThread = homeThreads.find((thread) => thread.threadId === homeThreadId);
+    if (homeThreadId && currentThread?.messageCount === 0) {
+      const title = content.replace(/\s+/g, ' ').slice(0, 64);
+      void window.neuraco.renameGeneralConversationThread(homeThreadId, title)
+        .then(async () => setHomeThreads(await window.neuraco!.listGeneralConversationThreads()))
+        .catch(() => undefined);
+    }
     setHomeChatBusy(true);
     setHomeStreamHasContent(false);
     const requestId = crypto.randomUUID();
@@ -1232,7 +1415,10 @@ function App() {
         projectId: GENERAL_CHAT_PROJECT_ID,
         projectName: locale === 'fr' ? 'Conversation générale' : 'General conversation',
         mode: 'question',
-        model: 'auto',
+        model: homeModel,
+        effort: homeEffort,
+        communicationStyle: 'normal',
+        responseSpeed: homeResponseSpeed,
         conversationContext,
         files: [],
         images: []
@@ -1310,7 +1496,9 @@ function App() {
     <div className="thread-view">
       {homeMessages.length > 0 ? (
         <div className="home-chat-thread" aria-live="polite">
-          {homeMessages.map((message) => (
+          {homeMessages
+            .filter((message) => message.role !== 'assistant' || message.content.trim())
+            .map((message) => (
             <article key={message.id} className={`home-chat-message is-${message.role}`}>
               <header>
                 <strong>
@@ -1525,6 +1713,8 @@ function App() {
         session={session}
         projectSnapshot={projectSnapshot}
         desktopAvailable={desktopAvailable}
+        generalThreads={homeThreads}
+        activeGeneralThreadId={homeThreadId}
         onViewChange={setView}
         onOpenProject={openProject}
         onCreateProject={() => {
@@ -1535,6 +1725,8 @@ function App() {
           setCloneProjectError('');
           setCloneProjectOpen(true);
         }}
+        onNewGeneralThread={() => void createGeneralThread()}
+        onSelectGeneralThread={(threadId) => void selectGeneralThread(threadId)}
         onLocaleChange={setLocale}
         onLogout={() => {
           if (window.neuraco && session?.user) {
@@ -1613,16 +1805,102 @@ function App() {
                   }
                 }}
               />
+              <div className="home-composer-options">
+                <label>
+                  <span>{locale === 'fr' ? 'Modèle' : 'Model'}</span>
+                  <select
+                    value={homeModel}
+                    disabled={!desktopAvailable || homeChatBusy}
+                    onChange={(event) => setHomeModel(
+                      event.target.value as NeuraCoAgentModel
+                    )}
+                  >
+                    <option value="auto">Automatique</option>
+                    <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                    <option value="gpt-4o">GPT-4o</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{locale === 'fr' ? 'Effort' : 'Effort'}</span>
+                  <select
+                    value={homeEffort}
+                    disabled={!desktopAvailable || homeChatBusy}
+                    onChange={(event) => setHomeEffort(
+                      event.target.value as NeuraCoEffortLevel
+                    )}
+                  >
+                    <option value="rapid">Rapide</option>
+                    <option value="normal">Normal</option>
+                    <option value="deep">Approfondi</option>
+                    <option value="maximum">Maximum</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{locale === 'fr' ? 'Vitesse' : 'Speed'}</span>
+                  <select
+                    value={homeResponseSpeed}
+                    disabled={!desktopAvailable || homeChatBusy}
+                    onChange={(event) => setHomeResponseSpeed(
+                      event.target.value as NeuraCoResponseSpeed
+                    )}
+                  >
+                    <option value="standard">Standard</option>
+                    <option value="fast">Rapide</option>
+                  </select>
+                </label>
+              </div>
               <div className="composer-footer">
-                <button
-                  type="button"
-                  className="icon-button"
-                  disabled={!desktopAvailable || homeChatBusy}
-                  title={locale === 'fr' ? 'Ouvrir un projet' : 'Open a project'}
-                  onClick={() => void openProject()}
-                >
-                  <Plus size={20} aria-hidden="true" />
-                </button>
+                <div className="home-tools">
+                  <button
+                    type="button"
+                    className="icon-button"
+                    disabled={!desktopAvailable || homeChatBusy}
+                    title={locale === 'fr' ? 'Ajouter ou ouvrir' : 'Add or open'}
+                    aria-expanded={homeToolsOpen}
+                    onClick={() => setHomeToolsOpen((open) => !open)}
+                  >
+                    <Plus size={20} aria-hidden="true" />
+                  </button>
+                  {homeToolsOpen && (
+                    <div className="home-tools-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setHomeToolsOpen(false);
+                          void openProject();
+                        }}
+                      >
+                        <FolderOpen size={17} />
+                        <span>{locale === 'fr' ? 'Ouvrir un projet' : 'Open a project'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setHomeToolsOpen(false);
+                          setCreateProjectError('');
+                          setCreateProjectOpen(true);
+                        }}
+                      >
+                        <FolderClosed size={17} />
+                        <span>{locale === 'fr' ? 'Créer un projet' : 'Create a project'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setHomeToolsOpen(false);
+                          void createGeneralThread();
+                        }}
+                      >
+                        <MessageSquare size={17} />
+                        <span>{locale === 'fr' ? 'Nouvelle discussion' : 'New chat'}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <span className="composer-mode">
                   <ShieldCheck size={15} aria-hidden="true" />
                   {text.fullAccess}

@@ -258,6 +258,11 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let navigationGuardEnabled = false;
 let activeProject: NeuraCoProject | null = null;
+const GENERAL_CHAT_PROJECT: NeuraCoProject = {
+  id: '000000000000000000000001',
+  name: 'Discussions NeuraCo',
+  rootPath: ''
+};
 const terminalTasks = new Map<string, TerminalTask>();
 const sessionAllowedSignatures = new Set<string>();
 let permissionStore: ProjectPermissionStore | null = null;
@@ -4156,6 +4161,65 @@ const registerIpcHandlers = (): void => {
     return getLocalSessionStore().clear(activeProject);
   });
 
+  ipcMain.handle(IPC_CHANNELS.generalSessionGet, async (event) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    const existing = await getLocalSessionStore().get(GENERAL_CHAT_PROJECT);
+    if (existing) return existing;
+    return getLocalSessionStore().save(GENERAL_CHAT_PROJECT, {
+      executionMode: 'local',
+      messages: []
+    });
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.generalSessionSave,
+    (event, session: NeuraCoLocalSessionSave) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return getLocalSessionStore().save(GENERAL_CHAT_PROJECT, session);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.generalThreadsList,
+    (event, includeArchived?: boolean) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return getLocalSessionStore().list(GENERAL_CHAT_PROJECT, Boolean(includeArchived));
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.generalThreadCreate,
+    (event, request?: NeuraCoConversationThreadCreate) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return getLocalSessionStore().create(GENERAL_CHAT_PROJECT, request || {});
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.generalThreadSelect, (event, threadId: string) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    return getLocalSessionStore().select(GENERAL_CHAT_PROJECT, threadId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.generalThreadRename,
+    (event, threadId: string, title: string) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return getLocalSessionStore().rename(GENERAL_CHAT_PROJECT, threadId, title);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.generalThreadArchive,
+    (event, threadId: string, archived: boolean) => {
+      ensureTrustedSender(event.senderFrame?.url ?? '');
+      return getLocalSessionStore().archive(
+        GENERAL_CHAT_PROJECT,
+        threadId,
+        Boolean(archived)
+      );
+    }
+  );
+
   ipcMain.handle(
     IPC_CHANNELS.conversationThreadsList,
     (event, includeArchived?: boolean) => {
@@ -5491,6 +5555,8 @@ const registerIpcHandlers = (): void => {
         requestedMode: request.requestedMode,
         effort: request.effort,
         communicationStyle: request.communicationStyle,
+        preferredModel: request.preferredModel,
+        responseSpeed: request.responseSpeed,
         filePaths: Array.isArray(request.filePaths)
           ? request.filePaths
               .filter((item): item is string => typeof item === 'string')

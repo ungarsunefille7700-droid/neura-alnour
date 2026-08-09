@@ -57,6 +57,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type {
   NeuraCoAgentFileContext,
+  NeuraCoAgentModel,
   NeuraCoAgentDefinition,
   NeuraCoAgentImageContext,
   NeuraCoCheckpoint,
@@ -81,8 +82,10 @@ import type {
   NeuraCoProjectFileNode,
   NeuraCoProjectPermissions,
   NeuraCoProjectPermissionsUpdate,
+  NeuraCoProposedFile,
   NeuraCoProjectSnapshot,
   NeuraCoPersistedChatMessage,
+  NeuraCoResponseSpeed,
   NeuraCoRecoverableTask,
   NeuraCoRecoverableTaskInspection,
   NeuraCoRelayState,
@@ -165,6 +168,7 @@ interface ChatEntry {
   content: string;
   model?: string;
   files?: string[];
+  proposedFiles?: NeuraCoProposedFile[];
   images?: Array<Pick<
     NeuraCoPreparedImage,
     'id' | 'name' | 'preview' | 'width' | 'height' | 'size'
@@ -308,8 +312,14 @@ export default function WorkspacePage({
   const [chatInput, setChatInput] = useState('');
   const [taskMode, setTaskMode] = useState<RequestedTaskMode>('automatic');
   const [effort, setEffort] = useState<NeuraCoEffortLevel>('normal');
+  const [selectedModel, setSelectedModel] = useState<NeuraCoAgentModel>('auto');
+  const [responseSpeed, setResponseSpeed] = useState<NeuraCoResponseSpeed>('standard');
   const [communicationStyle, setCommunicationStyle] =
     useState<NeuraCoCommunicationStyle>('normal');
+  const [composerToolsOpen, setComposerToolsOpen] = useState(false);
+  const [proposalReviewMessageId, setProposalReviewMessageId] = useState<string>();
+  const [proposalReviewPath, setProposalReviewPath] = useState<string>();
+  const [proposalApplying, setProposalApplying] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [activeExecution, setActiveExecution] =
     useState<ActiveChatExecution | null>(null);
@@ -403,23 +413,32 @@ export default function WorkspacePage({
   const unreadNotifications = notifications.filter(
     (notification) => !notification.readAt
   ).length;
+  const proposalReviewMessage = messages.find(
+    (message) => message.id === proposalReviewMessageId
+  );
+  const proposalReviewFiles = proposalReviewMessage?.proposedFiles || [];
+  const proposalReviewFile = proposalReviewFiles.find(
+    (file) => file.path === proposalReviewPath
+  ) || proposalReviewFiles[0];
 
   const applyConversationThread = (thread: NeuraCoConversationThread) => {
     setActiveThreadId(thread.threadId);
     setSessionId(thread.sessionId);
-    setExecutionMode(thread.executionMode);
-    if (thread.taskSettings) {
-      setTaskMode(thread.taskSettings.taskMode);
-      setEffort(thread.taskSettings.effort);
-      setCommunicationStyle(thread.taskSettings.communicationStyle);
-      setExecutionMode(thread.taskSettings.executionMode);
-      setIncludeActiveFile(thread.taskSettings.includeActiveFile);
-    }
+    setTaskMode(thread.taskSettings?.taskMode || 'automatic');
+    setEffort(thread.taskSettings?.effort || 'normal');
+    setSelectedModel(thread.taskSettings?.model || 'auto');
+    setResponseSpeed(thread.taskSettings?.responseSpeed || 'standard');
+    setCommunicationStyle(thread.taskSettings?.communicationStyle || 'normal');
+    setExecutionMode(thread.taskSettings?.executionMode || thread.executionMode);
+    setIncludeActiveFile(thread.taskSettings?.includeActiveFile !== false);
+    setComposerToolsOpen(false);
     setActiveCloudTask(null);
     setRoutingPreview(undefined);
     setPendingRoutedTask(undefined);
     setRoutingAgents([]);
     setSelectedRoutingAgentIds([]);
+    setProposalReviewMessageId(undefined);
+    setProposalReviewPath(undefined);
     handledCloudTasksRef.current.clear();
     setMessages(thread.messages.length > 0
       ? thread.messages
@@ -640,16 +659,19 @@ export default function WorkspacePage({
         taskSettings: {
           taskMode,
           effort,
+          model: selectedModel,
+          responseSpeed,
           communicationStyle,
           executionMode,
           includeActiveFile
         },
-        messages: messages.map(({ id, role, content, model, files }) => ({
+        messages: messages.map(({ id, role, content, model, files, proposedFiles }) => ({
           id,
           role,
           content,
           model,
-          files
+          files,
+          proposedFiles
         }))
       }).then((saved) => {
         setConversationThreads((current) => current.map((thread) => (
@@ -681,6 +703,8 @@ export default function WorkspacePage({
     executionMode,
     includeActiveFile,
     messages,
+    responseSpeed,
+    selectedModel,
     sessionId,
     sessionLoaded,
     taskMode
@@ -1065,6 +1089,8 @@ export default function WorkspacePage({
       const taskSettings: NeuraCoCheckpointTaskSettings = {
         taskMode,
         effort,
+        model: selectedModel,
+        responseSpeed,
         communicationStyle,
         executionMode,
         includeActiveFile
@@ -1105,6 +1131,8 @@ export default function WorkspacePage({
       if (result.taskSettings) {
         setTaskMode(result.taskSettings.taskMode);
         setEffort(result.taskSettings.effort);
+        setSelectedModel(result.taskSettings.model || 'auto');
+        setResponseSpeed(result.taskSettings.responseSpeed || 'standard');
         setCommunicationStyle(result.taskSettings.communicationStyle);
         setExecutionMode(result.taskSettings.executionMode);
         setIncludeActiveFile(result.taskSettings.includeActiveFile);
@@ -1371,12 +1399,14 @@ export default function WorkspacePage({
         content: pending.content,
         sessionId,
         requestId,
+        scope: 'project',
         projectId: snapshot.project.id,
         projectName: snapshot.project.name,
         mode: taskMode === 'plan' ? 'plan' : 'question',
-        model: 'auto',
+        model: selectedModel,
         effort,
         communicationStyle,
+        responseSpeed,
         conversationContext: pending.conversationContext,
         files: pending.fileContexts,
         images: []
@@ -1389,7 +1419,8 @@ export default function WorkspacePage({
           role: 'assistant',
           content: response.message,
           model: `${response.modelDisplay} · ${response.provider}`,
-          files: response.filesUsed
+          files: response.filesUsed,
+          proposedFiles: response.proposedFiles
         }
       ]);
     } catch (error) {
@@ -1432,6 +1463,8 @@ export default function WorkspacePage({
           requestedMode: 'automatic',
           effort,
           communicationStyle,
+          preferredModel: selectedModel,
+          responseSpeed,
           filePaths: pending.fileContexts.map((file) => file.path),
           imageCount: 0
         }),
@@ -1458,6 +1491,8 @@ export default function WorkspacePage({
         budget: Math.max(1, preview.suggestedBudget),
         effort: preview.effort,
         communicationStyle: preview.communicationStyle,
+        preferredModel: preview.primaryModel,
+        responseSpeed: preview.responseSpeed,
         files: pending.fileContexts
       });
       const task = result.tasks[0];
@@ -1568,6 +1603,7 @@ export default function WorkspacePage({
           model: preview.primaryModel,
           effort: preview.effort,
           communicationStyle: preview.communicationStyle,
+          responseSpeed: preview.responseSpeed,
           conversationContext: pending.conversationContext,
           files: pending.fileContexts
         });
@@ -1595,12 +1631,14 @@ export default function WorkspacePage({
           content: pending.content,
           sessionId,
           requestId: executionId,
+          scope: 'project',
           projectId: snapshot.project.id,
           projectName: snapshot.project.name,
           mode,
           model: preview.primaryModel,
           effort: preview.effort,
           communicationStyle: preview.communicationStyle,
+          responseSpeed: preview.responseSpeed,
           conversationContext: pending.conversationContext,
           files: pending.fileContexts,
           images: pending.images.map((image): NeuraCoAgentImageContext => ({
@@ -1621,7 +1659,8 @@ export default function WorkspacePage({
             role: 'assistant',
             content: response.message,
             model: `${response.modelDisplay} · ${response.provider}`,
-            files: response.filesUsed
+            files: response.filesUsed,
+            proposedFiles: response.proposedFiles
           }
         ]);
         setPendingImages([]);
@@ -1646,6 +1685,67 @@ export default function WorkspacePage({
     }
   };
 
+  const reviewProposedFiles = (message: ChatEntry) => {
+    const first = message.proposedFiles?.[0];
+    if (!first) return;
+    setProposalReviewMessageId(message.id);
+    setProposalReviewPath(first.path);
+  };
+
+  const applyProposedFiles = async () => {
+    if (!window.neuraco || !proposalReviewMessageId || proposalApplying) return;
+    const message = messages.find((entry) => entry.id === proposalReviewMessageId);
+    const pending = (message?.proposedFiles || []).filter(
+      (file) => file.status !== 'applied'
+    );
+    if (pending.length === 0) return;
+    setProposalApplying(true);
+    try {
+      let applied = 0;
+      const results = new Map<string, Pick<NeuraCoProposedFile, 'status' | 'error'>>();
+      for (const file of pending) {
+        try {
+          await window.neuraco.saveProjectFile(file.path, file.content);
+          results.set(file.path, { status: 'applied' });
+          applied += 1;
+        } catch (error) {
+          results.set(file.path, {
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'Écriture refusée ou interrompue.'
+          });
+        }
+      }
+      setMessages((current) => current.map((entry) => (
+        entry.id === proposalReviewMessageId
+          ? {
+              ...entry,
+              proposedFiles: entry.proposedFiles?.map((file) => {
+                const result = results.get(file.path);
+                return result ? { ...file, ...result } : file;
+              })
+            }
+          : entry
+      )));
+      try {
+        await onRefresh();
+      } catch {
+        // The files are already saved; a refresh failure must not lock the review UI.
+      }
+      const failed = pending.length - applied;
+      setStatus(
+        failed === 0
+          ? `${applied} fichier(s) appliqué(s) dans le projet avec checkpoint.`
+          : `${applied} fichier(s) appliqué(s), ${failed} refusé(s) ou en erreur.`
+      );
+      if (failed === 0) {
+        setProposalReviewMessageId(undefined);
+        setProposalReviewPath(undefined);
+      }
+    } finally {
+      setProposalApplying(false);
+    }
+  };
+
   const loadRoutingPreview = async (
     pending: PendingRoutedTask,
     requestedMode: RequestedTaskMode
@@ -1661,6 +1761,8 @@ export default function WorkspacePage({
           requestedMode,
           effort,
           communicationStyle,
+          preferredModel: selectedModel,
+          responseSpeed,
           filePaths: pending.fileContexts.map((file) => file.path),
           imageCount: pending.images.length
         }),
@@ -1877,6 +1979,8 @@ export default function WorkspacePage({
           requestedMode: taskMode,
           effort: nextEffort,
           communicationStyle,
+          preferredModel: selectedModel,
+          responseSpeed,
           filePaths: pendingRoutedTask.fileContexts.map((file) => file.path),
           imageCount: pendingRoutedTask.images.length
         });
@@ -1906,6 +2010,8 @@ export default function WorkspacePage({
           requestedMode: taskMode,
           effort,
           communicationStyle: nextStyle,
+          preferredModel: selectedModel,
+          responseSpeed,
           filePaths: pendingRoutedTask.fileContexts.map((file) => file.path),
           imageCount: pendingRoutedTask.images.length
         });
@@ -2047,6 +2153,8 @@ export default function WorkspacePage({
         budget: preview.suggestedBudget,
         effort: preview.effort,
         communicationStyle: preview.communicationStyle,
+        preferredModel: preview.primaryModel,
+        responseSpeed: preview.responseSpeed,
         files: pending.fileContexts
       });
       const specialistResults = result.tasks.map((task) => (
@@ -2769,6 +2877,27 @@ export default function WorkspacePage({
                       {message.files.join(', ')}
                     </div>
                   )}
+                  {message.proposedFiles && message.proposedFiles.length > 0 && (
+                    <div className="proposed-files-summary">
+                      <div>
+                        <Files size={15} />
+                        <span>
+                          <strong>{message.proposedFiles.length} fichier(s) proposé(s)</strong>
+                          <small>
+                            {message.proposedFiles.map((file) => file.path).join(' · ')}
+                          </small>
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => reviewProposedFiles(message)}
+                      >
+                        {message.proposedFiles.every((file) => file.status === 'applied')
+                          ? 'Voir les fichiers'
+                          : 'Examiner avant application'}
+                      </button>
+                    </div>
+                  )}
                   {message.images && message.images.length > 0 && (
                     <div className="message-images">
                       {message.images.map((image) => (
@@ -2992,6 +3121,19 @@ export default function WorkspacePage({
                   <option value="audit">Audit</option>
                 </select>
                 <select
+                  value={selectedModel}
+                  onChange={(event) => setSelectedModel(
+                    event.target.value as NeuraCoAgentModel
+                  )}
+                  aria-label="Modèle IA"
+                  disabled={chatBusy || Boolean(routingPreview)}
+                >
+                  <option value="auto">Modèle automatique</option>
+                  <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                  <option value="gpt-4o">GPT-4o</option>
+                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                </select>
+                <select
                   value={effort}
                   onChange={(event) => setEffort(
                     event.target.value as NeuraCoEffortLevel
@@ -3003,6 +3145,17 @@ export default function WorkspacePage({
                   <option value="normal">Effort normal</option>
                   <option value="deep">Effort approfondi</option>
                   <option value="maximum">Effort maximum</option>
+                </select>
+                <select
+                  value={responseSpeed}
+                  onChange={(event) => setResponseSpeed(
+                    event.target.value as NeuraCoResponseSpeed
+                  )}
+                  aria-label="Vitesse de réponse"
+                  disabled={chatBusy || Boolean(routingPreview)}
+                >
+                  <option value="standard">Vitesse standard</option>
+                  <option value="fast">Vitesse rapide</option>
                 </select>
                 <select
                   value={communicationStyle}
@@ -3117,25 +3270,104 @@ export default function WorkspacePage({
                     event.target.value = '';
                   }}
                 />
-                <button
-                  type="button"
-                  title={
-                    executionMode !== 'local'
-                      ? 'Les images sont analysées uniquement en mode Local'
-                      : 'Ajouter des images'
-                  }
-                  disabled={
-                    executionMode !== 'local'
-                    || pendingImages.length >= MAX_AGENT_IMAGES
-                    || chatBusy
-                    || routingBusy
-                    || Boolean(routingPreview)
-                  }
-                  onClick={() => imageInputRef.current?.click()}
-                >
-                  <ImagePlus size={16} />
-                  <span>Ajouter</span>
-                </button>
+                <div className="composer-tools">
+                  <button
+                    type="button"
+                    title="Ajouter ou ouvrir un outil"
+                    aria-label="Ajouter ou ouvrir un outil"
+                    aria-expanded={composerToolsOpen}
+                    disabled={chatBusy || routingBusy || Boolean(routingPreview)}
+                    onClick={() => setComposerToolsOpen((open) => !open)}
+                  >
+                    <Plus size={17} />
+                    <span>Ajouter</span>
+                  </button>
+                  {composerToolsOpen && (
+                    <div className="composer-tools-menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={
+                          executionMode !== 'local'
+                          || pendingImages.length >= MAX_AGENT_IMAGES
+                        }
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          imageInputRef.current?.click();
+                        }}
+                      >
+                        <ImagePlus size={16} />
+                        <span><strong>Images</strong><small>Joindre une capture ou une image</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setCreatingFile(true);
+                        }}
+                      >
+                        <FilePlus2 size={16} />
+                        <span><strong>Nouveau fichier</strong><small>Créer un fichier dans ce projet</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setTab('goals');
+                        }}
+                      >
+                        <Target size={16} />
+                        <span><strong>Objectifs</strong><small>Organiser les étapes du projet</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setTaskMode('plan');
+                        }}
+                      >
+                        <ClipboardCheck size={16} />
+                        <span><strong>Mode plan</strong><small>Analyser sans modifier les fichiers</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setTab('extensions');
+                        }}
+                      >
+                        <Blocks size={16} />
+                        <span><strong>Extensions</strong><small>Ouvrir les outils installés</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setTab('browser');
+                        }}
+                      >
+                        <Globe2 size={16} />
+                        <span><strong>Navigateur</strong><small>Ouvrir le navigateur intégré</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerToolsOpen(false);
+                          setTab('computer');
+                        }}
+                      >
+                        <Monitor size={16} />
+                        <span><strong>Ordinateur</strong><small>Ouvrir les actions Windows contrôlées</small></span>
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <small>
                   {executionMode !== 'local'
                     ? 'Distant : seuls les fichiers explicitement joints sont envoyés.'
@@ -3502,6 +3734,114 @@ export default function WorkspacePage({
           <StatisticsPanel onStatus={setStatus} />
         )}
       </section>
+      {proposalReviewMessage && proposalReviewFiles.length > 0 && (
+        <div
+          className="proposal-review-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !proposalApplying) {
+              setProposalReviewMessageId(undefined);
+              setProposalReviewPath(undefined);
+            }
+          }}
+        >
+          <section
+            className="proposal-review-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="proposal-review-title"
+          >
+            <header>
+              <div>
+                <strong id="proposal-review-title">Fichiers proposés par NeuraCo</strong>
+                <span>
+                  Rien n’est écrit avant votre validation. Les permissions et checkpoints
+                  du projet restent actifs.
+                </span>
+              </div>
+              <button
+                type="button"
+                title="Fermer"
+                aria-label="Fermer l’examen des fichiers"
+                disabled={proposalApplying}
+                onClick={() => {
+                  setProposalReviewMessageId(undefined);
+                  setProposalReviewPath(undefined);
+                }}
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <div className="proposal-review-content">
+              <nav aria-label="Fichiers proposés">
+                {proposalReviewFiles.map((file) => (
+                  <button
+                    type="button"
+                    key={file.path}
+                    className={file.path === proposalReviewFile?.path ? 'is-active' : ''}
+                    onClick={() => setProposalReviewPath(file.path)}
+                    title={file.path}
+                  >
+                    {file.status === 'applied'
+                      ? <Check size={14} />
+                      : file.status === 'failed'
+                        ? <OctagonX size={14} />
+                        : <File size={14} />}
+                    <span>{file.path}</span>
+                    <small>
+                      {file.status === 'applied'
+                        ? 'Appliqué'
+                        : file.status === 'failed'
+                          ? 'Erreur'
+                          : 'En attente'}
+                    </small>
+                  </button>
+                ))}
+              </nav>
+              <div className="proposal-code-preview">
+                <header>
+                  <strong>{proposalReviewFile?.path}</strong>
+                  {proposalReviewFile?.language && <span>{proposalReviewFile.language}</span>}
+                </header>
+                {proposalReviewFile?.error && (
+                  <p className="proposal-file-error">{proposalReviewFile.error}</p>
+                )}
+                <pre><code>{proposalReviewFile?.content}</code></pre>
+              </div>
+            </div>
+            <footer>
+              <span>
+                {proposalReviewFiles.filter((file) => file.status === 'applied').length}
+                /{proposalReviewFiles.length} appliqué(s)
+              </span>
+              <button
+                type="button"
+                disabled={proposalApplying}
+                onClick={() => {
+                  setProposalReviewMessageId(undefined);
+                  setProposalReviewPath(undefined);
+                }}
+              >
+                Fermer
+              </button>
+              <button
+                type="button"
+                className="is-primary"
+                disabled={
+                  proposalApplying
+                  || proposalReviewFiles.every((file) => file.status === 'applied')
+                  || emergencyState.stopped
+                }
+                onClick={() => void applyProposedFiles()}
+              >
+                {proposalApplying
+                  ? <><LoaderCircle className="attachment-spinner" size={14} /> Application…</>
+                  : 'Appliquer dans le projet'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
       {permissions && permissionsOpen && (
         <ProjectPermissionsDialog
           permissions={permissions}

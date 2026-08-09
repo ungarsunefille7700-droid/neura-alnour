@@ -308,6 +308,8 @@ const createDesktopApi = () => {
     previewTaskRoute: vi.fn().mockImplementation(async (request) => {
       const effort = request.effort || 'normal';
       const communicationStyle = request.communicationStyle || 'normal';
+      const responseSpeed = request.responseSpeed || 'standard';
+      const preferredModel = request.preferredModel || 'auto';
       const routedMode = request.requestedMode === 'automatic'
         ? /ajoute|corrige|implémente/i.test(request.content)
           ? 'code'
@@ -337,13 +339,16 @@ const createDesktopApi = () => {
         tools: multiAgent
           ? ['project-context', 'code', 'tests']
           : ['project-context'],
-        primaryModel: effort === 'rapid'
-          ? 'gemini-2.5-flash'
-          : effort !== 'normal' && !multiAgent
-            ? 'gpt-4o'
-          : multiAgent
-            ? 'claude-sonnet-4-5'
-            : 'gemini-2.5-flash',
+        primaryModel: preferredModel !== 'auto'
+          ? preferredModel
+          : effort === 'rapid'
+            ? 'gemini-2.5-flash'
+            : effort !== 'normal' && !multiAgent
+              ? 'gpt-4o'
+            : multiAgent
+              ? 'claude-sonnet-4-5'
+              : 'gemini-2.5-flash',
+        responseSpeed,
         effort,
         effortLabel: effort === 'normal' ? 'Normal' : 'Approfondi',
         communicationStyle,
@@ -351,7 +356,9 @@ const createDesktopApi = () => {
           ? 'Normal'
           : 'Détaillé',
         verificationPasses: effort === 'normal' ? 2 : 3,
-        maxOutputTokens: effort === 'normal' ? 7000 : 11000,
+        maxOutputTokens: responseSpeed === 'fast'
+          ? 4096
+          : effort === 'normal' ? 7000 : 11000,
         effortEffects: [
           `${effort === 'normal' ? 2 : 3} passe(s) de vérification`,
           `${multiAgent ? 3 : 1} agent(s) ou assistant principal`
@@ -1242,6 +1249,77 @@ describe('NeuraCo project workspace', () => {
     expect(container.textContent).toContain('constante booléenne');
   });
 
+  it('reviews and applies AI-proposed files only after explicit confirmation', async () => {
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    desktop.api.sendAgentMessage = vi.fn().mockResolvedValue({
+      message: 'Le fichier est prêt à être examiné avant application.',
+      sessionId: 'session-proposal-1',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      modelDisplay: 'Claude Sonnet 4.5',
+      mode: 'question',
+      filesUsed: [],
+      imagesUsed: [],
+      entitlementPlan: 'neura_ultra',
+      proposedFiles: [{
+        path: 'src/generated.ts',
+        content: 'export const generated = true;\n',
+        language: 'typescript',
+        status: 'pending'
+      }]
+    });
+
+    await act(async () => root.render(
+      <WorkspacePage
+        snapshot={snapshot}
+        onRefresh={onRefresh}
+        onOpenProject={vi.fn().mockResolvedValue(undefined)}
+      />
+    ));
+
+    const prompt = container.querySelector<HTMLTextAreaElement>(
+      '.agent-composer textarea'
+    );
+    await act(async () => {
+      if (prompt) setControlValue(prompt, 'Prépare un fichier TypeScript complet.');
+      container.querySelector<HTMLButtonElement>('.agent-send')?.click();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await validateRouting(container);
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('1 fichier(s) proposé(s)');
+      expect(container.textContent).toContain('src/generated.ts');
+    });
+    expect(desktop.api.saveProjectFile).not.toHaveBeenCalled();
+
+    const reviewButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Examiner avant application')
+    );
+    await act(async () => reviewButton?.click());
+    expect(container.textContent).toContain('Fichiers proposés par NeuraCo');
+    expect(container.textContent).toContain('export const generated = true;');
+
+    const applyButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Appliquer dans le projet')
+    );
+    await act(async () => {
+      applyButton?.click();
+      await vi.waitFor(() => {
+        expect(desktop.api.saveProjectFile).toHaveBeenCalledWith(
+          'src/generated.ts',
+          'export const generated = true;\n'
+        );
+      });
+    });
+
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain(
+      '1 fichier(s) appliqué(s) dans le projet avec checkpoint.'
+    );
+  });
+
   it('queues a new instruction during work and executes it after the current task', async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
     desktop.api.sendAgentMessage = vi.fn()
@@ -1900,6 +1978,50 @@ describe('NeuraCo project workspace', () => {
         model: 'gpt-4o',
         effort: 'deep',
         communicationStyle: 'detailed'
+      })
+    );
+  });
+
+  it('routes the exact selected model and response speed to the server', async () => {
+    await act(async () => root.render(
+      <WorkspacePage
+        snapshot={snapshot}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onOpenProject={vi.fn().mockResolvedValue(undefined)}
+      />
+    ));
+
+    const model = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Modèle IA"]'
+    );
+    const speed = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Vitesse de réponse"]'
+    );
+    const prompt = container.querySelector<HTMLTextAreaElement>(
+      '.agent-composer textarea'
+    );
+    await act(async () => {
+      if (model) setSelectValue(model, 'gpt-4o');
+      if (speed) setSelectValue(speed, 'fast');
+      if (prompt) setControlValue(prompt, 'Explique la structure de ce projet.');
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.agent-send')?.click();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(desktop.api.previewTaskRoute).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        preferredModel: 'gpt-4o',
+        responseSpeed: 'fast'
+      })
+    );
+    await validateRouting(container);
+    expect(desktop.api.sendAgentMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-4o',
+        responseSpeed: 'fast'
       })
     );
   });

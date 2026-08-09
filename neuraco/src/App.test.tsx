@@ -333,6 +333,22 @@ describe('NeuraCo desktop foundation', () => {
       await Promise.resolve();
     });
 
+    const preferences = container.querySelectorAll<HTMLSelectElement>(
+      '.home-composer-options select'
+    );
+    const selectSetter = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value'
+    )?.set;
+    await act(async () => {
+      selectSetter?.call(preferences[0], 'claude-sonnet-4-5');
+      preferences[0]?.dispatchEvent(new Event('change', { bubbles: true }));
+      selectSetter?.call(preferences[1], 'deep');
+      preferences[1]?.dispatchEvent(new Event('change', { bubbles: true }));
+      selectSetter?.call(preferences[2], 'fast');
+      preferences[2]?.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
     const textarea = container.querySelector<HTMLTextAreaElement>('.composer textarea');
     expect(textarea?.disabled).toBe(false);
     const setter = Object.getOwnPropertyDescriptor(
@@ -354,6 +370,9 @@ describe('NeuraCo desktop foundation', () => {
       content: 'Bonjour NeuraCo',
       projectId: '000000000000000000000001',
       projectName: 'Conversation générale',
+      model: 'claude-sonnet-4-5',
+      effort: 'deep',
+      responseSpeed: 'fast',
       files: [],
       images: []
     }));

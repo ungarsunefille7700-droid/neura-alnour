@@ -2,7 +2,8 @@ import { authenticatedApiRequest, authenticatedApiStream } from './auth-service'
 import type {
   NeuraCoAgentRequest,
   NeuraCoAgentResponse,
-  NeuraCoAgentStreamEvent
+  NeuraCoAgentStreamEvent,
+  NeuraCoProposedFile
 } from './ipc-contract';
 import { redactSecrets } from './secret-redaction';
 
@@ -14,6 +15,11 @@ interface AgentApiResponse {
   model_display: string;
   mode: 'question' | 'plan';
   files_used: string[];
+  proposed_files?: Array<{
+    path: string;
+    content: string;
+    language?: string;
+  }>;
   images_used: Array<{
     id: string;
     name: string;
@@ -160,10 +166,14 @@ const agentApiBody = (request: NeuraCoAgentRequest) => JSON.stringify({
   content: request.content,
   session_id: request.sessionId,
   request_id: request.requestId,
+  scope: request.scope || 'project',
   project_id: request.projectId,
   project_name: request.projectName,
   mode: request.mode,
-  model: request.model || 'auto',
+      model: request.model || 'auto',
+      effort: request.effort || 'normal',
+      communication_style: request.communicationStyle || 'normal',
+      response_speed: request.responseSpeed || 'standard',
   conversation_context: request.conversationContext?.map((message) => ({
     role: message.role,
     content: message.content
@@ -188,6 +198,12 @@ const mapAgentResponse = (response: AgentApiResponse): NeuraCoAgentResponse => (
   modelDisplay: response.model_display,
   mode: response.mode,
   filesUsed: response.files_used,
+  proposedFiles: (response.proposed_files || []).map((file): NeuraCoProposedFile => ({
+    path: file.path,
+    content: file.content,
+    language: file.language,
+    status: 'pending'
+  })),
   imagesUsed: (response.images_used || []).map((image) => ({
     id: image.id,
     name: image.name,
@@ -254,13 +270,14 @@ export const streamAgentMessage = async (
         throw new Error(detail);
       } else if (payload.type === 'done') {
         finalResponse = mapAgentResponse({
-          message: payload.completion || '',
+          message: payload.message || payload.completion || '',
           session_id: payload.session_id,
           provider: payload.provider,
           model: payload.model,
           model_display: payload.model_display,
           mode: payload.mode,
           files_used: payload.files_used || [],
+          proposed_files: payload.proposed_files || [],
           images_used: payload.images_used || [],
           entitlement_plan: payload.entitlement_plan,
           usage: payload.usage,

@@ -157,15 +157,17 @@ def test_neuraco_version_parser_rejects_untrusted_values():
 
 
 def test_environment_transfer_manifest_redaction_preserves_json_structure():
+    fake_github_token = "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890"
+    fake_api_key = "sk-" + "example-secret-value"
     manifest = {
         "conversation": {
             "messages": [{
-                "content": "TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+                "content": f"TOKEN={fake_github_token}",
             }],
         },
         "credentials": {
             "password": "secret-password",
-            "api_key": "sk-example-secret-value",
+            "api_key": fake_api_key,
         },
         "budget": 12,
     }
@@ -175,7 +177,7 @@ def test_environment_transfer_manifest_redaction_preserves_json_structure():
     assert redacted["budget"] == 12
     assert redacted["credentials"]["password"] == "[MASQUE PAR NEURACO]"
     assert redacted["credentials"]["api_key"] == "[MASQUE PAR NEURACO]"
-    assert "ghp_abcdefghijklmnopqrstuvwxyz1234567890" not in (
+    assert fake_github_token not in (
         redacted["conversation"]["messages"][0]["content"]
     )
     assert manifest["credentials"]["password"] == "secret-password"
@@ -653,12 +655,14 @@ def test_neuraco_agent_uses_server_model_and_records_real_metadata(monkeypatch):
         user_prompt,
         images=None,
         preferred_model="auto",
+        max_output_tokens=4096,
     ):
         assert "N'invente aucun fichier" in system_prompt
         assert "src/main.ts" in user_prompt
         assert "secret-value" not in user_prompt
         assert len(images or []) == 1
         assert preferred_model == "gpt-4o"
+        assert max_output_tokens == 4096
         return {
             "message": "Analyse fondee sur src/main.ts.",
             "provider": "anthropic",
@@ -796,9 +800,11 @@ def test_neuraco_cloud_worker_persists_result_usage_and_cloud_history(monkeypatc
         user_prompt,
         images=None,
         preferred_model="auto",
+        max_output_tokens=4096,
     ):
         assert "src/main.ts" in user_prompt
         assert preferred_model == "gpt-4o"
+        assert max_output_tokens == 4096
         return {
             "message": "Plan cloud vérifié.",
             "provider": "openai",
@@ -854,6 +860,7 @@ def test_neuraco_specialist_uses_server_ai_and_records_audit(monkeypatch):
         user_prompt,
         images=None,
         preferred_model="auto",
+        max_output_tokens=4096,
     ):
         assert "Orchestrateur NeuraCo" in system_prompt
         assert "acceptanceCriteria" in system_prompt
@@ -862,6 +869,7 @@ def test_neuraco_specialist_uses_server_ai_and_records_audit(monkeypatch):
         assert "secret-value" not in user_prompt
         assert images is None
         assert preferred_model == "claude-sonnet-4-5"
+        assert max_output_tokens == 4096
         return {
             "message": (
                 '{"summary":"Plan controle","risks":[],"tasks":['
@@ -1166,6 +1174,103 @@ def test_neuraco_prompt_allows_legal_fivem_development_requests():
     assert "script FiveM n'est pas en elle-meme" in system
     assert "Ne transforme jamais une simple demande de code licite" in system
     assert "Peux-tu me faire un script FiveM ?" in prompt
+
+
+def test_neuraco_project_prompt_requests_reviewable_complete_files():
+    message = server.NeuraCoAgentMessage(
+        content="Cree une ressource FiveM avec deux fichiers.",
+        project_id="project_12345678",
+        project_name="Projet test",
+        scope="project",
+        effort="deep",
+        communication_style="detailed",
+    )
+
+    system, _ = server._build_neuraco_agent_prompt(message, [], [], [])
+
+    assert "MODE IMPLEMENTATION ASSISTEE" in system
+    assert "### Fichier:" in system
+    assert "confirmation avant toute ecriture" in system
+    assert "Effort approfondi" in system
+    assert "Style detaille" in system
+
+
+def test_neuraco_response_speed_changes_real_output_limit():
+    assert server._neuraco_response_max_tokens("standard") == 4096
+    assert server._neuraco_response_max_tokens("fast") == 2048
+
+
+def test_neuraco_general_scope_cannot_access_project_resources():
+    valid = server.NeuraCoAgentMessage(
+        content="Explique-moi les ressources FiveM.",
+        project_id=server._NEURACO_GENERAL_CHAT_PROJECT_ID,
+        project_name="Conversation generale",
+        scope="general",
+    )
+    server._validate_neuraco_agent_scope(valid)
+    system, _ = server._build_neuraco_agent_prompt(valid, [], [], [])
+    assert "aucun projet local n'est ouvert" in system
+
+    invalid = valid.model_copy(update={
+        "files": [server.NeuraCoAgentFileContext(path="client.lua", content="print('x')")],
+    })
+    with pytest.raises(HTTPException):
+        server._validate_neuraco_agent_scope(invalid)
+
+
+def test_neuraco_extracts_only_safe_bounded_file_proposals():
+    answer = """
+Voici les fichiers proposes.
+
+### Fichier: `fxmanifest.lua`
+```lua
+fx_version 'cerulean'
+game 'gta5'
+```
+
+### Fichier: `client/main.lua`
+```lua
+RegisterCommand('hello', function()
+  print('hello')
+end)
+```
+
+### Fichier: `../outside.txt`
+```text
+blocked
+```
+
+### Fichier: `.env`
+```dotenv
+API_KEY=secret
+```
+"""
+
+    proposals = server._extract_neuraco_proposed_files(answer)
+
+    assert [proposal["path"] for proposal in proposals] == [
+        "fxmanifest.lua",
+        "client/main.lua",
+    ]
+    assert proposals[0]["language"] == "lua"
+    assert "RegisterCommand" in proposals[1]["content"]
+
+
+def test_neuraco_generated_files_mask_high_confidence_secrets():
+    fake_github_token = "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890"
+    answer = f"""
+### File: `config.js`
+```javascript
+export const token = '{fake_github_token}';
+export const prompt = 'safe';
+```
+"""
+
+    proposals = server._extract_neuraco_proposed_files(answer)
+
+    assert len(proposals) == 1
+    assert fake_github_token not in proposals[0]["content"]
+    assert "[MASQUE PAR NEURACO]" in proposals[0]["content"]
 
 
 def test_neuraco_prompt_uses_the_neuraco_identity_only():

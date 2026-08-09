@@ -88,6 +88,9 @@ export const createCloudTask = async (
       project_name: request.projectName,
       mode: request.mode,
       model: request.model || 'auto',
+      effort: request.effort || 'normal',
+      communication_style: request.communicationStyle || 'normal',
+      response_speed: request.responseSpeed || 'standard',
       conversation_context: (request.conversationContext || [])
         .slice(-20)
         .filter((message) => ['user', 'assistant'].includes(message.role))

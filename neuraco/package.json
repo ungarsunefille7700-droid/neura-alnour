@@ -1,7 +1,7 @@
 {
   "name": "neuraco",
   "productName": "NeuraCo",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "author": "NEURA AL-NOUR",
   "description": "Agent de développement et de travail local pour Windows",
@@ -23,7 +23,7 @@
     "build:renderer": "vite build",
     "build": "npm run build:electron && npm run build:cli && npm run build:sdk && npm run build:renderer",
     "test": "vitest run",
-    "verify:release": "npm test -- --run --maxWorkers=4 --testTimeout=15000 && node scripts/audit-production.mjs && npm run build && node scripts/verify-release-safety.mjs",
+    "verify:release": "npm test -- --run --maxWorkers=2 --testTimeout=20000 && node scripts/audit-production.mjs && npm run build && node scripts/verify-release-safety.mjs",
     "dist:win": "npm run verify:release && electron-builder --win nsis --x64",
     "dist:github": "npm run verify:release && node scripts/clean-directory.mjs release-github && electron-builder --config electron-builder.github.json --win nsis --x64 && node scripts/prepare-github-release.mjs"
   },

@@ -33,6 +33,8 @@ interface LegacySessionDocument {
 const MAX_MESSAGES = 200;
 const MAX_CONTENT_LENGTH = 50_000;
 const MAX_FILES_PER_MESSAGE = 32;
+const MAX_PROPOSED_FILE_CONTENT = 200_000;
+const MAX_PROPOSED_FILES_CONTENT = 1_000_000;
 const MAX_THREADS_PER_PROJECT = 200;
 const COMPRESSION_THRESHOLD_BYTES = 64 * 1024;
 const gzipAsync = promisify(gzip);
@@ -43,6 +45,48 @@ const emptyDocument = (): SessionDocument => ({ version: 2, projects: {} });
 const safeText = (value: unknown, maxLength: number): string => (
   typeof value === 'string' ? value.slice(0, maxLength) : ''
 );
+
+const safeProposedPath = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().replace(/\\/g, '/');
+  if (
+    !normalized
+    || normalized.startsWith('/')
+    || /^[A-Za-z]:/.test(normalized)
+    || normalized.split('/').some((part) => !part || part === '..')
+    || /(^|\/)(\.env(?:\.|$)|id_rsa|id_ed25519|credentials?|secrets?|private[-_.]?keys?)(\/|$)/i
+      .test(normalized)
+  ) {
+    return null;
+  }
+  return normalized.slice(0, 1000);
+};
+
+const sanitizeProposedFiles = (
+  value: NeuraCoPersistedChatMessage['proposedFiles']
+): NeuraCoPersistedChatMessage['proposedFiles'] => {
+  if (!Array.isArray(value)) return undefined;
+  let totalContent = 0;
+  const paths = new Set<string>();
+  return value.slice(0, MAX_FILES_PER_MESSAGE).flatMap((file) => {
+    if (!file || typeof file.content !== 'string') return [];
+    const proposedPath = safeProposedPath(file.path);
+    if (!proposedPath || paths.has(proposedPath.toLowerCase())) return [];
+    const content = redactSecrets(file.content.slice(0, MAX_PROPOSED_FILE_CONTENT));
+    if (!content || totalContent + content.length > MAX_PROPOSED_FILES_CONTENT) return [];
+    paths.add(proposedPath.toLowerCase());
+    totalContent += content.length;
+    return [{
+      path: proposedPath,
+      content,
+      language: safeText(file.language, 80) || undefined,
+      status: ['pending', 'applied', 'failed'].includes(file.status || '')
+        ? file.status
+        : 'pending',
+      error: safeText(file.error, 500) || undefined
+    }];
+  });
+};
 
 const normalizeTaskSettings = (
   value: NeuraCoCheckpointTaskSettings | undefined,
@@ -63,6 +107,8 @@ const normalizeTaskSettings = (
   ] as const;
   const effortLevels = ['rapid', 'normal', 'deep', 'maximum'] as const;
   const communicationStyles = ['direct', 'normal', 'detailed', 'pedagogical'] as const;
+  const models = ['auto', 'claude-sonnet-4-5', 'gpt-4o', 'gemini-2.5-flash'] as const;
+  const responseSpeeds = ['standard', 'fast'] as const;
   return {
     taskMode: taskModes.includes(value.taskMode as typeof taskModes[number])
       ? value.taskMode
@@ -78,7 +124,15 @@ const normalizeTaskSettings = (
     executionMode: ['local', 'cloud', 'hybrid'].includes(value.executionMode)
       ? value.executionMode
       : executionMode,
-    includeActiveFile: value.includeActiveFile !== false
+    includeActiveFile: value.includeActiveFile !== false,
+    model: models.includes(value.model as typeof models[number])
+      ? value.model
+      : 'auto',
+    responseSpeed: responseSpeeds.includes(
+      value.responseSpeed as typeof responseSpeeds[number]
+    )
+      ? value.responseSpeed
+      : 'standard'
   };
 };
 
@@ -111,7 +165,8 @@ const sanitizeMessages = (
           .filter((file): file is string => typeof file === 'string')
           .slice(0, MAX_FILES_PER_MESSAGE)
           .map((file) => redactSecrets(file.slice(0, 1000)))
-        : undefined
+        : undefined,
+      proposedFiles: sanitizeProposedFiles(message.proposedFiles)
     }];
   });
 };

@@ -140,4 +140,23 @@ describe('task routing', () => {
       normal.estimatedMaximumCredits
     );
   });
+
+  it('honors the selected real model and fast response cap', () => {
+    const preview = routeTask(request(
+      'Crée une API FastAPI et vérifie ses tests.',
+      {
+        preferredModel: 'gpt-4o',
+        responseSpeed: 'fast',
+        effort: 'maximum'
+      }
+    ));
+
+    expect(preview.primaryModel).toBe('gpt-4o');
+    expect(preview.responseSpeed).toBe('fast');
+    expect(preview.maxOutputTokens).toBe(4_096);
+    expect(preview.effortEffects).toEqual(expect.arrayContaining([
+      'Vitesse de réponse : rapide',
+      'Modèle demandé : gpt-4o'
+    ]));
+  });
 });

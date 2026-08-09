@@ -1,6 +1,8 @@
 import type {
+  NeuraCoAgentModel,
   NeuraCoCommunicationStyle,
   NeuraCoEffortLevel,
+  NeuraCoResponseSpeed,
   NeuraCoTaskCategory,
   NeuraCoTaskMode,
   NeuraCoTaskRoutingAgent,
@@ -339,8 +341,10 @@ const complexityOf = (
 const primaryModelFor = (
   categories: NeuraCoTaskCategory[],
   imageCount: number,
-  effort: NeuraCoEffortLevel
+  effort: NeuraCoEffortLevel,
+  preferredModel: NeuraCoAgentModel = 'auto'
 ): NeuraCoTaskRoutingPreview['primaryModel'] => {
+  if (preferredModel !== 'auto') return preferredModel;
   if (effort === 'rapid') return 'gemini-2.5-flash';
   if (effort === 'maximum') {
     return imageCount > 0 || categories.includes('3d') || categories.includes('frontend')
@@ -389,6 +393,17 @@ export const routeTask = (
   ].includes(String(request.communicationStyle))
     ? request.communicationStyle as NeuraCoCommunicationStyle
     : 'normal';
+  const preferredModel: NeuraCoAgentModel = [
+    'auto',
+    'claude-sonnet-4-5',
+    'gpt-4o',
+    'gemini-2.5-flash'
+  ].includes(String(request.preferredModel))
+    ? request.preferredModel as NeuraCoAgentModel
+    : 'auto';
+  const responseSpeed: NeuraCoResponseSpeed = request.responseSpeed === 'fast'
+    ? 'fast'
+    : 'standard';
   const effortConfiguration = EFFORT_CONFIGURATION[effort];
   const mode = selectMode(request, scored);
   const selectedCategories = categoriesForMode(mode, scored);
@@ -414,8 +429,12 @@ export const routeTask = (
   const model = primaryModelFor(
     categoryIds,
     Math.max(0, request.imageCount || 0),
-    effort
+    effort,
+    preferredModel
   );
+  const maxOutputTokens = responseSpeed === 'fast'
+    ? Math.min(4_096, effortConfiguration.maxOutputTokens)
+    : effortConfiguration.maxOutputTokens;
   const modelFactor = model === 'claude-sonnet-4-5'
     ? 1.25
     : model === 'gpt-4o'
@@ -467,16 +486,18 @@ export const routeTask = (
     agents,
     tools,
     primaryModel: model,
+    responseSpeed,
     effort,
     effortLabel: EFFORT_LABELS[effort],
     communicationStyle,
     communicationStyleLabel: STYLE_LABELS[communicationStyle],
     verificationPasses: effortConfiguration.verificationPasses,
-    maxOutputTokens: effortConfiguration.maxOutputTokens,
+    maxOutputTokens,
     effortEffects: [
       `${effortConfiguration.verificationPasses} passe(s) de vérification`,
       `${agents.length || 1} agent(s) ou assistant principal`,
-      `${effortConfiguration.maxOutputTokens.toLocaleString('fr-FR')} jetons de sortie maximum`,
+      `${maxOutputTokens.toLocaleString('fr-FR')} jetons de sortie maximum`,
+      `Vitesse de réponse : ${responseSpeed === 'fast' ? 'rapide' : 'standard'}`,
       `Modèle demandé : ${model}`
     ],
     complexity,

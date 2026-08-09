@@ -739,7 +739,12 @@ export class MultiAgentService {
       project_name: request.projectName,
       phase,
       budget,
-      model: ALLOWED_MODELS.has(agent.model) ? agent.model : 'auto',
+      model: request.preferredModel && request.preferredModel !== 'auto'
+        ? request.preferredModel
+        : ALLOWED_MODELS.has(agent.model) ? agent.model : 'auto',
+      effort: request.effort || 'normal',
+      communication_style: request.communicationStyle || 'normal',
+      response_speed: request.responseSpeed || 'standard',
       files: files.map((file) => ({
         path: file.path,
         content: file.content,
