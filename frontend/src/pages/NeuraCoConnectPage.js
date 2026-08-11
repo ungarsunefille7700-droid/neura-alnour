@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { CheckCircle2, Loader2, ShieldAlert } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { validateNeuraCoReturnPath } from '@/utils/authReturnPath';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -12,7 +13,9 @@ const NeuraCoConnectPage = () => {
   const [searchParams] = useSearchParams();
   const [status, setStatus] = useState('Vérification de votre accès NeuraCo...');
   const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
   const startedRef = useRef(false);
+  const returnPath = validateNeuraCoReturnPath(`${location.pathname}${location.search}`);
 
   useEffect(() => {
     if (startedRef.current || !token) return;
@@ -21,7 +24,7 @@ const NeuraCoConnectPage = () => {
     const connect = async () => {
       const state = searchParams.get('state') || '';
       const callbackUrl = searchParams.get('callback') || '';
-      if (state.length < 32 || !callbackUrl) {
+      if (!returnPath) {
         setError('Demande de connexion NeuraCo invalide.');
         return;
       }
@@ -49,10 +52,32 @@ const NeuraCoConnectPage = () => {
     };
 
     connect();
-  }, [searchParams, token]);
+  }, [attempt, returnPath, searchParams, token]);
+
+  const retry = () => {
+    startedRef.current = false;
+    setError('');
+    setStatus('Vérification de votre accès NeuraCo...');
+    setAttempt((current) => current + 1);
+  };
+
+  if (!returnPath) {
+    return (
+      <main className="min-h-screen bg-background flex items-center justify-center p-6">
+        <section className="w-full max-w-md border border-border rounded-lg bg-card p-7 text-center">
+          <ShieldAlert className="mx-auto mb-4 h-12 w-12 text-destructive" aria-hidden="true" />
+          <h1 className="text-2xl font-bold">Connexion NeuraCo invalide</h1>
+          <p className="mt-4 text-sm leading-6 text-muted-foreground">
+            Relance la connexion depuis l'application NeuraCo.
+          </p>
+        </section>
+      </main>
+    );
+  }
 
   if (!token && !loading) {
-    return <Navigate to="/auth" replace state={{ from: `${location.pathname}${location.search}` }} />;
+    const authTarget = `/auth?return_to=${encodeURIComponent(returnPath)}`;
+    return <Navigate to={authTarget} replace state={{ from: returnPath }} />;
   }
 
   return (
@@ -65,9 +90,18 @@ const NeuraCoConnectPage = () => {
         {error ? (
           <>
             <p className="mt-4 text-sm leading-6 text-destructive">{error}</p>
+            {token && (
+              <button
+                type="button"
+                onClick={retry}
+                className="mt-6 inline-flex min-h-11 items-center justify-center rounded-lg border border-border px-5 font-semibold"
+              >
+                Réessayer
+              </button>
+            )}
             <Link
               to="/subscription"
-              className="mt-6 inline-flex min-h-11 items-center justify-center rounded-lg bg-primary px-5 font-semibold text-primary-foreground"
+              className="mt-3 inline-flex min-h-11 items-center justify-center rounded-lg bg-primary px-5 font-semibold text-primary-foreground"
             >
               Voir les abonnements
             </Link>

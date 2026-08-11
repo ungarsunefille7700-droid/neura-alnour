@@ -9,6 +9,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { waitForBackendWarmup } from '@/utils/backendWarmup';
+import {
+  clearAuthReturnPath,
+  rememberAuthReturnPath,
+  validateNeuraCoReturnPath
+} from '@/utils/authReturnPath';
 import { toast } from 'sonner';
 import { Sparkles, Mail, Lock, User, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -22,11 +27,10 @@ const AuthPage = () => {
   const { t } = useLanguage();
   const navigate = useNavigate();
   const location = useLocation();
-  const requestedReturnPath = location.state?.from;
-  const returnPath = typeof requestedReturnPath === 'string'
-    && requestedReturnPath.startsWith('/neuraco/connect?')
-    ? requestedReturnPath
-    : '/chat';
+  const queryReturnPath = new URLSearchParams(location.search).get('return_to');
+  const returnPath = validateNeuraCoReturnPath(queryReturnPath)
+    || validateNeuraCoReturnPath(location.state?.from)
+    || '/chat';
 
   // Login form
   const [loginEmail, setLoginEmail] = useState('');
@@ -39,17 +43,19 @@ const AuthPage = () => {
 
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   const handleGoogleLogin = async () => {
-    const redirectUrl = window.location.origin + '/auth/callback';
-    if (returnPath.startsWith('/neuraco/connect?')) {
-      sessionStorage.setItem('neura_auth_return_to', returnPath);
+    const redirectUrl = new URL('/auth/callback', window.location.origin);
+    const neuraCoReturnPath = validateNeuraCoReturnPath(returnPath);
+    if (neuraCoReturnPath) {
+      rememberAuthReturnPath(neuraCoReturnPath);
+      redirectUrl.searchParams.set('return_to', neuraCoReturnPath);
     } else {
-      sessionStorage.removeItem('neura_auth_return_to');
+      clearAuthReturnPath();
     }
     setLoading(true);
     // Reuse the wake-up started on application load. After 2.5 seconds the user
     // continues to Google while the keepalive request finishes in background.
     await waitForBackendWarmup(2500);
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl.toString())}`;
   };
 
   const handleLogin = async (e) => {

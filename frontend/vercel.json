@@ -5,6 +5,20 @@
   "outputDirectory": "build",
   "devCommand": "yarn start",
   "installCommand": "yarn install",
+  "headers": [
+    {
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/auth/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    },
+    {
+      "source": "/neuraco/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+    }
+  ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]

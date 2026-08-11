@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import axios from 'axios';
+import { clearAuthReturnPath, resolveAuthReturnPath } from '@/utils/authReturnPath';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -59,11 +60,9 @@ const AuthCallback = () => {
 
       setUserFromGoogle(user, token);
       toast.success(`Bienvenue ${user.name}!`);
-      const requestedReturnPath = sessionStorage.getItem('neura_auth_return_to');
-      sessionStorage.removeItem('neura_auth_return_to');
-      const returnPath = requestedReturnPath?.startsWith('/neuraco/connect?')
-        ? requestedReturnPath
-        : '/chat';
+      const queryReturnPath = new URLSearchParams(location.search).get('return_to');
+      const returnPath = resolveAuthReturnPath(queryReturnPath) || '/chat';
+      clearAuthReturnPath();
       navigate(returnPath, { replace: true, state: { user } });
     } catch (err) {
       console.error('Google auth error:', err);
@@ -71,7 +70,7 @@ const AuthCallback = () => {
       setError(detail || "La connexion Google prend trop de temps. Réessaie dans quelques secondes.");
       setStatus('Connexion interrompue');
     }
-  }, [exchangeGoogleSession, extractSessionId, navigate, setUserFromGoogle]);
+  }, [exchangeGoogleSession, extractSessionId, location.search, navigate, setUserFromGoogle]);
 
   useEffect(() => {
     // Prevent double processing in StrictMode

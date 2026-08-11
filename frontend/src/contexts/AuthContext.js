@@ -16,13 +16,16 @@ export const AuthProvider = ({ children }) => {
     fetchingTokenRef.current = token;
     try {
       const response = await axios.get(`${API}/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 20000
       });
       setUser(response.data);
     } catch (error) {
       console.error('Auth error:', error);
-      localStorage.removeItem('neura_token');
-      setToken(null);
+      if ([401, 403].includes(error.response?.status)) {
+        localStorage.removeItem('neura_token');
+        setToken(null);
+      }
       setUser(null);
     } finally {
       if (fetchingTokenRef.current === token) fetchingTokenRef.current = null;
