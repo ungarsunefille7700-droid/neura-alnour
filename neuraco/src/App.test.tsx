@@ -44,6 +44,8 @@ const createWorkspaceMocks = () => ({
   createProject: vi.fn().mockResolvedValue(null),
   cloneProject: vi.fn().mockResolvedValue(null),
   refreshProject: vi.fn().mockResolvedValue(null),
+  validateProject: vi.fn(),
+  exportProjectZip: vi.fn(),
   readProjectFile: vi.fn(),
   saveProjectFile: vi.fn(),
   startTerminalCommand: vi.fn().mockResolvedValue({ accepted: false }),

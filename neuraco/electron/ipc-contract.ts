@@ -40,6 +40,8 @@ export const IPC_CHANNELS = {
   projectCreate: 'neuraco:project-create',
   projectClone: 'neuraco:project-clone',
   projectRefresh: 'neuraco:project-refresh',
+  projectValidate: 'neuraco:project-validate',
+  projectExportZip: 'neuraco:project-export-zip',
   projectReadFile: 'neuraco:project-read-file',
   projectSaveFile: 'neuraco:project-save-file',
   terminalStart: 'neuraco:terminal-start',
@@ -380,6 +382,8 @@ export interface NeuraCoDesktopApi {
   createProject: (name: string) => Promise<NeuraCoProjectSnapshot | null>;
   cloneProject: (repositoryUrl: string) => Promise<NeuraCoProjectSnapshot | null>;
   refreshProject: () => Promise<NeuraCoProjectSnapshot | null>;
+  validateProject: () => Promise<NeuraCoProjectValidation>;
+  exportProjectZip: () => Promise<NeuraCoProjectExportResult>;
   readProjectFile: (relativePath: string) => Promise<NeuraCoProjectFile>;
   saveProjectFile: (
     relativePath: string,
@@ -1632,6 +1636,36 @@ export interface NeuraCoProjectFileSave {
   relativePath: string;
   size: number;
   savedAt: string;
+}
+
+export interface NeuraCoFiveMResourceValidation {
+  manifestPath: string;
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface NeuraCoProjectValidation {
+  kind: 'generic' | 'fivem';
+  valid: boolean;
+  checkedAt: string;
+  fileCount: number;
+  totalBytes: number;
+  excludedEntries: number;
+  errors: string[];
+  warnings: string[];
+  resources: NeuraCoFiveMResourceValidation[];
+}
+
+export interface NeuraCoProjectExportResult {
+  canceled: boolean;
+  filePath?: string;
+  fileCount?: number;
+  totalBytes?: number;
+  compressedBytes?: number;
+  excludedEntries?: number;
+  sha256?: string;
+  validation: NeuraCoProjectValidation;
 }
 
 export type NeuraCoPermissionMode =

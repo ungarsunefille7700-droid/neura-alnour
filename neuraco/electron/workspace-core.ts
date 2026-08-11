@@ -121,7 +121,7 @@ const isInsideRoot = (rootPath: string, candidatePath: string): boolean => {
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 };
 
-const hasSensitiveSegment = (relativePath: string): boolean => (
+export const isProjectPathExcluded = (relativePath: string): boolean => (
   relativePath
     .split(/[\\/]/)
     .filter(Boolean)
@@ -143,7 +143,7 @@ export const normalizeProjectPath = (relativePath: string): string => {
     normalized === '..'
     || normalized.startsWith('../')
     || normalized.split('/').includes('..')
-    || hasSensitiveSegment(normalized)
+    || isProjectPathExcluded(normalized)
   ) {
     throw new Error('Ce fichier est exclu du périmètre NeuraCo.');
   }
@@ -281,7 +281,7 @@ export const scanProject = async (
 
       if (
         entry.isSymbolicLink()
-        || hasSensitiveSegment(relativePath)
+        || isProjectPathExcluded(relativePath)
         || (entry.isDirectory() && EXCLUDED_DIRECTORIES.has(entry.name.toLowerCase()))
       ) {
         excludedEntries += 1;

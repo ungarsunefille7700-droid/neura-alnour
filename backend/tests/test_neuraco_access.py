@@ -1193,6 +1193,26 @@ def test_neuraco_project_prompt_requests_reviewable_complete_files():
     assert "confirmation avant toute ecriture" in system
     assert "Effort approfondi" in system
     assert "Style detaille" in system
+    assert "CONTRAT D'IMPLEMENTATION FIVEM" in system
+    assert "fxmanifest.lua valide" in system
+    assert "N'utilise ni pseudo-code, ni TODO" in system
+    assert "l'exporter en ZIP" in system
+
+
+def test_neuraco_fivem_prompt_requires_project_questions_before_guessing():
+    message = server.NeuraCoAgentMessage(
+        content="Fais-moi un serveur FiveM complet.",
+        project_id="project_12345678",
+        project_name="Projet test",
+        scope="project",
+    )
+
+    system, _ = server._build_neuraco_agent_prompt(message, [], [], [])
+
+    assert "pose dans une seule reponse plusieurs questions groupees" in system
+    assert "ESX, QBCore ou standalone" in system
+    assert "Ne genere pas au hasard" in system
+    assert "Le serveur doit rester autoritaire" in system
 
 
 def test_neuraco_response_speed_changes_real_output_limit():

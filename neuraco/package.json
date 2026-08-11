@@ -1,7 +1,7 @@
 {
   "name": "neuraco",
   "productName": "NeuraCo",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "author": "NEURA AL-NOUR",
   "description": "Agent de développement et de travail local pour Windows",

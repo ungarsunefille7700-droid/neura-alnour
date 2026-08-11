@@ -125,6 +125,11 @@ import {
   scanProjectCached,
   writeProjectTextFile
 } from './workspace-core';
+import {
+  exportProjectPackage,
+  projectArchiveDefaultName,
+  validateProjectPackage
+} from './project-package-service';
 import { cloneGitRepository } from './project-clone-service';
 import {
   listTerminalProfiles,
@@ -2735,6 +2740,102 @@ const registerIpcHandlers = (): void => {
     return activeProject
       ? scanProjectCached(activeProject, { force: true })
       : null;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.projectValidate, async (event) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    if (!activeProject) throw new Error('Aucun projet n\u2019est ouvert.');
+    const allowed = await authorizeProjectAction({
+      action: 'read_file',
+      detail: activeProject.rootPath,
+      software: 'Validateur de projet NeuraCo',
+      file: activeProject.name,
+      risk: 'Lecture des chemins et des manifestes du projet ouvert uniquement.',
+      reason: 'Verifier la structure du projet et les references FiveM avant export.',
+      estimatedCost: '0 credit IA'
+    });
+    if (!allowed) throw new Error('Validation refusee par les autorisations du projet.');
+    const validation = await validateProjectPackage(activeProject);
+    await audit({
+      projectId: activeProject.id,
+      category: 'project',
+      action: 'project_validated',
+      status: validation.valid ? 'completed' : 'failed',
+      summary: validation.valid
+        ? `Projet valide : ${validation.fileCount} fichier(s).`
+        : `Validation terminee avec ${validation.errors.length} erreur(s).`,
+      details: {
+        kind: validation.kind,
+        errors: validation.errors,
+        warnings: validation.warnings,
+        excludedEntries: validation.excludedEntries
+      }
+    });
+    return validation;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.projectExportZip, async (event) => {
+    ensureTrustedSender(event.senderFrame?.url ?? '');
+    if (!activeProject || !mainWindow) throw new Error('Aucun projet n\u2019est ouvert.');
+    const project = activeProject;
+    const allowed = await authorizeProjectAction({
+      action: 'read_file',
+      detail: project.rootPath,
+      software: 'Export ZIP NeuraCo',
+      file: project.name,
+      risk: 'Lecture et compression des fichiers non sensibles du projet ouvert.',
+      reason: 'Creer une archive installable ou partageable du projet selectionne.',
+      estimatedCost: '0 credit IA'
+    });
+    if (!allowed) throw new Error('Export refuse par les autorisations du projet.');
+    const validation = await validateProjectPackage(project);
+    if (!validation.valid) {
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Erreurs detectees avant export',
+        message: `${validation.errors.length} erreur(s) ont ete detectee(s) dans le projet.`,
+        detail: [
+          ...validation.errors.slice(0, 8),
+          validation.errors.length > 8
+            ? `... et ${validation.errors.length - 8} autre(s) erreur(s).`
+            : ''
+        ].filter(Boolean).join('\n'),
+        buttons: ['Exporter malgre les erreurs', 'Annuler'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      });
+      if (confirmation.response !== 0) return { canceled: true, validation };
+    }
+    const selection = await dialog.showSaveDialog(mainWindow, {
+      title: 'Exporter le projet NeuraCo en ZIP',
+      buttonLabel: 'Creer le ZIP',
+      defaultPath: path.join(
+        app.getPath('downloads'),
+        projectArchiveDefaultName(project.name)
+      ),
+      filters: [{ name: 'Archive ZIP', extensions: ['zip'] }]
+    });
+    if (selection.canceled || !selection.filePath) return { canceled: true, validation };
+    const destinationPath = selection.filePath.toLowerCase().endsWith('.zip')
+      ? selection.filePath
+      : `${selection.filePath}.zip`;
+    const result = await exportProjectPackage(project, destinationPath, validation);
+    await audit({
+      projectId: project.id,
+      category: 'project',
+      action: 'project_exported_zip',
+      status: 'completed',
+      summary: `Archive ZIP creee avec ${result.fileCount} fichier(s).`,
+      details: {
+        fileCreated: result.filePath,
+        filesRead: result.fileCount,
+        excludedEntries: result.excludedEntries,
+        sha256: result.sha256,
+        validation: result.validation.valid
+      }
+    });
+    return result;
   });
 
   ipcMain.handle(IPC_CHANNELS.projectReadFile, async (event, relativePath: string) => {

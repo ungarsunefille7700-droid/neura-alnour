@@ -302,6 +302,7 @@ export default function WorkspacePage({
   const [editorMarkers, setEditorMarkers] = useState(0);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [packageBusy, setPackageBusy] = useState(false);
   const [connectivity, setConnectivity] = useState<NeuraCoConnectivityState>({
     online: typeof navigator === 'undefined' ? true : navigator.onLine,
     checkedAt: new Date().toISOString(),
@@ -1746,6 +1747,62 @@ export default function WorkspacePage({
     }
   };
 
+  const validateCurrentProject = async () => {
+    if (!window.neuraco || packageBusy) return;
+    setPackageBusy(true);
+    setStatus(null);
+    try {
+      const validation = await window.neuraco.validateProject();
+      if (validation.valid) {
+        setStatus(
+          validation.kind === 'fivem'
+            ? `Projet FiveM valide : ${validation.resources.length} ressource(s), ${validation.fileCount} fichier(s).`
+            : `Projet valide : ${validation.fileCount} fichier(s) exportable(s).`
+        );
+      } else {
+        const firstError = validation.errors[0]
+          ? ` ${validation.errors[0]}`
+          : '';
+        setStatus(
+          `Validation terminée : ${validation.errors.length} erreur(s), ${validation.warnings.length} avertissement(s).${firstError}`
+        );
+      }
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : 'La validation du projet a échoué.'
+      );
+    } finally {
+      setPackageBusy(false);
+    }
+  };
+
+  const exportCurrentProjectZip = async () => {
+    if (!window.neuraco || packageBusy) return;
+    setPackageBusy(true);
+    setStatus(null);
+    try {
+      const result = await window.neuraco.exportProjectZip();
+      if (result.canceled) {
+        setStatus('Export ZIP annulé.');
+        return;
+      }
+      const shortHash = result.sha256?.slice(0, 12);
+      setStatus(
+        `ZIP créé : ${result.filePath} · ${result.fileCount} fichier(s)${shortHash ? ` · SHA-256 ${shortHash}…` : ''}`
+      );
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : 'La création du ZIP a échoué.'
+      );
+    } finally {
+      setPackageBusy(false);
+    }
+  };
+
   const loadRoutingPreview = async (
     pending: PendingRoutedTask,
     requestedMode: RequestedTaskMode
@@ -2393,6 +2450,22 @@ export default function WorkspacePage({
             <span>{snapshot.indexedFiles} fichiers</span>
           </div>
           <div>
+            <button
+              type="button"
+              title="Valider le projet"
+              disabled={packageBusy}
+              onClick={() => void validateCurrentProject()}
+            >
+              {packageBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}
+            </button>
+            <button
+              type="button"
+              title="Exporter le projet en ZIP"
+              disabled={packageBusy}
+              onClick={() => void exportCurrentProjectZip()}
+            >
+              <Download size={15} />
+            </button>
             <button type="button" title="Nouveau fichier" onClick={() => setCreatingFile(true)}>
               <FilePlus2 size={15} />
             </button>

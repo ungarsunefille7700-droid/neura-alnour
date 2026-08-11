@@ -168,6 +168,8 @@ const desktopApi: NeuraCoDesktopApi = Object.freeze({
   cloneProject: (repositoryUrl: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.projectClone, repositoryUrl),
   refreshProject: () => ipcRenderer.invoke(IPC_CHANNELS.projectRefresh),
+  validateProject: () => ipcRenderer.invoke(IPC_CHANNELS.projectValidate),
+  exportProjectZip: () => ipcRenderer.invoke(IPC_CHANNELS.projectExportZip),
   readProjectFile: (relativePath: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.projectReadFile, relativePath),
   saveProjectFile: (relativePath: string, content: string) =>

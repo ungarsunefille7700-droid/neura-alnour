@@ -188,6 +188,37 @@ const createDesktopApi = () => {
     logout: vi.fn(),
     openProject: vi.fn(),
     refreshProject: vi.fn().mockResolvedValue(snapshot),
+    validateProject: vi.fn().mockResolvedValue({
+      kind: 'generic',
+      valid: true,
+      checkedAt: '2026-08-11T00:00:00.000Z',
+      fileCount: 2,
+      totalBytes: 128,
+      excludedEntries: 1,
+      errors: [],
+      warnings: [],
+      resources: []
+    }),
+    exportProjectZip: vi.fn().mockResolvedValue({
+      canceled: false,
+      filePath: 'C:\\Users\\test\\Downloads\\project.zip',
+      fileCount: 2,
+      totalBytes: 128,
+      compressedBytes: 96,
+      excludedEntries: 1,
+      sha256: 'ABCDEF1234567890',
+      validation: {
+        kind: 'generic',
+        valid: true,
+        checkedAt: '2026-08-11T00:00:00.000Z',
+        fileCount: 2,
+        totalBytes: 128,
+        excludedEntries: 1,
+        errors: [],
+        warnings: [],
+        resources: []
+      }
+    }),
     readProjectFile: vi.fn().mockResolvedValue({
       relativePath: 'src/main.ts',
       content: 'export const ready = true;\n',
@@ -1143,6 +1174,31 @@ describe('NeuraCo project workspace', () => {
     await act(async () => editorTab?.click());
     expect(container.querySelector('.editor-view')).not.toBeNull();
     expect(desktop.api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('validates the active project and exports its real files as a ZIP', async () => {
+    await act(async () => root.render(
+      <WorkspacePage
+        snapshot={snapshot}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onOpenProject={vi.fn().mockResolvedValue(undefined)}
+      />
+    ));
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[title="Valider le projet"]')?.click();
+      await Promise.resolve();
+    });
+    expect(desktop.api.validateProject).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Projet valide : 2 fichier(s) exportable(s).');
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[title="Exporter le projet en ZIP"]')?.click();
+      await Promise.resolve();
+    });
+    expect(desktop.api.exportProjectZip).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('project.zip');
+    expect(container.textContent).toContain('SHA-256 ABCDEF123456');
   });
 
   it('opens a real file and saves the edited content through the desktop bridge', async () => {
