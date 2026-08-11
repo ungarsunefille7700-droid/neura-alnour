@@ -84,7 +84,8 @@ const DEFINITIONS: readonly ApplicationDefinition[] = [
     id: 'fivem',
     name: 'FiveM',
     candidates: (env) => [
-      path.join(env.LOCALAPPDATA || '', 'FiveM', 'FiveM.app', 'FiveM.exe')
+      path.join(env.LOCALAPPDATA || '', 'FiveM', 'FiveM.app', 'FiveM.exe'),
+      path.join(env.LOCALAPPDATA || '', 'FiveM', 'FiveM.exe')
     ],
     capabilities: ['Lancer FiveM dans son profil local'],
     supportsTarget: false

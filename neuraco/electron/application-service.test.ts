@@ -1,6 +1,8 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { validateApplicationTarget } from './application-service';
+import { ApplicationService, validateApplicationTarget } from './application-service';
 
 const project = {
   id: 'project-1',
@@ -20,5 +22,30 @@ describe('NeuraCo application allowlist', () => {
       project,
       path.resolve('C:\\projects\\other\\secret.txt')
     )).toThrow(/hors du projet/i);
+  });
+
+  it('detects the standalone FiveM launcher installation', async () => {
+    const localAppData = await mkdtemp(path.join(os.tmpdir(), 'neuraco-fivem-detect-'));
+    const previousLocalAppData = process.env.LOCALAPPDATA;
+    try {
+      const executable = path.join(localAppData, 'FiveM', 'FiveM.exe');
+      await mkdir(path.dirname(executable), { recursive: true });
+      await writeFile(executable, 'launcher');
+      process.env.LOCALAPPDATA = localAppData;
+
+      const service = new ApplicationService({
+        storageDirectory: path.join(localAppData, 'NeuraCo')
+      });
+      const fiveM = (await service.list()).find((application) => application.id === 'fivem');
+
+      expect(fiveM).toMatchObject({
+        installed: true,
+        executable
+      });
+    } finally {
+      if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = previousLocalAppData;
+      await rm(localAppData, { recursive: true, force: true });
+    }
   });
 });
