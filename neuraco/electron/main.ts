@@ -99,6 +99,7 @@ import {
   authenticatedApiRequest,
   loginWithGoogle,
   loginWithPassword,
+  prewarmBackend,
   registerWithPassword,
   logout,
   restoreSession
@@ -8020,6 +8021,7 @@ app.whenReady().then(async () => {
   process.on('unhandledRejection', (reason) => {
     void getTechnicalErrorLogService().record('main.rejection', reason);
   });
+  void prewarmBackend();
   await runLocalDatabaseMigrations();
   await getAppLockService().initialize();
   getRoutineService();

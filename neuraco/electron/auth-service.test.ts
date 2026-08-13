@@ -34,7 +34,7 @@ vi.mock('node:fs/promises', () => {
   return { ...module, default: module };
 });
 
-import { restoreSession } from './auth-service';
+import { prewarmBackend, restoreSession } from './auth-service';
 
 describe('NeuraCo authentication timeout', () => {
   beforeEach(() => {
@@ -86,5 +86,17 @@ describe('NeuraCo authentication timeout', () => {
       status: 'error',
       error: 'Le serveur NeuraCo ne repond pas. Verifiez votre connexion puis reessayez.'
     });
+  });
+
+  it('reveille le backend sans bloquer indefiniment le demarrage', async () => {
+    const pending = prewarmBackend();
+
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    await expect(pending).resolves.toBe(false);
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      'https://neura-alnour-backend.onrender.com/api/health',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
   });
 });

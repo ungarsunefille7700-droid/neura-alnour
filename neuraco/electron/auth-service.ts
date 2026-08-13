@@ -26,6 +26,7 @@ const WEBSITE_URL = (
 ).replace(/\/$/, '');
 const GOOGLE_TIMEOUT_MS = 90 * 1000;
 const AUTH_API_TIMEOUT_MS = 12 * 1000;
+const BACKEND_WARMUP_TIMEOUT_MS = 8 * 1000;
 
 interface LoginResponse {
   token: string;
@@ -114,11 +115,25 @@ export const publicApiRequest = <T>(
 
 export const authenticatedApiRequest = async <T>(
   route: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  timeoutMs?: number
 ): Promise<T> => {
   const token = await loadToken();
   if (!token) throw new ApiError('Session NeuraCo expirée.', 401);
-  return apiRequest<T>(route, options, token);
+  return apiRequest<T>(route, options, token, timeoutMs);
+};
+
+let activeBackendWarmup: Promise<boolean> | null = null;
+
+export const prewarmBackend = (): Promise<boolean> => {
+  if (activeBackendWarmup) return activeBackendWarmup;
+  activeBackendWarmup = apiRequest('/health', {}, undefined, BACKEND_WARMUP_TIMEOUT_MS)
+    .then(() => true)
+    .catch(() => false)
+    .finally(() => {
+      activeBackendWarmup = null;
+    });
+  return activeBackendWarmup;
 };
 
 export const authenticatedApiStream = async (
@@ -348,6 +363,7 @@ const listenOnLoopback = (server: Server): Promise<number> => new Promise(
 let activeGoogleLogin: Promise<NeuraCoSession> | null = null;
 
 const startGoogleLogin = async (): Promise<NeuraCoSession> => {
+  void prewarmBackend();
   const state = randomBytes(32).toString('base64url');
   let server: Server;
   let timeout: ReturnType<typeof setTimeout>;

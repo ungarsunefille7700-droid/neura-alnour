@@ -61,6 +61,8 @@ type HomeChatMessage = {
 
 const GENERAL_CHAT_PROJECT_ID = '000000000000000000000001';
 const SESSION_RESTORE_TIMEOUT_MS = 15 * 1000;
+const RUNTIME_POLICY_INITIAL_RETRY_MS = 1_500;
+const RUNTIME_POLICY_MAX_RETRY_MS = 30_000;
 
 const restoreSessionBeforeDeadline = async (
   restore: () => Promise<NeuraCoSession>
@@ -1076,16 +1078,28 @@ function App() {
     const desktop = window.neuraco;
     if (!desktop || session?.status !== 'authenticated') return;
     let active = true;
-    desktop.getRuntimePolicy().then((policy) => {
-      if (!active) return;
-      const models = normalizeNeuraCoModels(policy.models);
-      setModelOptions(models);
-      setHomeModel((current) => isModelAvailable(models, current) ? current : 'auto');
-    }).catch(() => {
-      if (active) setModelOptions(fallbackModelOptions());
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const loadRuntimePolicy = async (retryDelay: number): Promise<void> => {
+      try {
+        const policy = await desktop.getRuntimePolicy();
+        if (!active) return;
+        const models = normalizeNeuraCoModels(policy.models);
+        setModelOptions(models);
+        setHomeModel((current) => isModelAvailable(models, current) ? current : 'auto');
+      } catch {
+        if (!active) return;
+        setModelOptions(fallbackModelOptions());
+        retryTimer = setTimeout(() => {
+          void loadRuntimePolicy(Math.min(retryDelay * 2, RUNTIME_POLICY_MAX_RETRY_MS));
+        }, retryDelay);
+      }
+    };
+
+    void loadRuntimePolicy(RUNTIME_POLICY_INITIAL_RETRY_MS);
     return () => {
       active = false;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [session?.status, session?.user?.email]);
 

@@ -508,6 +508,95 @@ describe('NeuraCo desktop foundation', () => {
     expect(labels).not.toContain('Claude Opus 5');
   });
 
+  it('reloads the server model catalogue after a temporary backend failure', async () => {
+    vi.useFakeTimers();
+    const mocks = createWorkspaceMocks();
+    mocks.getRuntimePolicy
+      .mockRejectedValueOnce(new Error('backend temporarily unavailable'))
+      .mockResolvedValue({
+        revision: 3,
+        maintenance: { active: false, enabled: false },
+        providers: {
+          anthropic: { enabled: true },
+          openai: { enabled: true },
+          gemini: { enabled: true }
+        },
+        disabled_models: [],
+        models: [
+          {
+            id: 'claude-opus-4-8',
+            provider: 'anthropic',
+            display_name: 'Claude Opus 4.8',
+            group: 'Anthropic'
+          },
+          {
+            id: 'gpt-5.6-sol',
+            provider: 'openai',
+            display_name: 'GPT-5.6 Sol',
+            group: 'OpenAI'
+          }
+        ],
+        plugins: { allow_unsigned_local: false, blocked_ids: [] },
+        release: {
+          latest_version: '1.0.11',
+          minimum_supported_version: '1.0.0',
+          rollout_percent: 100
+        },
+        incidents: [],
+        server_time: '2026-08-13T00:00:00Z'
+      });
+    window.neuraco = {
+      ...mocks,
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.11',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({
+        status: 'authenticated',
+        user: {
+          id: 'vip-model-retry',
+          email: 'founder@example.com',
+          name: 'Founder',
+          subscription: 'neura_ultra',
+          is_vip: true
+        },
+        entitlement: {
+          neuraco_access: true,
+          plan: 'neura_ultra',
+          reason: 'administrator'
+        },
+        persistent: true
+      }),
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getRuntimePolicy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+    });
+
+    const labels = Array.from(
+      container.querySelector<HTMLSelectElement>('.home-composer-options select')?.options || []
+    ).map((option) => option.textContent);
+    expect(mocks.getRuntimePolicy).toHaveBeenCalledTimes(2);
+    expect(labels).toContain('Claude Opus 4.8');
+    expect(labels).toContain('GPT-5.6 Sol');
+  });
+
   it('creates and opens a new local project from the sidebar', async () => {
     const createProject = vi.fn().mockResolvedValue({
       project: {

@@ -8,6 +8,7 @@ vi.mock('./auth-service', () => ({ authenticatedApiRequest }));
 
 import {
   getAdminState,
+  getRuntimePolicy,
   listAdminUsers,
   updateAdminConfig,
   updateAdminIncident
@@ -35,6 +36,16 @@ describe('admin service', () => {
         method: 'PATCH',
         body: JSON.stringify({ status: 'resolved' })
       }
+    );
+  });
+
+  it('bounds the server-authoritative runtime policy request', async () => {
+    authenticatedApiRequest.mockResolvedValue({ models: [] });
+    await getRuntimePolicy();
+    expect(authenticatedApiRequest).toHaveBeenCalledWith(
+      '/neuraco/runtime-policy',
+      {},
+      12_000
     );
   });
 

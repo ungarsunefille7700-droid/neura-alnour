@@ -16,13 +16,15 @@ import type {
   NeuraCoRuntimePolicy
 } from './ipc-contract';
 
+const RUNTIME_POLICY_TIMEOUT_MS = 12 * 1000;
+
 const json = (method: 'POST' | 'PUT' | 'PATCH', body: unknown): RequestInit => ({
   method,
   body: JSON.stringify(body)
 });
 
 export const getRuntimePolicy = (): Promise<NeuraCoRuntimePolicy> => (
-  authenticatedApiRequest('/neuraco/runtime-policy')
+  authenticatedApiRequest('/neuraco/runtime-policy', {}, RUNTIME_POLICY_TIMEOUT_MS)
 );
 
 export const getAdminState = (): Promise<NeuraCoAdminState> => (
