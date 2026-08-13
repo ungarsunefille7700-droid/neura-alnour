@@ -10,7 +10,7 @@ from pymongo.errors import DuplicateKeyError
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, ConfigDict, Field, EmailStr
+from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
 from typing import List, Optional, Dict, Any, Literal
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -136,28 +136,118 @@ NEURACO_QUOTA_DEFAULTS = {
     },
 }
 
-# USD per million tokens. Defaults follow public provider list prices and remain
-# server-overridable because the Emergent proxy or providers may revise pricing.
-NEURACO_MODEL_PRICING_DEFAULTS = {
-    "gpt-4o": {
-        "provider": "openai",
-        "input": 2.50,
-        "cached_input": 1.25,
-        "output": 10.00,
-    },
-    "claude-sonnet-4-5": {
-        "provider": "anthropic",
-        "input": 5.00,
-        "cached_input": 0.50,
-        "output": 25.00,
-    },
-    "gemini-2.5-flash": {
-        "provider": "gemini",
-        "input": 0.30,
-        "cached_input": 0.03,
-        "output": 2.50,
-    },
+# Text models advertised by the authenticated Emergent model catalogue. Model
+# identifiers remain server-authoritative so desktop clients never invent one.
+def _neuraco_model(
+    model_id: str,
+    provider: str,
+    display_name: str,
+    group: str,
+    input_price: float,
+    cached_input_price: float,
+    output_price: float,
+) -> dict:
+    return {
+        "id": model_id,
+        "provider": provider,
+        "display_name": display_name,
+        "group": group,
+        "input": input_price,
+        "cached_input": cached_input_price,
+        "output": output_price,
+    }
+
+
+# Conservative, administrator-overridable metering rates in USD per million
+# tokens. The Emergent /models catalogue exposes model IDs but no pricing. A
+# missing cache-specific rate therefore falls back to regular input metering so
+# an unknown discount can never bypass usage quotas.
+NEURACO_MODEL_CATALOG = (
+    # Anthropic
+    _neuraco_model("claude-opus-4-8", "anthropic", "Claude Opus 4.8", "Anthropic", 5.0, 0.5, 25.0),
+    _neuraco_model("claude-opus-4-7", "anthropic", "Claude Opus 4.7", "Anthropic", 5.0, 0.5, 25.0),
+    _neuraco_model("claude-opus-4-6", "anthropic", "Claude Opus 4.6", "Anthropic", 5.0, 0.5, 25.0),
+    _neuraco_model("claude-opus-4-5-20251101", "anthropic", "Claude Opus 4.5", "Anthropic", 5.0, 0.5, 25.0),
+    _neuraco_model("claude-opus-4-20250514", "anthropic", "Claude Opus 4", "Anthropic", 15.0, 1.5, 75.0),
+    _neuraco_model("claude-4-opus-20250514", "anthropic", "Claude 4 Opus (alias)", "Anthropic", 15.0, 1.5, 75.0),
+    _neuraco_model("claude-sonnet-5", "anthropic", "Claude Sonnet 5", "Anthropic", 2.0, 0.2, 10.0),
+    _neuraco_model("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6", "Anthropic", 3.0, 0.3, 15.0),
+    # Keep the existing NeuraCo rate unchanged for the current default model.
+    _neuraco_model("claude-sonnet-4-5", "anthropic", "Claude Sonnet 4.5", "Anthropic", 5.0, 0.5, 25.0),
+    _neuraco_model("claude-sonnet-4-5-20250929", "anthropic", "Claude Sonnet 4.5 (2025-09-29)", "Anthropic", 3.0, 0.3, 15.0),
+    _neuraco_model("claude-sonnet-4-20250514", "anthropic", "Claude Sonnet 4", "Anthropic", 3.0, 0.3, 15.0),
+    _neuraco_model("claude-4-sonnet-20250514", "anthropic", "Claude 4 Sonnet (alias)", "Anthropic", 3.0, 0.3, 15.0),
+    _neuraco_model("claude-3-7-sonnet-20250219", "anthropic", "Claude Sonnet 3.7", "Anthropic", 3.0, 0.3, 15.0),
+    _neuraco_model("claude-3-5-sonnet-20241022", "anthropic", "Claude Sonnet 3.5", "Anthropic", 3.0, 0.3, 15.0),
+    _neuraco_model("claude-haiku-4-5", "anthropic", "Claude Haiku 4.5", "Anthropic", 1.0, 0.1, 5.0),
+    _neuraco_model("claude-haiku-4-5-20251001", "anthropic", "Claude Haiku 4.5 (2025-10-01)", "Anthropic", 1.0, 0.1, 5.0),
+    _neuraco_model("claude-3-5-haiku-20241022", "anthropic", "Claude Haiku 3.5", "Anthropic", 1.0, 0.1, 5.0),
+    _neuraco_model("claude-fable-5", "anthropic", "Claude Fable 5", "Anthropic", 10.0, 1.0, 50.0),
+    # OpenAI
+    _neuraco_model("gpt-5.6-sol", "openai", "GPT-5.6 Sol", "OpenAI", 5.0, 0.5, 30.0),
+    _neuraco_model("gpt-5.6-terra", "openai", "GPT-5.6 Terra", "OpenAI", 2.0, 0.2, 12.0),
+    _neuraco_model("gpt-5.6-luna", "openai", "GPT-5.6 Luna", "OpenAI", 0.2, 0.02, 1.2),
+    _neuraco_model("gpt-5.5", "openai", "GPT-5.5", "OpenAI", 5.0, 0.5, 30.0),
+    _neuraco_model("gpt-5.4", "openai", "GPT-5.4", "OpenAI", 2.5, 0.25, 15.0),
+    _neuraco_model("gpt-5.4-mini", "openai", "GPT-5.4 mini", "OpenAI", 0.75, 0.075, 4.5),
+    _neuraco_model("gpt-5.2", "openai", "GPT-5.2", "OpenAI", 1.75, 0.175, 14.0),
+    _neuraco_model("gpt-5.1", "openai", "GPT-5.1", "OpenAI", 1.25, 0.125, 10.0),
+    _neuraco_model("gpt-5", "openai", "GPT-5", "OpenAI", 1.25, 0.125, 10.0),
+    _neuraco_model("gpt-5-mini", "openai", "GPT-5 mini", "OpenAI", 0.25, 0.025, 2.0),
+    _neuraco_model("gpt-5-nano", "openai", "GPT-5 nano", "OpenAI", 0.05, 0.005, 0.4),
+    _neuraco_model("gpt-4o", "openai", "GPT-4o", "OpenAI", 2.5, 1.25, 10.0),
+    _neuraco_model("gpt-4o-mini", "openai", "GPT-4o mini", "OpenAI", 0.15, 0.075, 0.6),
+    _neuraco_model("gpt-4.1", "openai", "GPT-4.1", "OpenAI", 2.0, 0.5, 8.0),
+    _neuraco_model("gpt-4.1-2025-04-14", "openai", "GPT-4.1 (2025-04-14)", "OpenAI", 2.0, 0.5, 8.0),
+    _neuraco_model("gpt-4.1-mini", "openai", "GPT-4.1 mini", "OpenAI", 0.4, 0.1, 1.6),
+    _neuraco_model("gpt-4.1-nano", "openai", "GPT-4.1 nano", "OpenAI", 0.1, 0.025, 0.4),
+    _neuraco_model("gpt-4", "openai", "GPT-4", "OpenAI", 30.0, 30.0, 60.0),
+    _neuraco_model("o4-mini", "openai", "o4-mini", "OpenAI", 1.1, 0.275, 4.4),
+    _neuraco_model("o3-pro", "openai", "o3-pro", "OpenAI", 20.0, 20.0, 80.0),
+    _neuraco_model("o3", "openai", "o3", "OpenAI", 2.0, 0.5, 8.0),
+    _neuraco_model("o3-mini", "openai", "o3-mini", "OpenAI", 1.1, 0.55, 4.4),
+    _neuraco_model("o1-pro", "openai", "o1-pro", "OpenAI", 150.0, 150.0, 600.0),
+    _neuraco_model("o1", "openai", "o1", "OpenAI", 15.0, 7.5, 60.0),
+    _neuraco_model("o1-mini", "openai", "o1-mini", "OpenAI", 3.0, 1.5, 12.0),
+    # Google Gemini
+    _neuraco_model("gemini-3.5-flash", "gemini", "Gemini 3.5 Flash", "Google Gemini", 1.5, 0.15, 9.0),
+    _neuraco_model("gemini-3.1-pro-preview", "gemini", "Gemini 3.1 Pro Preview", "Google Gemini", 2.0, 0.2, 12.0),
+    _neuraco_model("gemini-3-pro-preview", "gemini", "Gemini 3 Pro Preview", "Google Gemini", 2.0, 0.2, 12.0),
+    _neuraco_model("gemini-3-flash-preview", "gemini", "Gemini 3 Flash Preview", "Google Gemini", 0.5, 0.05, 3.0),
+    _neuraco_model("gemini-2.5-pro", "gemini", "Gemini 2.5 Pro", "Google Gemini", 1.25, 0.125, 10.0),
+    _neuraco_model("gemini-2.5-flash", "gemini", "Gemini 2.5 Flash", "Google Gemini", 0.3, 0.03, 2.5),
+    _neuraco_model("gemini-2.0-flash", "gemini", "Gemini 2.0 Flash", "Google Gemini", 0.1, 0.025, 0.4),
+    _neuraco_model("gemini-2.0-flash-lite", "gemini", "Gemini 2.0 Flash Lite", "Google Gemini", 0.075, 0.01875, 0.3),
+    _neuraco_model("gemini-1.5-pro", "gemini", "Gemini 1.5 Pro", "Google Gemini", 2.5, 2.5, 10.0),
+    _neuraco_model("gemini-1.5-flash", "gemini", "Gemini 1.5 Flash", "Google Gemini", 0.075, 0.075, 0.3),
+    _neuraco_model("gemini-pro", "gemini", "Gemini Pro", "Google Gemini", 0.5, 0.5, 1.5),
+)
+NEURACO_MODEL_BY_ID = {
+    item["id"]: item for item in NEURACO_MODEL_CATALOG
 }
+NEURACO_DEFAULT_MODEL_IDS = (
+    "claude-sonnet-4-5",
+    "gpt-4o",
+    "gemini-2.5-flash",
+)
+NEURACO_MODEL_PRICING_DEFAULTS = {
+    item["id"]: {
+        "provider": item["provider"],
+        "input": item["input"],
+        "cached_input": item["cached_input"],
+        "output": item["output"],
+    }
+    for item in NEURACO_MODEL_CATALOG
+}
+
+
+def _validate_neuraco_model_value(model: str, allow_auto: bool = True) -> str:
+    normalized = str(model or "").strip()
+    if allow_auto and normalized == "auto":
+        return normalized
+    if normalized not in NEURACO_MODEL_BY_ID:
+        raise ValueError("Le modèle NeuraCo demandé n'est pas disponible.")
+    return normalized
 NEURACO_BILLING_DEFAULTS = {
     "version": os.environ.get("NEURACO_PRICING_VERSION", "2026-07-01"),
     "credits_per_usd": float(NEURACO_CREDITS_PER_USD),
@@ -4348,12 +4438,7 @@ class NeuraCoAgentMessage(BaseModel):
     project_name: str = Field(..., min_length=1, max_length=160)
     scope: Literal["project", "general"] = "project"
     mode: Literal["question", "plan"] = "question"
-    model: Literal[
-        "auto",
-        "claude-sonnet-4-5",
-        "gpt-4o",
-        "gemini-2.5-flash",
-    ] = "auto"
+    model: str = Field(default="auto", min_length=1, max_length=120)
     effort: Literal["rapid", "normal", "deep", "maximum"] = "normal"
     communication_style: Literal[
         "direct",
@@ -4372,6 +4457,11 @@ class NeuraCoAgentMessage(BaseModel):
         max_length=NEURACO_AGENT_MAX_IMAGES,
     )
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_neuraco_model_value(value, allow_auto=True)
+
 
 class NeuraCoCloudTaskCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=12000)
@@ -4380,12 +4470,7 @@ class NeuraCoCloudTaskCreate(BaseModel):
     project_id: str = Field(..., min_length=8, max_length=120)
     project_name: str = Field(..., min_length=1, max_length=160)
     mode: Literal["question", "plan"] = "plan"
-    model: Literal[
-        "auto",
-        "claude-sonnet-4-5",
-        "gpt-4o",
-        "gemini-2.5-flash",
-    ] = "auto"
+    model: str = Field(default="auto", min_length=1, max_length=120)
     effort: Literal["rapid", "normal", "deep", "maximum"] = "normal"
     communication_style: Literal[
         "direct",
@@ -4399,6 +4484,11 @@ class NeuraCoCloudTaskCreate(BaseModel):
         max_length=20,
     )
     files: List[NeuraCoAgentFileContext] = Field(default_factory=list, max_length=16)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_neuraco_model_value(value, allow_auto=True)
 
 
 class NeuraCoEnvironmentTransferCreate(BaseModel):
@@ -4448,12 +4538,7 @@ class NeuraCoSpecialistMessage(BaseModel):
     project_name: str = Field(..., min_length=1, max_length=160)
     phase: Literal["orchestrator", "specialist", "reviewer"] = "specialist"
     budget: int = Field(default=1, ge=1, le=100)
-    model: Literal[
-        "auto",
-        "claude-sonnet-4-5",
-        "gpt-4o",
-        "gemini-2.5-flash",
-    ] = "auto"
+    model: str = Field(default="auto", min_length=1, max_length=120)
     effort: Literal["rapid", "normal", "deep", "maximum"] = "normal"
     communication_style: Literal[
         "direct",
@@ -4464,18 +4549,24 @@ class NeuraCoSpecialistMessage(BaseModel):
     response_speed: Literal["standard", "fast"] = "standard"
     files: List[NeuraCoAgentFileContext] = Field(default_factory=list, max_length=16)
 
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_neuraco_model_value(value, allow_auto=True)
+
 
 class NeuraCoUsageEstimateRequest(BaseModel):
     mode: Literal["economic", "balanced", "quality", "custom"] = "balanced"
-    model: Literal[
-        "claude-sonnet-4-5",
-        "gpt-4o",
-        "gemini-2.5-flash",
-    ] = "claude-sonnet-4-5"
+    model: str = Field(default="claude-sonnet-4-5", min_length=1, max_length=120)
     prompt_characters: int = Field(default=2000, ge=1, le=2_000_000)
     max_output_tokens: int = Field(default=4096, ge=64, le=32768)
     agents: int = Field(default=1, ge=1, le=16)
     image_count: int = Field(default=0, ge=0, le=20)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str) -> str:
+        return _validate_neuraco_model_value(value, allow_auto=False)
 
 
 class NeuraCoUsageSettingsRequest(BaseModel):
@@ -4485,16 +4576,19 @@ class NeuraCoUsageSettingsRequest(BaseModel):
     monthly_cap: Optional[float] = Field(default=None, ge=0.05, le=200000)
     agent_cap: Optional[float] = Field(default=None, ge=0.05, le=200000)
     max_agents: Optional[int] = Field(default=None, ge=1, le=16)
-    max_model: Optional[Literal[
-        "claude-sonnet-4-5",
-        "gpt-4o",
-        "gemini-2.5-flash",
-    ]] = None
+    max_model: Optional[str] = Field(default=None, min_length=1, max_length=120)
     auto_reload_enabled: bool = False
     auto_reload_minimum: Optional[float] = Field(default=None, ge=0, le=10000)
     auto_reload_target: Optional[float] = Field(default=None, ge=1, le=10000)
     auto_reload_max_eur: Optional[float] = Field(default=None, ge=5, le=200)
     auto_reload_monthly_cap_eur: Optional[float] = Field(default=None, ge=5, le=2000)
+
+    @field_validator("max_model")
+    @classmethod
+    def validate_max_model(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _validate_neuraco_model_value(value, allow_auto=False)
 
 
 class NeuraCoCreditCheckoutRequest(BaseModel):
@@ -13387,26 +13481,60 @@ def _neuraco_response_max_tokens(response_speed: str) -> int:
     return 2048 if response_speed == "fast" else 4096
 
 
+def _validate_neuraco_model(model: str, allow_auto: bool = True) -> str:
+    try:
+        return _validate_neuraco_model_value(model, allow_auto=allow_auto)
+    except ValueError:
+        normalized = str(model or "").strip()
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "neuraco_model_invalid",
+                "message": "Le modèle NeuraCo demandé n'est pas disponible.",
+                "model": normalized,
+                "credits_consumed": False,
+                "changes_applied": False,
+            },
+        )
+
+
+def _neuraco_model_is_active(model: dict, runtime_config: Optional[dict]) -> bool:
+    config = runtime_config or {}
+    providers = config.get("__providers__") or {}
+    return bool((providers.get(model["provider"]) or {}).get("enabled", True)) and not bool(
+        (config.get(model["id"]) or {}).get("disabled", False)
+    )
+
+
+def _neuraco_public_models(runtime_config: Optional[dict] = None) -> List[dict]:
+    return [
+        {
+            "id": model["id"],
+            "provider": model["provider"],
+            "display_name": model["display_name"],
+            "group": model["group"],
+        }
+        for model in NEURACO_MODEL_CATALOG
+        if _neuraco_model_is_active(model, runtime_config)
+    ]
+
+
 def _neuraco_model_candidates(
     preferred_model: str = "auto",
     runtime_config: Optional[dict] = None,
 ) -> List[tuple[str, str, str]]:
-    candidates = [
-        ("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5"),
-        ("openai", "gpt-4o", "GPT-4o"),
-        ("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash"),
-    ]
+    preferred_model = _validate_neuraco_model(preferred_model, allow_auto=True)
     config = runtime_config or {}
-    providers = config.get("__providers__") or {}
-    candidates = [
-        candidate
-        for candidate in candidates
-        if (providers.get(candidate[0]) or {}).get("enabled", True)
-        and not bool((config.get(candidate[1]) or {}).get("disabled", False))
-    ]
+    model_ids = list(NEURACO_DEFAULT_MODEL_IDS)
     if preferred_model != "auto":
-        candidates.sort(key=lambda candidate: candidate[1] != preferred_model)
-    return candidates
+        model_ids.insert(0, preferred_model)
+    ordered_ids = list(dict.fromkeys(model_ids))
+    return [
+        (model["provider"], model["id"], model["display_name"])
+        for model_id in ordered_ids
+        for model in [NEURACO_MODEL_BY_ID[model_id]]
+        if _neuraco_model_is_active(model, config)
+    ]
 
 
 def _neuraco_maintenance_state(runtime_config: Optional[dict] = None) -> dict:
@@ -14815,6 +14943,7 @@ async def get_neuraco_runtime_policy(user: dict = Depends(get_current_user)):
         "maintenance": _serialize_doc(_neuraco_maintenance_state(config)),
         "providers": providers,
         "disabled_models": disabled_models,
+        "models": _neuraco_public_models(config),
         "plugins": {
             "allow_unsigned_local": bool(
                 (config.get("__plugins__") or {}).get("allow_unsigned_local", True)
@@ -15055,6 +15184,7 @@ async def estimate_neuraco_usage(
             "reason": entitlement["reason"],
             "plan": entitlement["plan"],
         })
+    _validate_neuraco_model(request.model, allow_auto=False)
     mode_factor = {
         "economic": Decimal("0.55"),
         "balanced": Decimal("1"),
@@ -15123,6 +15253,8 @@ async def update_neuraco_usage_settings(
             "reason": entitlement["reason"],
             "plan": entitlement["plan"],
         })
+    if request.max_model is not None:
+        _validate_neuraco_model(request.max_model, allow_auto=False)
     if request.auto_reload_enabled and not os.environ.get(
         "NEURACO_STRIPE_AUTORELOAD_ENABLED"
     ):

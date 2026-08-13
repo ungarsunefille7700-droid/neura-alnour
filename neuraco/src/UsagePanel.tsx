@@ -23,13 +23,17 @@ import type {
   NeuraCoUpdatePreferences,
   NeuraCoUpdateRollback,
   NeuraCoUpdateState,
+  NeuraCoModelOption,
   NeuraCoUsageEstimate,
   NeuraCoUsageEstimateRequest,
   NeuraCoUsageSummary
 } from '../electron/ipc-contract';
+import { FALLBACK_NEURACO_MODELS } from '../electron/model-utils';
+import ModelOptions, { isModelAvailable } from './ModelOptions';
 
 interface UsagePanelProps {
   onStatus: (message: string | null) => void;
+  modelOptions?: readonly NeuraCoModelOption[];
 }
 
 const formatCredits = (value: number): string => (
@@ -64,7 +68,10 @@ const defaultEstimate: NeuraCoUsageEstimateRequest = {
   imageCount: 0
 };
 
-export default function UsagePanel({ onStatus }: UsagePanelProps) {
+export default function UsagePanel({ onStatus, modelOptions }: UsagePanelProps) {
+  const availableModels = modelOptions?.length
+    ? modelOptions
+    : FALLBACK_NEURACO_MODELS;
   const [summary, setSummary] = useState<NeuraCoUsageSummary | null>(null);
   const [activity, setActivity] = useState<NeuraCoActivityEntry[]>([]);
   const [report, setReport] = useState<NeuraCoTaskReport | null>(null);
@@ -86,6 +93,15 @@ export default function UsagePanel({ onStatus }: UsagePanelProps) {
     maxModel: '',
     autoReloadEnabled: false
   });
+
+  useEffect(() => {
+    if (!isModelAvailable(availableModels, estimateRequest.model)) {
+      setEstimateRequest((current) => ({
+        ...current,
+        model: availableModels[0]?.id || 'claude-sonnet-4-5'
+      }));
+    }
+  }, [availableModels, estimateRequest.model]);
 
   const syncSettings = (value: NeuraCoUsageSummary) => {
     setSettings({
@@ -157,9 +173,7 @@ export default function UsagePanel({ onStatus }: UsagePanelProps) {
         monthlyCap: numberOrNull(settings.monthlyCap),
         agentCap: numberOrNull(settings.agentCap),
         maxAgents: numberOrNull(settings.maxAgents),
-        maxModel: settings.maxModel
-          ? settings.maxModel as 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash'
-          : null,
+        maxModel: settings.maxModel || null,
         autoReloadEnabled: settings.autoReloadEnabled
       });
       setSummary(updated);
@@ -460,9 +474,10 @@ export default function UsagePanel({ onStatus }: UsagePanelProps) {
                 }))}
               >
                 <option value="">Aucune limite</option>
-                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                <option value="gpt-4o">GPT-4o</option>
-                <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                <ModelOptions
+                  models={availableModels}
+                  currentValue={settings.maxModel}
+                />
               </select>
             </label>
           </div>
@@ -563,9 +578,10 @@ export default function UsagePanel({ onStatus }: UsagePanelProps) {
                   model: event.target.value as NeuraCoUsageEstimateRequest['model']
                 }))}
               >
-                <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                <option value="gpt-4o">GPT-4o</option>
-                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                <ModelOptions
+                  models={availableModels}
+                  currentValue={estimateRequest.model}
+                />
               </select>
             </label>
             <label>

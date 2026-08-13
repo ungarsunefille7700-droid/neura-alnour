@@ -9,6 +9,7 @@ import type {
   NeuraCoTaskRoutingPreview,
   NeuraCoTaskRoutingRequest
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 import { BUILT_IN_AGENTS } from './multi-agent-service';
 
 type RoutedMode = Exclude<NeuraCoTaskMode, 'automatic'>;
@@ -393,13 +394,8 @@ export const routeTask = (
   ].includes(String(request.communicationStyle))
     ? request.communicationStyle as NeuraCoCommunicationStyle
     : 'normal';
-  const preferredModel: NeuraCoAgentModel = [
-    'auto',
-    'claude-sonnet-4-5',
-    'gpt-4o',
-    'gemini-2.5-flash'
-  ].includes(String(request.preferredModel))
-    ? request.preferredModel as NeuraCoAgentModel
+  const preferredModel: NeuraCoAgentModel = isNeuraCoAgentModel(request.preferredModel)
+    ? request.preferredModel
     : 'auto';
   const responseSpeed: NeuraCoResponseSpeed = request.responseSpeed === 'fast'
     ? 'fast'
@@ -439,7 +435,9 @@ export const routeTask = (
     ? 1.25
     : model === 'gpt-4o'
       ? 1.15
-      : 0.65;
+      : model === 'gemini-2.5-flash'
+        ? 0.65
+        : 1.25;
   const agentFactor = Math.max(1, agents.length);
   const contentFactor = Math.max(1, request.content.length / 1600);
   const estimatedMinimumCredits = roundCredits(

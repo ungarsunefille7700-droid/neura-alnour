@@ -729,6 +729,35 @@ def test_neuraco_model_candidates_preserve_fallbacks_and_preference():
     }
 
 
+def test_neuraco_catalog_contains_verified_text_models_without_invented_opus_5():
+    catalogue = {model["id"]: model for model in server.NEURACO_MODEL_CATALOG}
+    assert len(catalogue) == 54
+    assert {
+        "claude-opus-4-8",
+        "claude-opus-4-20250514",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "gpt-5.6-sol",
+        "gpt-5.4",
+        "gpt-4o",
+        "gpt-4.1",
+        "o3",
+        "gemini-3.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite",
+    }.issubset(catalogue)
+    assert "claude-opus-5" not in catalogue
+    assert all("image" not in model_id for model_id in catalogue)
+    assert all("veo" not in model_id for model_id in catalogue)
+
+    opus = server._neuraco_model_candidates("claude-opus-4-8")[0]
+    assert opus[:3] == ("anthropic", "claude-opus-4-8", "Claude Opus 4.8")
+
+    with pytest.raises(ValueError):
+        server._validate_neuraco_model_value("claude-opus-5")
+
+
 def test_neuraco_session_messages_rejects_invalid_session_before_database_access():
     with pytest.raises(HTTPException) as invalid:
         asyncio.run(server.get_neuraco_session_messages("bad session!", user=paid_user()))

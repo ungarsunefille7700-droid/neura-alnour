@@ -35,6 +35,10 @@ const context: NeuraCoIdeBridgeContext = {
     id: 'auto',
     name: 'Automatique',
     provider: 'NeuraCo'
+  }, {
+    id: 'claude-sonnet-4-5',
+    name: 'Claude Sonnet 4.5',
+    provider: 'Anthropic'
   }],
   usage: null
 };

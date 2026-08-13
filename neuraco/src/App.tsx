@@ -33,12 +33,18 @@ import type {
   NeuraCoConversationThreadSummary,
   NeuraCoEffortLevel,
   NeuraCoLoginCredentials,
+  NeuraCoModelOption,
   NeuraCoRegistration,
   NeuraCoProjectSnapshot,
   NeuraCoResponseSpeed,
   NeuraCoSession,
   NeuraCoSelfCheck
 } from '../electron/ipc-contract';
+import { normalizeNeuraCoModels } from '../electron/model-utils';
+import ModelOptions, {
+  fallbackModelOptions,
+  isModelAvailable
+} from './ModelOptions';
 import SecuritySettingsPanel, { AppLockScreen } from './SecuritySettingsPanel';
 import AccountPanel from './AccountPanel';
 const WorkspacePage = lazy(() => import('./WorkspacePage'));
@@ -801,93 +807,95 @@ const Sidebar = ({
         )}
       </nav>
 
-      <div className="sidebar-section sidebar-conversations">
-        <div className="sidebar-section-heading">
-          <span>{locale === 'fr' ? 'Discussions NeuraCo' : 'NeuraCo chats'}</span>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onNewGeneralThread}
-            disabled={!desktopAvailable}
-            title={locale === 'fr' ? 'Nouvelle discussion' : 'New chat'}
-          >
-            <Plus size={14} aria-hidden="true" />
-          </button>
-        </div>
-        <div className="general-thread-list">
-          {generalThreads.map((thread) => (
+      <div className="sidebar-scroll-region">
+        <div className="sidebar-section sidebar-conversations">
+          <div className="sidebar-section-heading">
+            <span>{locale === 'fr' ? 'Discussions NeuraCo' : 'NeuraCo chats'}</span>
             <button
-              key={thread.threadId}
               type="button"
-              className={thread.threadId === activeGeneralThreadId ? 'is-active' : ''}
-              onClick={() => onSelectGeneralThread(thread.threadId)}
-              title={thread.title}
+              className="icon-button"
+              onClick={onNewGeneralThread}
+              disabled={!desktopAvailable}
+              title={locale === 'fr' ? 'Nouvelle discussion' : 'New chat'}
             >
-              <MessageSquare size={15} aria-hidden="true" />
-              <span>{thread.title}</span>
+              <Plus size={14} aria-hidden="true" />
             </button>
-          ))}
+          </div>
+          <div className="general-thread-list">
+            {generalThreads.map((thread) => (
+              <button
+                key={thread.threadId}
+                type="button"
+                className={thread.threadId === activeGeneralThreadId ? 'is-active' : ''}
+                onClick={() => onSelectGeneralThread(thread.threadId)}
+                title={thread.title}
+              >
+                <MessageSquare size={15} aria-hidden="true" />
+                <span>{thread.title}</span>
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
 
-      <div className="sidebar-section">
-        <span>{text.localSpace}</span>
-        {projectSnapshot ? (
-          <button
-            className={`workspace-item ${view === 'project' ? 'is-active' : ''}`}
-            type="button"
-            onClick={() => onViewChange('project')}
-            title={projectSnapshot.project.rootPath}
-          >
-            <FolderOpen size={17} aria-hidden="true" />
-            <span>
-              <strong>{projectSnapshot.project.name}</strong>
-              <small>{projectSnapshot.indexedFiles} fichiers indexés</small>
-            </span>
-          </button>
-        ) : (
-          <button
-            className="workspace-item"
-            type="button"
-            onClick={() => void onOpenProject()}
-            disabled={!desktopAvailable}
-            title={desktopAvailable ? 'Ouvrir un dossier local' : text.browserPreview}
-          >
-            <FolderClosed size={17} aria-hidden="true" />
-            <span>
-              <strong>Ouvrir un projet</strong>
-              <small>{text.noProject}</small>
-            </span>
-          </button>
-        )}
-        {projectSnapshot && (
+        <div className="sidebar-section">
+          <span>{text.localSpace}</span>
+          {projectSnapshot ? (
+            <button
+              className={`workspace-item ${view === 'project' ? 'is-active' : ''}`}
+              type="button"
+              onClick={() => onViewChange('project')}
+              title={projectSnapshot.project.rootPath}
+            >
+              <FolderOpen size={17} aria-hidden="true" />
+              <span>
+                <strong>{projectSnapshot.project.name}</strong>
+                <small>{projectSnapshot.indexedFiles} fichiers indexés</small>
+              </span>
+            </button>
+          ) : (
+            <button
+              className="workspace-item"
+              type="button"
+              onClick={() => void onOpenProject()}
+              disabled={!desktopAvailable}
+              title={desktopAvailable ? 'Ouvrir un dossier local' : text.browserPreview}
+            >
+              <FolderClosed size={17} aria-hidden="true" />
+              <span>
+                <strong>Ouvrir un projet</strong>
+                <small>{text.noProject}</small>
+              </span>
+            </button>
+          )}
+          {projectSnapshot && (
+            <button
+              className="open-project-button"
+              type="button"
+              onClick={() => void onOpenProject()}
+            >
+              <Plus size={14} aria-hidden="true" />
+              Changer de projet
+            </button>
+          )}
           <button
             className="open-project-button"
             type="button"
-            onClick={() => void onOpenProject()}
+            onClick={onCreateProject}
+            disabled={!desktopAvailable}
           >
             <Plus size={14} aria-hidden="true" />
-            Changer de projet
+            {'Cr\u00e9er un nouveau projet'}
           </button>
-        )}
-        <button
-          className="open-project-button"
-          type="button"
-          onClick={onCreateProject}
-          disabled={!desktopAvailable}
-        >
-          <Plus size={14} aria-hidden="true" />
-          {'Cr\u00e9er un nouveau projet'}
-        </button>
-        <button
-          className="open-project-button"
-          type="button"
-          onClick={onCloneProject}
-          disabled={!desktopAvailable}
-        >
-          <GitFork size={14} aria-hidden="true" />
-          {'Cloner un d\u00e9p\u00f4t Git'}
-        </button>
+          <button
+            className="open-project-button"
+            type="button"
+            onClick={onCloneProject}
+            disabled={!desktopAvailable}
+          >
+            <GitFork size={14} aria-hidden="true" />
+            {'Cloner un d\u00e9p\u00f4t Git'}
+          </button>
+        </div>
       </div>
 
       <div className="sidebar-account">
@@ -987,6 +995,9 @@ function App() {
   const [homeThreads, setHomeThreads] = useState<NeuraCoConversationThreadSummary[]>([]);
   const [homeHistoryReady, setHomeHistoryReady] = useState(false);
   const [homeModel, setHomeModel] = useState<NeuraCoAgentModel>('auto');
+  const [modelOptions, setModelOptions] = useState<NeuraCoModelOption[]>(
+    fallbackModelOptions
+  );
   const [homeEffort, setHomeEffort] = useState<NeuraCoEffortLevel>('normal');
   const [homeResponseSpeed, setHomeResponseSpeed] =
     useState<NeuraCoResponseSpeed>('standard');
@@ -1060,6 +1071,23 @@ function App() {
       unsubscribeSession?.();
     };
   }, []);
+
+  useEffect(() => {
+    const desktop = window.neuraco;
+    if (!desktop || session?.status !== 'authenticated') return;
+    let active = true;
+    desktop.getRuntimePolicy().then((policy) => {
+      if (!active) return;
+      const models = normalizeNeuraCoModels(policy.models);
+      setModelOptions(models);
+      setHomeModel((current) => isModelAvailable(models, current) ? current : 'auto');
+    }).catch(() => {
+      if (active) setModelOptions(fallbackModelOptions());
+    });
+    return () => {
+      active = false;
+    };
+  }, [session?.status, session?.user?.email]);
 
   useEffect(() => {
     const desktop = window.neuraco;
@@ -1769,6 +1797,7 @@ function App() {
                 snapshot={projectSnapshot}
                 onRefresh={refreshProject}
                 onOpenProject={openProject}
+                modelOptions={modelOptions}
               />
             </Suspense>
           )}
@@ -1815,10 +1844,12 @@ function App() {
                       event.target.value as NeuraCoAgentModel
                     )}
                   >
-                    <option value="auto">Automatique</option>
-                    <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                    <option value="gpt-4o">GPT-4o</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <ModelOptions
+                      models={modelOptions}
+                      includeAuto
+                      autoLabel="Automatique"
+                      currentValue={homeModel}
+                    />
                   </select>
                 </label>
                 <label>

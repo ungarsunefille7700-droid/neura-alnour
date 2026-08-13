@@ -1153,7 +1153,7 @@ export interface NeuraCoUsageSummary {
     monthly_cap?: number | null;
     agent_cap?: number | null;
     max_agents?: number | null;
-    max_model?: 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash' | null;
+    max_model?: NeuraCoAgentModel | null;
     auto_reload_enabled: boolean;
     auto_reload_available: boolean;
   };
@@ -1178,6 +1178,7 @@ export interface NeuraCoRuntimePolicy {
   };
   providers: Record<string, { enabled: boolean }>;
   disabled_models: string[];
+  models: NeuraCoModelOption[];
   plugins: {
     allow_unsigned_local: boolean;
     blocked_ids: string[];
@@ -1428,7 +1429,7 @@ export interface NeuraCoStatisticsSummary {
 
 export interface NeuraCoUsageEstimateRequest {
   mode: 'economic' | 'balanced' | 'quality' | 'custom';
-  model: 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  model: NeuraCoAgentModel;
   promptCharacters: number;
   maxOutputTokens: number;
   agents: number;
@@ -1457,7 +1458,7 @@ export interface NeuraCoUsageSettingsUpdate {
   monthlyCap?: number | null;
   agentCap?: number | null;
   maxAgents?: number | null;
-  maxModel?: 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash' | null;
+  maxModel?: NeuraCoAgentModel | null;
   autoReloadEnabled: boolean;
   autoReloadMinimum?: number | null;
   autoReloadTarget?: number | null;
@@ -2271,7 +2272,7 @@ export interface NeuraCoRoutineInput {
   instruction: string;
   projectIds: string[];
   agentIds: string[];
-  model: 'auto' | 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  model: NeuraCoAgentModel;
   schedule: NeuraCoRoutineSchedule;
   tools: string[];
   budgetCredits: number;
@@ -2894,11 +2895,14 @@ export interface NeuraCoRelayEvent {
 export type NeuraCoAgentAutonomy = 'ask' | 'scoped' | 'full';
 export type NeuraCoAgentMemory = 'off' | 'session' | 'project';
 export type NeuraCoEffortLevel = 'rapid' | 'normal' | 'deep' | 'maximum';
-export type NeuraCoAgentModel =
-  | 'auto'
-  | 'claude-sonnet-4-5'
-  | 'gpt-4o'
-  | 'gemini-2.5-flash';
+export type NeuraCoAgentModel = string;
+
+export interface NeuraCoModelOption {
+  id: string;
+  provider: string;
+  display_name: string;
+  group: string;
+}
 export type NeuraCoResponseSpeed = 'standard' | 'fast';
 export type NeuraCoCommunicationStyle =
   | 'direct'
@@ -2955,7 +2959,7 @@ export interface NeuraCoTaskRoutingPreview {
   categories: NeuraCoTaskRoutingCategory[];
   agents: NeuraCoTaskRoutingAgent[];
   tools: string[];
-  primaryModel: 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  primaryModel: NeuraCoAgentModel;
   responseSpeed: NeuraCoResponseSpeed;
   effort: NeuraCoEffortLevel;
   effortLabel: string;

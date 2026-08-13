@@ -24,15 +24,19 @@ import type {
   NeuraCoMultiAgentProgress,
   NeuraCoMultiAgentResult,
   NeuraCoMultiAgentTask,
+  NeuraCoModelOption,
   NeuraCoProjectFileNode,
   NeuraCoProjectSnapshot
 } from '../electron/ipc-contract';
+import { FALLBACK_NEURACO_MODELS } from '../electron/model-utils';
+import ModelOptions from './ModelOptions';
 
 interface MultiAgentPanelProps {
   snapshot: NeuraCoProjectSnapshot;
   files: NeuraCoProjectFileNode[];
   emergencyStopped: boolean;
   onStatus: (message: string) => void;
+  modelOptions?: readonly NeuraCoModelOption[];
 }
 
 const emptyCustomAgent = (): NeuraCoCustomAgentInput => ({
@@ -74,8 +78,12 @@ export default function MultiAgentPanel({
   snapshot,
   files,
   emergencyStopped,
-  onStatus
+  onStatus,
+  modelOptions
 }: MultiAgentPanelProps) {
+  const availableModels = modelOptions?.length
+    ? modelOptions
+    : FALLBACK_NEURACO_MODELS;
   const [agents, setAgents] = useState<NeuraCoAgentDefinition[]>([]);
   const [goals, setGoals] = useState<NeuraCoGoal[]>([]);
   const [selectedGoalId, setSelectedGoalId] = useState('');
@@ -663,10 +671,12 @@ export default function MultiAgentPanel({
                   value={customAgent.model}
                   onChange={(event) => setCustomAgent({ ...customAgent, model: event.target.value })}
                 >
-                  <option value="auto">Meilleur disponible</option>
-                  <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                  <option value="gpt-4o">GPT-4o</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                  <ModelOptions
+                    models={availableModels}
+                    includeAuto
+                    autoLabel="Meilleur disponible"
+                    currentValue={customAgent.model}
+                  />
                 </select>
               </label>
               <label>

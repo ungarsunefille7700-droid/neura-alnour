@@ -9,6 +9,7 @@ import type {
   NeuraCoRoutineSchedule,
   NeuraCoRoutineTrigger
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 import { redactSecrets } from './secret-redaction';
 
 const MAX_ROUTINES = 100;
@@ -115,12 +116,7 @@ const normalizeInput = (input: NeuraCoRoutineInput): NeuraCoRoutineInput => {
   if (executionMode === 'cloud' && input.cloudConsent !== true) {
     throw new Error('Le mode cloud exige un consentement explicite.');
   }
-  const model = [
-    'auto',
-    'claude-sonnet-4-5',
-    'gpt-4o',
-    'gemini-2.5-flash'
-  ].includes(input.model) ? input.model : 'auto';
+  const model = isNeuraCoAgentModel(input.model) ? input.model : 'auto';
   const autonomy = ['supervised', 'balanced', 'autonomous'].includes(input.autonomy)
     ? input.autonomy
     : 'supervised';

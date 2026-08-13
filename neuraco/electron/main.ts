@@ -243,6 +243,7 @@ import {
   type NeuraCoIdeBridgeContext
 } from './ide-bridge-service';
 import { AccessibilityService } from './accessibility-service';
+import { isNeuraCoAgentModel, normalizeNeuraCoModels } from './model-utils';
 import {
   adjustAdminCredits,
   createAdminIncident,
@@ -402,24 +403,6 @@ const ensureIdeBridgeAvailable = (): NeuraCoProject => {
   return activeProject;
 };
 
-const ideBridgeModels = [{
-  id: 'auto' as const,
-  name: 'Automatique',
-  provider: 'NeuraCo'
-}, {
-  id: 'claude-sonnet-4-5' as const,
-  name: 'Claude Sonnet 4.5',
-  provider: 'Anthropic'
-}, {
-  id: 'gpt-4o' as const,
-  name: 'GPT-4o',
-  provider: 'OpenAI'
-}, {
-  id: 'gemini-2.5-flash' as const,
-  name: 'Gemini 2.5 Flash',
-  provider: 'Google'
-}];
-
 const getIdeBridgeService = (): IdeBridgeService => {
   if (!ideBridgeService) {
     ideBridgeService = new IdeBridgeService({
@@ -431,13 +414,15 @@ const getIdeBridgeService = (): IdeBridgeService => {
       callbacks: {
         getContext: async (): Promise<NeuraCoIdeBridgeContext> => {
           const project = ensureIdeBridgeAvailable();
-          const [threads, activeThread, agents, permissions, usage] = await Promise.all([
+          const [threads, activeThread, agents, permissions, usage, runtimePolicy] = await Promise.all([
             getLocalSessionStore().list(project),
             getLocalSessionStore().get(project),
             getMultiAgentService().listAgents(),
             getPermissionStore().get(project.id, project.rootPath),
-            getUsage().catch(() => null)
+            getUsage().catch(() => null),
+            getRuntimePolicy().catch(() => null)
           ]);
+          const models = normalizeNeuraCoModels(runtimePolicy?.models);
           return {
             project: {
               id: project.id,
@@ -448,7 +433,15 @@ const getIdeBridgeService = (): IdeBridgeService => {
             activeThread,
             agents,
             permissions,
-            models: ideBridgeModels,
+            models: [{
+              id: 'auto',
+              name: 'Automatique',
+              provider: 'NeuraCo'
+            }, ...models.map((model) => ({
+              id: model.id,
+              name: model.display_name,
+              provider: model.group
+            }))],
             usage
           };
         },
@@ -512,7 +505,7 @@ const getIdeBridgeService = (): IdeBridgeService => {
               model: (
                 request.model === 'auto'
                 && selectedAgent
-                && ideBridgeModels.some((model) => model.id === selectedAgent.model)
+                && isNeuraCoAgentModel(selectedAgent.model, false)
               )
                 ? selectedAgent.model as NeuraCoIdeBridgeChatRequest['model']
                 : request.model,

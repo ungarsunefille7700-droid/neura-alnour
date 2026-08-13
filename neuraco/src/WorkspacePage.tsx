@@ -77,6 +77,7 @@ import type {
   NeuraCoNotification,
   NeuraCoNotificationAction,
   NeuraCoNotificationActionEvent,
+  NeuraCoModelOption,
   NeuraCoPermissionMode,
   NeuraCoProjectFile,
   NeuraCoProjectFileNode,
@@ -94,6 +95,8 @@ import type {
   NeuraCoTaskRoutingPreview,
   NeuraCoTrashEntry
 } from '../electron/ipc-contract';
+import { FALLBACK_NEURACO_MODELS } from '../electron/model-utils';
+import ModelOptions, { isModelAvailable } from './ModelOptions';
 import {
   clipboardImageFiles,
   droppedImageFiles,
@@ -210,6 +213,7 @@ interface WorkspacePageProps {
   snapshot: NeuraCoProjectSnapshot;
   onRefresh: () => Promise<void>;
   onOpenProject: () => Promise<void>;
+  modelOptions?: readonly NeuraCoModelOption[];
 }
 
 const PERMISSION_MODE_LABELS: Record<NeuraCoPermissionMode, string> = {
@@ -294,8 +298,12 @@ const FileTree = ({
 export default function WorkspacePage({
   snapshot,
   onRefresh,
-  onOpenProject
+  onOpenProject,
+  modelOptions
 }: WorkspacePageProps) {
+  const availableModels = modelOptions?.length
+    ? modelOptions
+    : FALLBACK_NEURACO_MODELS;
   const [tab, setTab] = useState<WorkspaceTab>('chat');
   const [editorSession, setEditorSession] = useState(EMPTY_EDITOR_SESSION);
   const [editorPreview, setEditorPreview] = useState(false);
@@ -317,6 +325,12 @@ export default function WorkspacePage({
   const [responseSpeed, setResponseSpeed] = useState<NeuraCoResponseSpeed>('standard');
   const [communicationStyle, setCommunicationStyle] =
     useState<NeuraCoCommunicationStyle>('normal');
+
+  useEffect(() => {
+    if (!isModelAvailable(availableModels, selectedModel)) {
+      setSelectedModel('auto');
+    }
+  }, [availableModels, selectedModel]);
   const [composerToolsOpen, setComposerToolsOpen] = useState(false);
   const [proposalReviewMessageId, setProposalReviewMessageId] = useState<string>();
   const [proposalReviewPath, setProposalReviewPath] = useState<string>();
@@ -3201,10 +3215,12 @@ export default function WorkspacePage({
                   aria-label="Modèle IA"
                   disabled={chatBusy || Boolean(routingPreview)}
                 >
-                  <option value="auto">Modèle automatique</option>
-                  <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                  <option value="gpt-4o">GPT-4o</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                  <ModelOptions
+                    models={availableModels}
+                    includeAuto
+                    autoLabel="Modèle automatique"
+                    currentValue={selectedModel}
+                  />
                 </select>
                 <select
                   value={effort}
@@ -3652,6 +3668,7 @@ export default function WorkspacePage({
             files={allFiles}
             emergencyStopped={emergencyState.stopped}
             onStatus={setStatus}
+            modelOptions={availableModels}
           />
         )}
 
@@ -3762,6 +3779,7 @@ export default function WorkspacePage({
             project={snapshot.project}
             emergencyStopped={emergencyState.stopped}
             onStatus={setStatus}
+            modelOptions={availableModels}
           />
         )}
 
@@ -3800,7 +3818,7 @@ export default function WorkspacePage({
         )}
 
         {tab === 'usage' && (
-          <UsagePanel onStatus={setStatus} />
+          <UsagePanel onStatus={setStatus} modelOptions={availableModels} />
         )}
 
         {tab === 'statistics' && (

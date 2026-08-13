@@ -13,6 +13,7 @@ import type {
   NeuraCoPersistedChatMessage,
   NeuraCoProject
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 import { redactSecrets } from './secret-redaction';
 
 interface ProjectThreads {
@@ -107,7 +108,6 @@ const normalizeTaskSettings = (
   ] as const;
   const effortLevels = ['rapid', 'normal', 'deep', 'maximum'] as const;
   const communicationStyles = ['direct', 'normal', 'detailed', 'pedagogical'] as const;
-  const models = ['auto', 'claude-sonnet-4-5', 'gpt-4o', 'gemini-2.5-flash'] as const;
   const responseSpeeds = ['standard', 'fast'] as const;
   return {
     taskMode: taskModes.includes(value.taskMode as typeof taskModes[number])
@@ -125,7 +125,7 @@ const normalizeTaskSettings = (
       ? value.executionMode
       : executionMode,
     includeActiveFile: value.includeActiveFile !== false,
-    model: models.includes(value.model as typeof models[number])
+    model: isNeuraCoAgentModel(value.model)
       ? value.model
       : 'auto',
     responseSpeed: responseSpeeds.includes(

@@ -15,6 +15,7 @@ import type {
   NeuraCoMultiAgentResult,
   NeuraCoMultiAgentTask
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 
 const MAX_CUSTOM_AGENTS = 50;
 const MAX_PLAN_TASKS = 12;
@@ -26,13 +27,6 @@ const MAX_COORDINATION_DURATION_MS = 120_000;
 const SAFE_AGENT_ID = /^[a-z0-9_-]{2,120}$/i;
 const SAFE_TASK_ID = /^[a-z0-9_-]{8,120}$/i;
 const SAFE_COLOR = /^#[0-9a-f]{6}$/i;
-const ALLOWED_MODELS = new Set([
-  'auto',
-  'claude-sonnet-4-5',
-  'gpt-4o',
-  'gemini-2.5-flash'
-]);
-
 export const BUILT_IN_AGENTS: readonly NeuraCoAgentDefinition[] = Object.freeze([
   {
     id: 'architect',
@@ -362,7 +356,7 @@ const sanitizeCustomAgent = (
   const name = String(input?.name || '').trim().slice(0, 120);
   const role = String(input?.role || '').trim().slice(0, 240);
   if (!name || !role) throw new Error('Le nom et le rôle de l’agent sont obligatoires.');
-  const model = ALLOWED_MODELS.has(input.model) ? input.model : 'auto';
+  const model = isNeuraCoAgentModel(input.model) ? input.model : 'auto';
   const autonomy = ['ask', 'scoped', 'full'].includes(input.autonomy)
     ? input.autonomy
     : 'ask';
@@ -741,7 +735,7 @@ export class MultiAgentService {
       budget,
       model: request.preferredModel && request.preferredModel !== 'auto'
         ? request.preferredModel
-        : ALLOWED_MODELS.has(agent.model) ? agent.model : 'auto',
+        : isNeuraCoAgentModel(agent.model) ? agent.model : 'auto',
       effort: request.effort || 'normal',
       communication_style: request.communicationStyle || 'normal',
       response_speed: request.responseSpeed || 'standard',

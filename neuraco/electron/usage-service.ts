@@ -6,6 +6,7 @@ import type {
   NeuraCoUsageSettingsUpdate,
   NeuraCoUsageSummary
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 
 export interface NeuraCoServerStatisticsMetric {
   _id?: string | {
@@ -155,7 +156,7 @@ export const estimateUsage = (
   if (
     !request
     || !['economic', 'balanced', 'quality', 'custom'].includes(request.mode)
-    || !['claude-sonnet-4-5', 'gpt-4o', 'gemini-2.5-flash'].includes(request.model)
+    || !isNeuraCoAgentModel(request.model, false)
   ) {
     throw new Error('Estimation NeuraCo invalide.');
   }

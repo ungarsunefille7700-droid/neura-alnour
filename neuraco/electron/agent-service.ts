@@ -5,6 +5,7 @@ import type {
   NeuraCoAgentStreamEvent,
   NeuraCoProposedFile
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 import { redactSecrets } from './secret-redaction';
 
 interface AgentApiResponse {
@@ -144,11 +145,7 @@ const validateAgentRequest = (request: NeuraCoAgentRequest): NeuraCoAgentRequest
   if (request.scope === 'general' && !isGeneralChatRequest(request)) {
     throw new Error('La conversation générale ne peut pas accéder aux fichiers du projet.');
   }
-  if (
-    request.model
-    && !['auto', 'claude-sonnet-4-5', 'gpt-4o', 'gemini-2.5-flash']
-      .includes(request.model)
-  ) {
+  if (request.model && !isNeuraCoAgentModel(request.model)) {
     throw new Error('Modèle NeuraCo invalide.');
   }
   if (!Array.isArray(request.files) || request.files.length > 16) {

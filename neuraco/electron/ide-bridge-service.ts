@@ -4,12 +4,14 @@ import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   NeuraCoAgentFileContext,
+  NeuraCoAgentModel,
   NeuraCoAgentResponse,
   NeuraCoConversationThread,
   NeuraCoConversationThreadSummary,
   NeuraCoProjectPermissions,
   NeuraCoUsageSummary
 } from './ipc-contract';
+import { isNeuraCoAgentModel } from './model-utils';
 
 const PROTOCOL_VERSION = 1;
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -25,7 +27,7 @@ export interface NeuraCoIdeBridgeManifest {
 }
 
 export interface NeuraCoIdeBridgeModel {
-  id: 'auto' | 'claude-sonnet-4-5' | 'gpt-4o' | 'gemini-2.5-flash';
+  id: NeuraCoAgentModel;
   name: string;
   provider: string;
 }
@@ -281,13 +283,12 @@ export class IdeBridgeService {
         if (!['question', 'plan'].includes(mode)) {
           throw new HttpError(400, 'Mode IDE invalide.');
         }
-        if (![
-          'auto',
-          'claude-sonnet-4-5',
-          'gpt-4o',
-          'gemini-2.5-flash'
-        ].includes(model)) {
+        if (!isNeuraCoAgentModel(model)) {
           throw new HttpError(400, 'Modèle IDE invalide.');
+        }
+        const context = await this.options.callbacks.getContext();
+        if (!context.models.some((candidate) => candidate.id === model)) {
+          throw new HttpError(400, 'Modèle IDE indisponible.');
         }
         json(response, 200, await this.options.callbacks.sendMessage({
           content: cleanText(body.content, 'Demande IDE', 12_000),

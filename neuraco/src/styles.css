@@ -613,6 +613,17 @@ a:focus-visible {
   margin-top: 24px;
 }
 
+.sidebar-scroll-region {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 10px;
+  scrollbar-color: #cfd2d6 transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
 .sidebar-section > span {
   display: block;
   padding: 0 10px 7px;
@@ -652,8 +663,6 @@ a:focus-visible {
 .general-thread-list {
   display: grid;
   gap: 2px;
-  max-height: 184px;
-  overflow: auto;
 }
 
 .general-thread-list button {
@@ -819,8 +828,8 @@ a:focus-visible {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 32px;
   align-items: center;
+  flex: 0 0 auto;
   gap: 8px;
-  margin-top: auto;
   padding: 10px 7px;
   border-top: 1px solid var(--border);
 }
@@ -890,6 +899,7 @@ a:focus-visible {
 }
 
 .sidebar-language {
+  flex: 0 0 auto;
   min-height: 38px;
   padding: 5px 8px 0;
   border-top: 1px solid var(--border);
@@ -5710,6 +5720,10 @@ a:focus-visible {
   .sidebar-search,
   .sidebar-account {
     display: none;
+  }
+
+  .sidebar-scroll-region {
+    display: contents;
   }
 
   .sidebar-section {

@@ -14,14 +14,18 @@ import type {
   NeuraCoProject,
   NeuraCoRoutine,
   NeuraCoRoutineInput,
+  NeuraCoModelOption,
   NeuraCoRoutinesState,
   NeuraCoRoutineTrigger
 } from '../electron/ipc-contract';
+import { FALLBACK_NEURACO_MODELS } from '../electron/model-utils';
+import ModelOptions from './ModelOptions';
 
 interface RoutinesPanelProps {
   project: NeuraCoProject;
   emergencyStopped: boolean;
   onStatus: (message: string) => void;
+  modelOptions?: readonly NeuraCoModelOption[];
 }
 
 const TRIGGERS: Array<[NeuraCoRoutineTrigger, string]> = [
@@ -69,8 +73,12 @@ const runStatus = {
 export default function RoutinesPanel({
   project,
   emergencyStopped,
-  onStatus
+  onStatus,
+  modelOptions
 }: RoutinesPanelProps) {
+  const availableModels = modelOptions?.length
+    ? modelOptions
+    : FALLBACK_NEURACO_MODELS;
   const [state, setState] = useState<NeuraCoRoutinesState>();
   const [agents, setAgents] = useState<NeuraCoAgentDefinition[]>([]);
   const [draft, setDraft] = useState<NeuraCoRoutineInput>(() => blank(project.id));
@@ -297,10 +305,12 @@ export default function RoutinesPanel({
                 model: event.target.value as NeuraCoRoutineInput['model']
               })}
             >
-              <option value="auto">Automatique</option>
-              <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
-              <option value="gpt-4o">GPT-4o</option>
-              <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+              <ModelOptions
+                models={availableModels}
+                includeAuto
+                autoLabel="Automatique"
+                currentValue={draft.model}
+              />
             </select>
           </label>
           <label>

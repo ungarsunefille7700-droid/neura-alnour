@@ -4,6 +4,44 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 const createWorkspaceMocks = () => ({
+  getRuntimePolicy: vi.fn().mockResolvedValue({
+    revision: 1,
+    maintenance: { active: false, enabled: false },
+    providers: {
+      anthropic: { enabled: true },
+      openai: { enabled: true },
+      gemini: { enabled: true }
+    },
+    disabled_models: [],
+    models: [
+      {
+        id: 'claude-sonnet-4-5',
+        provider: 'anthropic',
+        display_name: 'Claude Sonnet 4.5',
+        group: 'Anthropic'
+      },
+      {
+        id: 'gpt-4o',
+        provider: 'openai',
+        display_name: 'GPT-4o',
+        group: 'OpenAI'
+      },
+      {
+        id: 'gemini-2.5-flash',
+        provider: 'gemini',
+        display_name: 'Gemini 2.5 Flash',
+        group: 'Google Gemini'
+      }
+    ],
+    plugins: { allow_unsigned_local: false, blocked_ids: [] },
+    release: {
+      latest_version: '1.0.10',
+      minimum_supported_version: '1.0.0',
+      rollout_percent: 100
+    },
+    incidents: [],
+    server_time: '2026-08-13T00:00:00Z'
+  }),
   getAccessibilitySettings: vi.fn().mockResolvedValue({
     theme: 'system',
     zoomPercent: 100,
@@ -379,6 +417,95 @@ describe('NeuraCo desktop foundation', () => {
       images: []
     }));
     expect(container.textContent).toContain('Réponse générale NeuraCo');
+  });
+
+  it('renders the server-authoritative model catalogue', async () => {
+    const mocks = createWorkspaceMocks();
+    mocks.getRuntimePolicy.mockResolvedValue({
+      revision: 2,
+      maintenance: { active: false, enabled: false },
+      providers: {
+        anthropic: { enabled: true },
+        openai: { enabled: true },
+        gemini: { enabled: true }
+      },
+      disabled_models: [],
+      models: [
+        {
+          id: 'claude-opus-4-8',
+          provider: 'anthropic',
+          display_name: 'Claude Opus 4.8',
+          group: 'Anthropic'
+        },
+        {
+          id: 'gpt-5.6-sol',
+          provider: 'openai',
+          display_name: 'GPT-5.6 Sol',
+          group: 'OpenAI'
+        },
+        {
+          id: 'gemini-3.5-flash',
+          provider: 'gemini',
+          display_name: 'Gemini 3.5 Flash',
+          group: 'Google Gemini'
+        }
+      ],
+      plugins: { allow_unsigned_local: false, blocked_ids: [] },
+      release: {
+        latest_version: '1.0.10',
+        minimum_supported_version: '1.0.0',
+        rollout_percent: 100
+      },
+      incidents: [],
+      server_time: '2026-08-13T00:00:00Z'
+    });
+    window.neuraco = {
+      ...mocks,
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo',
+        version: '1.0.10',
+        platform: 'win32',
+        architecture: 'x64',
+        packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({
+        status: 'authenticated',
+        user: {
+          id: 'vip-models',
+          email: 'founder@example.com',
+          name: 'Founder',
+          subscription: 'neura_ultra',
+          is_vip: true
+        },
+        entitlement: {
+          neuraco_access: true,
+          plan: 'neura_ultra',
+          reason: 'administrator'
+        },
+        persistent: true
+      }),
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const modelSelect = container.querySelector<HTMLSelectElement>(
+      '.home-composer-options select'
+    );
+    const labels = Array.from(modelSelect?.options || []).map((option) => option.textContent);
+    expect(labels).toContain('Claude Opus 4.8');
+    expect(labels).toContain('GPT-5.6 Sol');
+    expect(labels).toContain('Gemini 3.5 Flash');
+    expect(labels).not.toContain('Claude Opus 5');
   });
 
   it('creates and opens a new local project from the sidebar', async () => {
