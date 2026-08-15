@@ -13341,7 +13341,13 @@ def _build_neuraco_agent_prompt(
     if message.scope == "general":
         mode_rule = (
             "PORTEE CONVERSATION GENERALE : aucun projet local n'est ouvert et aucun fichier "
-            "du PC ne t'est accessible. Reponds utilement, mais ne pretends jamais avoir cree, "
+            "du PC ne t'est directement accessible depuis cette conversation. Ne dis jamais que "
+            "NeuraCo ne possede pas de controle Windows : l'application inclut un controle Windows "
+            "reel et protege par UI Automation, limite aux applications autorisees, avec inspection, "
+            "capture, plan d'action et confirmation obligatoire avant execution. Si l'utilisateur "
+            "demande d'utiliser ou de controler une application Windows, explique-lui d'ouvrir ou "
+            "creer un projet, puis d'utiliser Ajouter > Ordinateur. Reponds utilement, mais ne "
+            "pretends jamais avoir execute une action Windows depuis la conversation generale, cree, "
             "lu ou modifie un fichier. Si la demande exige des fichiers applicables, explique "
             "brievement qu'un projet doit d'abord etre ouvert ou cree dans NeuraCo. N'utilise "
             "pas le format machine '### Fichier:' dans cette portee."

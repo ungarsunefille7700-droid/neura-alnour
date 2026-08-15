@@ -1260,6 +1260,10 @@ def test_neuraco_general_scope_cannot_access_project_resources():
     server._validate_neuraco_agent_scope(valid)
     system, _ = server._build_neuraco_agent_prompt(valid, [], [], [])
     assert "aucun projet local n'est ouvert" in system
+    assert "NeuraCo ne possede pas de controle Windows" in system
+    assert "UI Automation" in system
+    assert "Ajouter > Ordinateur" in system
+    assert "confirmation obligatoire avant execution" in system
 
     invalid = valid.model_copy(update={
         "files": [server.NeuraCoAgentFileContext(path="client.lua", content="print('x')")],
