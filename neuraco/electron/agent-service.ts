@@ -234,57 +234,102 @@ export const streamAgentMessage = async (
 ): Promise<NeuraCoAgentResponse> => {
   const request = validateAgentRequest(rawRequest);
   const requestId = request.requestId || '';
-  const response = await authenticatedApiStream('/neuraco/agent/stream', {
-    method: 'POST',
-    signal,
-    body: agentApiBody(request)
-  });
-  if (!response.body) throw new Error('Le serveur NeuraCo n’a pas ouvert le flux de réponse.');
+  const streamController = new AbortController();
+  const abortFromCaller = () => streamController.abort(signal?.reason);
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener('abort', abortFromCaller, { once: true });
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finalResponse: NeuraCoAgentResponse | null = null;
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const frames = buffer.split(/\r?\n\r?\n/);
-    buffer = frames.pop() || '';
-    for (const frame of frames) {
-      const data = frame.split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n');
-      if (!data) continue;
-      const payload = JSON.parse(data);
-      if (payload.type === 'delta') {
-        onEvent({ requestId, type: 'delta', content: String(payload.content || '') });
-      } else if (payload.type === 'model') {
-        onEvent({ requestId, type: 'model' });
-      } else if (payload.type === 'error') {
-        const detail = String(payload.detail || 'La diffusion NeuraCo a échoué.');
-        onEvent({ requestId, type: 'error', detail });
-        throw new Error(detail);
-      } else if (payload.type === 'done') {
-        finalResponse = mapAgentResponse({
-          message: payload.message || payload.completion || '',
-          session_id: payload.session_id,
-          provider: payload.provider,
-          model: payload.model,
-          model_display: payload.model_display,
-          mode: payload.mode,
-          files_used: payload.files_used || [],
-          proposed_files: payload.proposed_files || [],
-          images_used: payload.images_used || [],
-          entitlement_plan: payload.entitlement_plan,
-          usage: payload.usage,
-          reservation: payload.reservation
-        });
-        onEvent({ requestId, type: 'done', response: finalResponse });
-      }
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let streamComplete = false;
+  const withTimeout = async <T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    message: string
+  ): Promise<T> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<T>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            const error = new Error(message);
+            streamController.abort(error);
+            reject(error);
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
-    if (done) break;
+  };
+
+  try {
+    const response = await withTimeout(
+      authenticatedApiStream('/neuraco/agent/stream', {
+        method: 'POST',
+        signal: streamController.signal,
+        body: agentApiBody(request)
+      }),
+      30_000,
+      'Le serveur NeuraCo tarde à ouvrir la réponse. Réessayez dans un instant.'
+    );
+    if (!response.body) throw new Error('Le serveur NeuraCo n’a pas ouvert le flux de réponse.');
+
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResponse: NeuraCoAgentResponse | null = null;
+    while (true) {
+      const { done, value } = await withTimeout(
+        reader.read(),
+        60_000,
+        'La réponse NeuraCo s’est interrompue trop longtemps. Vous pouvez réessayer.'
+      );
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      for (const frame of frames) {
+        const data = frame.split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (!data) continue;
+        const payload = JSON.parse(data);
+        if (payload.type === 'delta') {
+          onEvent({ requestId, type: 'delta', content: String(payload.content || '') });
+        } else if (payload.type === 'model') {
+          onEvent({ requestId, type: 'model' });
+        } else if (payload.type === 'error') {
+          const detail = String(payload.detail || 'La diffusion NeuraCo a échoué.');
+          onEvent({ requestId, type: 'error', detail });
+          throw new Error(detail);
+        } else if (payload.type === 'done') {
+          finalResponse = mapAgentResponse({
+            message: payload.message || payload.completion || '',
+            session_id: payload.session_id,
+            provider: payload.provider,
+            model: payload.model,
+            model_display: payload.model_display,
+            mode: payload.mode,
+            files_used: payload.files_used || [],
+            proposed_files: payload.proposed_files || [],
+            images_used: payload.images_used || [],
+            entitlement_plan: payload.entitlement_plan,
+            usage: payload.usage,
+            reservation: payload.reservation
+          });
+          onEvent({ requestId, type: 'done', response: finalResponse });
+        }
+      }
+      if (done) break;
+    }
+    if (!finalResponse) throw new Error('Le flux NeuraCo s’est terminé sans réponse finale.');
+    streamComplete = true;
+    return finalResponse;
+  } finally {
+    signal?.removeEventListener('abort', abortFromCaller);
+    if (reader && !streamComplete) {
+      await reader.cancel().catch(() => undefined);
+    }
   }
-  if (!finalResponse) throw new Error('Le flux NeuraCo s’est terminé sans réponse finale.');
-  return finalResponse;
 };

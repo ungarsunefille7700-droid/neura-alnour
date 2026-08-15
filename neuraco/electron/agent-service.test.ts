@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { requestMock, streamMock } = vi.hoisted(() => ({
   requestMock: vi.fn(),
@@ -19,6 +19,10 @@ import {
 beforeEach(() => {
   requestMock.mockReset();
   streamMock.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('agent-service conversation context', () => {
@@ -48,6 +52,53 @@ describe('agent-service conversation context', () => {
       'model:', 'delta:Bonjour ', 'delta:depuis NeuraCo.', 'done:'
     ]);
     expect(result.message).toBe('Bonjour depuis NeuraCo.');
+  });
+
+  it('interrompt une ouverture de flux qui reste suspendue', async () => {
+    vi.useFakeTimers();
+    let streamSignal: AbortSignal | undefined;
+    streamMock.mockImplementation((_route, options) => {
+      streamSignal = options.signal;
+      return new Promise<Response>(() => undefined);
+    });
+
+    const pending = streamAgentMessage({
+      content: 'Bonjour', requestId: 'request-timeout', scope: 'general',
+      projectId: GENERAL_CHAT_PROJECT_ID, projectName: 'Conversation générale',
+      mode: 'question', files: [], images: []
+    }, () => undefined);
+    const rejection = expect(pending).rejects.toThrow(
+      'Le serveur NeuraCo tarde à ouvrir la réponse'
+    );
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejection;
+    expect(streamSignal?.aborted).toBe(true);
+  });
+
+  it('interrompt un flux ouvert qui ne transmet plus aucune donnée', async () => {
+    vi.useFakeTimers();
+    let streamCancelled = false;
+    streamMock.mockResolvedValue(new Response(new ReadableStream<Uint8Array>({
+      cancel: () => {
+        streamCancelled = true;
+      }
+    }), {
+      headers: { 'Content-Type': 'text/event-stream' }
+    }));
+
+    const pending = streamAgentMessage({
+      content: 'Bonjour', requestId: 'request-idle', scope: 'general',
+      projectId: GENERAL_CHAT_PROJECT_ID, projectName: 'Conversation générale',
+      mode: 'question', files: [], images: []
+    }, () => undefined);
+    const rejection = expect(pending).rejects.toThrow(
+      'La réponse NeuraCo s’est interrompue trop longtemps'
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejection;
+    expect(streamCancelled).toBe(true);
   });
 
   it('autorise une conversation générale sans projet ni fichier local', async () => {

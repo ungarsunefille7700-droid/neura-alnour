@@ -419,6 +419,82 @@ describe('NeuraCo desktop foundation', () => {
     expect(container.textContent).toContain('Réponse générale NeuraCo');
   });
 
+  it('garde le compositeur utilisable et permet d’interrompre un flux suspendu', async () => {
+    let rejectStream: ((reason?: unknown) => void) | undefined;
+    const streamAgentMessage = vi.fn().mockImplementation(() => (
+      new Promise((_resolve, reject) => {
+        rejectStream = reject;
+      })
+    ));
+    const cancelAgentMessage = vi.fn().mockImplementation(async () => {
+      rejectStream?.(new Error('Tâche interrompue par l’utilisateur.'));
+      return true;
+    });
+    window.neuraco = {
+      ...createWorkspaceMocks(),
+      getAppInfo: vi.fn().mockResolvedValue({
+        name: 'NeuraCo', version: '1.0.12', platform: 'win32', architecture: 'x64', packaged: true
+      }),
+      runSelfCheck: vi.fn(),
+      restoreSession: vi.fn().mockResolvedValue({
+        status: 'authenticated',
+        user: {
+          id: 'vip-busy', email: 'founder@example.com', name: 'Founder',
+          subscription: 'neura_ultra', is_vip: true
+        },
+        entitlement: { neuraco_access: true, plan: 'neura_ultra', reason: 'administrator' },
+        persistent: true
+      }),
+      streamAgentMessage,
+      cancelAgentMessage,
+      login: vi.fn(),
+      register: vi.fn(),
+      loginWithGoogle: vi.fn(),
+      logout: vi.fn()
+    };
+
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>('.composer textarea');
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value'
+    )?.set;
+    await act(async () => {
+      setter?.call(textarea, 'Réponds sans bloquer le compositeur.');
+      textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container.querySelector<HTMLFormElement>('.composer')
+        ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(streamAgentMessage).toHaveBeenCalledTimes(1);
+    expect(textarea?.disabled).toBe(false);
+    container.querySelectorAll<HTMLSelectElement>('.home-composer-options select')
+      .forEach((select) => expect(select.disabled).toBe(false));
+    const stopButton = container.querySelector<HTMLButtonElement>('.send-button');
+    expect(stopButton?.disabled).toBe(false);
+    expect(stopButton?.title).toBe('Interrompre la réponse');
+
+    await act(async () => {
+      stopButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const requestId = streamAgentMessage.mock.calls[0][0].requestId;
+    expect(cancelAgentMessage).toHaveBeenCalledWith(requestId);
+    expect(container.querySelector<HTMLButtonElement>('.send-button')?.title).toBe('Envoyer');
+    expect(textarea?.disabled).toBe(false);
+  });
+
   it('renders the server-authoritative model catalogue', async () => {
     const mocks = createWorkspaceMocks();
     mocks.getRuntimePolicy.mockResolvedValue({

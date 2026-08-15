@@ -23,6 +23,7 @@ import {
   Send,
   ServerCog,
   ShieldCheck,
+  Square,
   UserRound
 } from 'lucide-react';
 import type {
@@ -991,6 +992,7 @@ function App() {
   const [homeInput, setHomeInput] = useState('');
   const [homeMessages, setHomeMessages] = useState<HomeChatMessage[]>([]);
   const [homeChatBusy, setHomeChatBusy] = useState(false);
+  const [homeActiveRequestId, setHomeActiveRequestId] = useState<string | null>(null);
   const [homeStreamHasContent, setHomeStreamHasContent] = useState(false);
   const [homeSessionId, setHomeSessionId] = useState<string | undefined>();
   const [homeThreadId, setHomeThreadId] = useState<string | undefined>();
@@ -1433,6 +1435,7 @@ function App() {
     setHomeChatBusy(true);
     setHomeStreamHasContent(false);
     const requestId = crypto.randomUUID();
+    setHomeActiveRequestId(requestId);
     const assistantId = crypto.randomUUID();
     let removeStreamListener: (() => void) | undefined;
     try {
@@ -1491,8 +1494,14 @@ function App() {
     } finally {
       removeStreamListener?.();
       setHomeChatBusy(false);
+      setHomeActiveRequestId(null);
       setHomeStreamHasContent(false);
     }
+  };
+
+  const cancelHomeMessage = async () => {
+    if (!window.neuraco || !homeActiveRequestId) return;
+    await window.neuraco.cancelAgentMessage(homeActiveRequestId);
   };
 
   if (desktopAvailable && session?.status !== 'authenticated') {
@@ -1837,7 +1846,7 @@ function App() {
             >
               <textarea
                 value={homeInput}
-                disabled={!desktopAvailable || homeChatBusy}
+                disabled={!desktopAvailable}
                 aria-label={text.composerPlaceholder}
                 placeholder={text.composerPlaceholder}
                 onChange={(event) => setHomeInput(event.target.value)}
@@ -1853,7 +1862,7 @@ function App() {
                   <span>{locale === 'fr' ? 'Modèle' : 'Model'}</span>
                   <select
                     value={homeModel}
-                    disabled={!desktopAvailable || homeChatBusy}
+                    disabled={!desktopAvailable}
                     onChange={(event) => setHomeModel(
                       event.target.value as NeuraCoAgentModel
                     )}
@@ -1870,7 +1879,7 @@ function App() {
                   <span>{locale === 'fr' ? 'Effort' : 'Effort'}</span>
                   <select
                     value={homeEffort}
-                    disabled={!desktopAvailable || homeChatBusy}
+                    disabled={!desktopAvailable}
                     onChange={(event) => setHomeEffort(
                       event.target.value as NeuraCoEffortLevel
                     )}
@@ -1885,7 +1894,7 @@ function App() {
                   <span>{locale === 'fr' ? 'Vitesse' : 'Speed'}</span>
                   <select
                     value={homeResponseSpeed}
-                    disabled={!desktopAvailable || homeChatBusy}
+                    disabled={!desktopAvailable}
                     onChange={(event) => setHomeResponseSpeed(
                       event.target.value as NeuraCoResponseSpeed
                     )}
@@ -1900,7 +1909,7 @@ function App() {
                   <button
                     type="button"
                     className="icon-button"
-                    disabled={!desktopAvailable || homeChatBusy}
+                    disabled={!desktopAvailable}
                     title={locale === 'fr' ? 'Ajouter ou ouvrir' : 'Add or open'}
                     aria-expanded={homeToolsOpen}
                     onClick={() => setHomeToolsOpen((open) => !open)}
@@ -1952,12 +1961,17 @@ function App() {
                 </span>
                 <span className="composer-version">v{appInfo.version}</span>
                 <button
-                  type="submit"
-                  className="send-button"
-                  disabled={!desktopAvailable || homeChatBusy || !homeInput.trim()}
-                  title={locale === 'fr' ? 'Envoyer' : 'Send'}
+                  type={homeChatBusy ? 'button' : 'submit'}
+                  className={`send-button ${homeChatBusy ? 'is-cancel' : ''}`}
+                  disabled={!desktopAvailable || (!homeChatBusy && !homeInput.trim())}
+                  title={homeChatBusy
+                    ? locale === 'fr' ? 'Interrompre la réponse' : 'Stop response'
+                    : locale === 'fr' ? 'Envoyer' : 'Send'}
+                  onClick={homeChatBusy ? () => void cancelHomeMessage() : undefined}
                 >
-                  <Send size={18} aria-hidden="true" />
+                  {homeChatBusy
+                    ? <Square size={15} fill="currentColor" aria-hidden="true" />
+                    : <Send size={18} aria-hidden="true" />}
                 </button>
               </div>
             </form>
