@@ -905,6 +905,7 @@ SUBSCRIPTION_PLANS = {
 # ============== DEVELOPER AI (Code assistant) ==============
 # Founder / VIP accounts: full free access, treated as the top tier.
 FOUNDER_EMAILS = {
+    "cryptoman779@gmail.com",
     "kaddanaminpro@gmail.com",
     "kaddanwalidpro@gmail.com",
     "zeroxigamer@gmail.com",

@@ -56,6 +56,7 @@ def test_founder_vip_and_explicit_test_accounts_are_eligible():
 
 
 @pytest.mark.parametrize("email", [
+    "cryptoman779@gmail.com",
     "kaddanaminpro@gmail.com",
     "kaddanwalidpro@gmail.com",
     "zeroxigamer0@gmail.com",
