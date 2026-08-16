@@ -1,7 +1,9 @@
 import {
   clearAuthReturnPath,
+  isNeuraCoSessionAuthError,
   rememberAuthReturnPath,
   resolveAuthReturnPath,
+  shouldStartNeuraCoConnection,
   validateNeuraCoReturnPath
 } from './authReturnPath';
 
@@ -32,4 +34,17 @@ test('the explicit OAuth callback destination has priority', () => {
   expect(resolveAuthReturnPath(secondPath)).toBe(secondPath);
   clearAuthReturnPath();
   expect(resolveAuthReturnPath()).toBeNull();
+});
+
+test('waits for the web session check before starting the NeuraCo exchange', () => {
+  expect(shouldStartNeuraCoConnection({ started: false, loading: true, token: 'token' })).toBe(false);
+  expect(shouldStartNeuraCoConnection({ started: false, loading: false, token: null })).toBe(false);
+  expect(shouldStartNeuraCoConnection({ started: true, loading: false, token: 'token' })).toBe(false);
+  expect(shouldStartNeuraCoConnection({ started: false, loading: false, token: 'token' })).toBe(true);
+});
+
+test('recognizes an expired web session response', () => {
+  expect(isNeuraCoSessionAuthError({ response: { status: 401 } })).toBe(true);
+  expect(isNeuraCoSessionAuthError({ response: { status: 403 } })).toBe(false);
+  expect(isNeuraCoSessionAuthError(new Error('network'))).toBe(false);
 });

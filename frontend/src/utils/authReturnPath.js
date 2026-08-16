@@ -46,6 +46,14 @@ export const validateNeuraCoReturnPath = (value) => {
   }
 };
 
+export const shouldStartNeuraCoConnection = ({ started, loading, token }) => (
+  !started && !loading && Boolean(token)
+);
+
+export const isNeuraCoSessionAuthError = (error) => (
+  Number(error?.response?.status) === 401
+);
+
 export const clearAuthReturnPath = () => {
   try {
     window.sessionStorage.removeItem(SESSION_KEY);

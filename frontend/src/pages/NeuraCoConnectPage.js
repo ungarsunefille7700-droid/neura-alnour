@@ -3,12 +3,16 @@ import { Link, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { CheckCircle2, Loader2, ShieldAlert } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
-import { validateNeuraCoReturnPath } from '@/utils/authReturnPath';
+import {
+  isNeuraCoSessionAuthError,
+  shouldStartNeuraCoConnection,
+  validateNeuraCoReturnPath
+} from '@/utils/authReturnPath';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const NeuraCoConnectPage = () => {
-  const { token, loading } = useAuth();
+  const { token, loading, logout } = useAuth();
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const [status, setStatus] = useState('Vérification de votre accès NeuraCo...');
@@ -18,7 +22,11 @@ const NeuraCoConnectPage = () => {
   const returnPath = validateNeuraCoReturnPath(`${location.pathname}${location.search}`);
 
   useEffect(() => {
-    if (startedRef.current || !token) return;
+    if (!shouldStartNeuraCoConnection({
+      started: startedRef.current,
+      loading,
+      token
+    })) return;
     startedRef.current = true;
 
     const connect = async () => {
@@ -38,6 +46,12 @@ const NeuraCoConnectPage = () => {
         setStatus('Accès validé. Retour vers NeuraCo...');
         window.location.replace(response.data.redirect_url);
       } catch (requestError) {
+        if (isNeuraCoSessionAuthError(requestError)) {
+          startedRef.current = false;
+          setStatus('Session expirée. Reconnexion nécessaire...');
+          logout();
+          return;
+        }
         const detail = requestError.response?.data?.detail;
         if (detail?.code === 'neuraco_access_required') {
           setError('NeuraCo nécessite un abonnement Plus ou supérieur actif.');
@@ -52,7 +66,7 @@ const NeuraCoConnectPage = () => {
     };
 
     connect();
-  }, [attempt, returnPath, searchParams, token]);
+  }, [attempt, loading, logout, returnPath, searchParams, token]);
 
   const retry = () => {
     startedRef.current = false;
