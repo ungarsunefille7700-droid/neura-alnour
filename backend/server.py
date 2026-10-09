@@ -15947,6 +15947,7 @@ async def _apply_subscription_checkout(session, transaction):
     await db.payment_transactions.update_one(
         {"session_id": session["id"]},
         {"$set": {"payment_status": session.get("payment_status", "unpaid"),
+                  "checkout_status": session.get("status"),
                   "stripe_subscription_id": subscription_id,
                   "updated_at": datetime.now(timezone.utc).isoformat()}},
     )
@@ -16005,8 +16006,7 @@ async def get_checkout_status(session_id: str, user: dict = Depends(get_current_
             await _apply_neuraco_credit_purchase(transaction, session_id)
         return {"status": status.status, "payment_status": status.payment_status}
     session = await _stripe_client().v1.checkout.sessions.retrieve_async(session_id)
-    if session.get("subscription") or session.get("payment_status") == "paid":
-        await _apply_subscription_checkout(session, transaction)
+    await _apply_subscription_checkout(session, transaction)
     return {"status": session.get("status"), "payment_status": session.get("payment_status")}
 
 
@@ -16041,7 +16041,7 @@ async def stripe_webhook(request: Request):
             if transaction.get("kind") == "neuraco_credits":
                 if obj.get("payment_status") == "paid":
                     await _apply_neuraco_credit_purchase(transaction, obj["id"])
-            elif obj.get("subscription") or obj.get("payment_status") == "paid":
+            else:
                 await _apply_subscription_checkout(obj, transaction)
         elif obj.get("subscription"):
             await _sync_stripe_subscription(_stripe_id(obj["subscription"]))
