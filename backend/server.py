@@ -17,6 +17,8 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
+import stripe
+from dateutil.relativedelta import relativedelta
 import bcrypt
 import asyncio
 import resend
@@ -922,9 +924,20 @@ def is_vip_email(email: Optional[str]) -> bool:
         return True
     return any(((a.get("email") or "").strip().lower() == e) for a in VIP_ADMINS if a.get("email"))
 
+def _identity_entitlements(user: dict) -> dict:
+    user = dict(user)
+    if not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription", "free") != "free":
+        status = user.get("subscription_status")
+        expiry = _parse_neuraco_expiry(user.get("subscription_expires_at"))
+        if (status and status not in {"active", "paid", "trialing"}) or (expiry and expiry <= datetime.now(timezone.utc)):
+            user["subscription"] = "free"
+    return user
+
+
 # Developer tiers. Limits are by request count / response size / files / memory
 # (single AI engine = Gemini; no extra paid provider). window_hours = regeneration delay.
 DEV_TIERS = {
+    "developer": {"label": "Développeur", "requests": 5, "window_hours": 4, "max_tokens": 1024, "max_files": 2, "memory_turns": 6, "project_analysis": False},
     "free":  {"label": "Gratuit",     "requests": 5,    "window_hours": 4, "max_tokens": 1024, "max_files": 2,  "memory_turns": 6,  "project_analysis": False},
     "plus":  {"label": "Neura+",      "requests": None, "window_hours": NEURA_PLUS_AGENT_WINDOW_HOURS, "max_tokens": 4096, "max_files": 10, "memory_turns": 30, "project_analysis": True},
     "ultra": {"label": "Neura Ultra", "requests": 1000, "window_hours": 1, "max_tokens": 8192, "max_files": 30, "memory_turns": 60, "project_analysis": True},
@@ -939,6 +952,8 @@ def get_dev_tier(user: dict) -> str:
         return "ultra"
     if sub == "neura_plus":
         return "plus"
+    if sub == "developer":
+        return "developer"
     return "free"
 
 def _dev_is_unlimited(user: dict) -> bool:
@@ -4881,6 +4896,7 @@ async def _user_from_bearer_token(
                 issued_at = datetime.fromtimestamp(issued_at, tz=timezone.utc)
             if not isinstance(issued_at, datetime) or issued_at < valid_after:
                 raise HTTPException(status_code=401, detail="Session révoquée")
+        user = _identity_entitlements(user)
         if is_vip_email(user.get("email")):
             user = {**user, "is_vip": True, "subscription": "neura_ultra"}
         if session_id:
@@ -5317,6 +5333,7 @@ async def login(credentials: UserLogin, request: Request):
 
 @api_router.get("/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
+    user = _identity_entitlements(user)
     return {
         "id": user["id"],
         "email": user["email"],
@@ -5325,6 +5342,10 @@ async def get_me(user: dict = Depends(get_current_user)):
         "is_vip": user.get("is_vip", False),
         "email_verified": bool(user.get("email_verified", user.get("password") is None)),
         "two_factor_enabled": bool(user.get("two_factor_enabled", False)),
+        "subscription_status": user.get("subscription_status"),
+        "subscription_expires_at": _iso_utc(_parse_neuraco_expiry(user.get("subscription_expires_at"))),
+        "subscription_cancel_at_period_end": bool(user.get("subscription_cancel_at_period_end")),
+        "has_recurring_subscription": bool(user.get("stripe_subscription_id")),
     }
 
 
@@ -15848,142 +15869,197 @@ async def get_subscription_plans():
     """Get all subscription plans"""
     return SUBSCRIPTION_PLANS
 
+def _stripe_client():
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=503, detail="Stripe n'est pas configuré")
+    addresses = {"api": "https://integrations.emergentagent.com/stripe"} if "sk_test_emergent" in STRIPE_API_KEY else None
+    return stripe.StripeClient(STRIPE_API_KEY, base_addresses=addresses, max_network_retries=2)
+
+
+def _stripe_id(value):
+    return value.get("id") if isinstance(value, dict) else value
+
+
+def _subscription_period_end(subscription):
+    ends = [subscription.get("current_period_end")]
+    ends.extend(item.get("current_period_end") for item in subscription.get("items", {}).get("data", []))
+    ends = [int(value) for value in ends if value]
+    return datetime.fromtimestamp(min(ends), timezone.utc) if ends else None
+
+
+async def _sync_stripe_subscription(subscription_id: str):
+    # Read current Stripe state instead of trusting potentially out-of-order events.
+    subscription = await _stripe_client().v1.subscriptions.retrieve_async(
+        subscription_id, {"expand": ["latest_invoice"]}
+    )
+    metadata = subscription.get("metadata") or {}
+    if metadata.get("app") != "neura_alnour":
+        return
+    user_id, plan = metadata.get("user_id"), metadata.get("plan")
+    if not user_id or plan not in SUBSCRIPTION_PLANS or plan == "free":
+        raise HTTPException(status_code=400, detail="Métadonnées d'abonnement invalides")
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="Titulaire d'abonnement introuvable")
+    source_created = int(subscription.get("created", 0))
+    previous_id = user.get("stripe_subscription_id")
+    if previous_id and previous_id != subscription_id and int(user.get("subscription_source_created", 0)) >= source_created:
+        return
+    status = subscription.get("status", "incomplete")
+    expiry = _subscription_period_end(subscription)
+    invoice = subscription.get("latest_invoice")
+    if status == "active" and isinstance(invoice, dict) and invoice.get("status") != "paid":
+        status = "past_due"
+    valid = status in {"active", "trialing"} and expiry and expiry > datetime.now(timezone.utc)
+    update = {
+        "stripe_subscription_id": subscription_id,
+        "stripe_customer_id": _stripe_id(subscription.get("customer")),
+        "subscription_source_created": source_created,
+        "subscription": plan if valid else "free",
+        "subscription_plan": plan,
+        "subscription_status": status,
+        "subscription_expires_at": expiry,
+        "subscription_cancel_at_period_end": bool(subscription.get("cancel_at_period_end")),
+        "subscription_updated_at": datetime.now(timezone.utc),
+    }
+    # A delayed event for an older subscription must not overwrite a newer one.
+    await db.users.update_one(
+        {"id": user_id, "stripe_subscription_id": previous_id},
+        {"$set": update},
+    )
+
+
+async def _apply_subscription_checkout(session, transaction):
+    subscription_id = _stripe_id(session.get("subscription"))
+    if subscription_id:
+        await _sync_stripe_subscription(subscription_id)
+    elif session.get("payment_status") == "paid":
+        # Previously sold one-time plans retain exactly their purchased period.
+        started = datetime.fromtimestamp(session["created"], timezone.utc)
+        expiry = started + relativedelta(**({"years": 1} if transaction.get("billing_period") == "yearly" else {"months": 1}))
+        await db.users.update_one(
+            {"id": transaction["user_id"], "stripe_subscription_id": None,
+             "$or": [{"subscription_legacy_started": {"$lte": started}}, {"subscription_legacy_started": {"$exists": False}}]},
+            {"$set": {"subscription": transaction["plan"] if expiry > datetime.now(timezone.utc) else "free",
+                      "subscription_status": "paid", "subscription_expires_at": expiry,
+                      "subscription_legacy_started": started}},
+        )
+    await db.payment_transactions.update_one(
+        {"session_id": session["id"]},
+        {"$set": {"payment_status": session.get("payment_status", "unpaid"),
+                  "stripe_subscription_id": subscription_id,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+
 @api_router.post("/subscriptions/checkout")
 async def create_checkout_session(request: SubscriptionRequest, user: dict = Depends(get_current_user)):
-    """Create Stripe checkout session"""
-    from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
-    
     if request.plan not in SUBSCRIPTION_PLANS or request.plan == "free":
         raise HTTPException(status_code=400, detail="Plan invalide")
-    
+    origin = request.origin_url.rstrip("/")
+    allowed = {"https://neura-alnour.vercel.app"}
+    allowed.update(value.strip().rstrip("/") for value in os.environ.get("CORS_ORIGINS", "").split(",") if value.strip() != "*")
+    if origin not in allowed:
+        raise HTTPException(status_code=400, detail="Origine de paiement non autorisée")
+    backend = os.environ.get("PUBLIC_BACKEND_URL", "").rstrip("/")
+    if not backend or not os.environ.get("STRIPE_WEBHOOK_SECRET"):
+        raise HTTPException(status_code=503, detail="Configurer PUBLIC_BACKEND_URL et STRIPE_WEBHOOK_SECRET sur le backend")
+    if user.get("stripe_subscription_id") and user.get("subscription_status") in {"active", "trialing", "past_due"}:
+        raise HTTPException(status_code=409, detail="Un abonnement existe déjà. Gérez-le avant d'en créer un autre.")
     plan = SUBSCRIPTION_PLANS[request.plan]
     amount = plan["price_yearly"] if request.billing_period == "yearly" else plan["price_monthly"]
-    
-    # Build URLs
-    success_url = f"{request.origin_url}/subscription/success?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{request.origin_url}/subscription"
-    
-    # Use the external origin URL for webhook so Stripe can reach us
-    webhook_url = f"{request.origin_url}/api/webhook/stripe"
-    
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    
-    checkout_request = CheckoutSessionRequest(
-        amount=float(amount),
-        currency="eur",
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            "user_id": user["id"],
-            "plan": request.plan,
-            "billing_period": request.billing_period
-        }
-    )
-    
-    session = await stripe_checkout.create_checkout_session(checkout_request)
-    
-    # Save transaction
-    await db.payment_transactions.insert_one({
-        "id": str(uuid.uuid4()),
-        "session_id": session.session_id,
-        "user_id": user["id"],
-        "amount": float(amount),
-        "currency": "eur",
-        "plan": request.plan,
-        "billing_period": request.billing_period,
-        "payment_status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat()
+    metadata = {"app": "neura_alnour", "user_id": user["id"], "plan": request.plan, "billing_period": request.billing_period}
+    session = await _stripe_client().v1.checkout.sessions.create_async({
+        "mode": "subscription",
+        "client_reference_id": user["id"],
+        "customer_email": user["email"],
+        "success_url": origin + "/subscription?session_id={CHECKOUT_SESSION_ID}",
+        "cancel_url": origin + "/subscription",
+        "metadata": {**metadata, "webhook_url": backend + "/api/webhook/stripe"},
+        "subscription_data": {"metadata": metadata},
+        "line_items": [{"price_data": {
+            "currency": "eur",
+            "product_data": {"name": plan["name"]},
+            "unit_amount": int(Decimal(str(amount)) * 100),
+            "recurring": {"interval": "year" if request.billing_period == "yearly" else "month"},
+        }, "quantity": 1}],
     })
-    
-    return {"url": session.url, "session_id": session.session_id}
+    await db.payment_transactions.insert_one({
+        "id": str(uuid.uuid4()), "session_id": session["id"], "user_id": user["id"],
+        "amount": float(amount), "currency": "eur", "plan": request.plan,
+        "billing_period": request.billing_period, "payment_status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"url": session["url"], "session_id": session["id"]}
+
 
 @api_router.get("/subscriptions/status/{session_id}")
 async def get_checkout_status(session_id: str, user: dict = Depends(get_current_user)):
-    """Get checkout session status"""
-    from emergentintegrations.payments.stripe.checkout import StripeCheckout
-
-    transaction = await db.payment_transactions.find_one(
-        {"session_id": session_id, "user_id": user["id"]},
-        {"_id": 0},
-    )
+    transaction = await db.payment_transactions.find_one({"session_id": session_id, "user_id": user["id"]}, {"_id": 0})
     if not transaction:
         raise HTTPException(status_code=404, detail="Paiement introuvable.")
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
-    status = await stripe_checkout.get_checkout_status(session_id)
-
-    if status.payment_status == "paid":
-        if transaction.get("kind") == "neuraco_credits":
+    if transaction.get("kind") == "neuraco_credits":
+        from emergentintegrations.payments.stripe.checkout import StripeCheckout
+        status = await StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="").get_checkout_status(session_id)
+        if status.payment_status == "paid":
             await _apply_neuraco_credit_purchase(transaction, session_id)
-        elif transaction["payment_status"] != "paid":
-            await db.payment_transactions.update_one(
-                {"session_id": session_id},
-                {"$set": {"payment_status": "paid", "updated_at": datetime.now(timezone.utc).isoformat()}}
-            )
-            
-            # Update user subscription
-            await db.users.update_one(
-                {"id": transaction["user_id"]},
-                {"$set": {"subscription": transaction["plan"]}}
-            )
-    
-    return {
-        "status": status.status,
-        "payment_status": status.payment_status
-    }
+        return {"status": status.status, "payment_status": status.payment_status}
+    session = await _stripe_client().v1.checkout.sessions.retrieve_async(session_id)
+    if session.get("subscription") or session.get("payment_status") == "paid":
+        await _apply_subscription_checkout(session, transaction)
+    return {"status": session.get("status"), "payment_status": session.get("payment_status")}
+
+
+@api_router.post("/subscriptions/cancel")
+async def cancel_subscription(user: dict = Depends(get_current_user)):
+    subscription_id = user.get("stripe_subscription_id")
+    if not subscription_id:
+        raise HTTPException(status_code=404, detail="Aucun abonnement récurrent")
+    await _stripe_client().v1.subscriptions.update_async(subscription_id, {"cancel_at_period_end": True})
+    await _sync_stripe_subscription(subscription_id)
+    return {"ok": True, "cancel_at_period_end": True}
+
 
 @api_router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
-    """Handle Stripe webhooks"""
-    from emergentintegrations.payments.stripe.checkout import StripeCheckout
-    
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Signature webhook non configurée")
     body = await request.body()
-    signature = request.headers.get("Stripe-Signature")
-    
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
-    
     try:
-        webhook_response = await stripe_checkout.handle_webhook(body, signature)
-        
-        if webhook_response.payment_status == "paid":
-            transaction = await db.payment_transactions.find_one(
-                {"session_id": webhook_response.session_id},
-                {"_id": 0},
-            )
-            if not transaction:
-                logger.warning(
-                    "Stripe webhook ignored unknown session %s",
-                    webhook_response.session_id,
-                )
-                return {"status": "ignored"}
-            if transaction.get("kind") == "neuraco_credits":
-                await _apply_neuraco_credit_purchase(
-                    transaction,
-                    webhook_response.session_id,
-                )
-            else:
-                await db.payment_transactions.update_one(
-                    {"session_id": webhook_response.session_id},
-                    {"$set": {
-                        "payment_status": "paid",
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }},
-                )
-                metadata = webhook_response.metadata or {}
-                user_id = metadata.get("user_id") or transaction.get("user_id")
-                plan = metadata.get("plan") or transaction.get("plan", "free")
-                await db.users.update_one(
-                    {"id": user_id},
-                    {"$set": {
-                        "subscription": plan,
-                        "subscription_status": "active",
-                        "subscription_updated_at": datetime.now(timezone.utc),
-                    }},
-                )
-        
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        event = stripe.Webhook.construct_event(body, request.headers.get("Stripe-Signature", ""), secret)
+    except (ValueError, stripe.SignatureVerificationError):
         raise HTTPException(status_code=400, detail="Webhook Stripe invalide.")
+    event_id = event["id"]
+    if await db.stripe_events.find_one({"_id": event_id}):
+        return {"status": "ok"}
+    event_type = event["type"]
+    obj = event["data"]["object"]
+    if event_type.startswith("checkout.session."):
+        transaction = await db.payment_transactions.find_one({"session_id": obj["id"]}, {"_id": 0})
+        if transaction:
+            if transaction.get("kind") == "neuraco_credits":
+                if obj.get("payment_status") == "paid":
+                    await _apply_neuraco_credit_purchase(transaction, obj["id"])
+            elif obj.get("subscription") or obj.get("payment_status") == "paid":
+                await _apply_subscription_checkout(obj, transaction)
+        elif obj.get("subscription"):
+            await _sync_stripe_subscription(_stripe_id(obj["subscription"]))
+    elif event_type.startswith("customer.subscription."):
+        await _sync_stripe_subscription(obj["id"])
+    elif event_type in {"invoice.paid", "invoice.payment_succeeded", "invoice.payment_failed", "invoice.finalization_failed"}:
+        details = (obj.get("parent") or {}).get("subscription_details") or {}
+        subscription_id = _stripe_id(obj.get("subscription") or details.get("subscription"))
+        if subscription_id:
+            await _sync_stripe_subscription(subscription_id)
+    elif event_type == "payment_intent.succeeded":
+        session_id = (obj.get("metadata") or {}).get("checkout_session_id")
+        if session_id:
+            transaction = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+            if transaction and transaction.get("kind") == "neuraco_credits":
+                await _apply_neuraco_credit_purchase(transaction, session_id)
+    await db.stripe_events.update_one({"_id": event_id}, {"$set": {"processed_at": datetime.now(timezone.utc)}}, upsert=True)
+    return {"status": "ok"}
 
 # ============== BASE ROUTES ==============
 
