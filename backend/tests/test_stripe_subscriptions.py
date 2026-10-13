@@ -102,10 +102,12 @@ class TestSubscriptionPlans:
         response = api_client.get(f"{BASE_URL}/api/subscriptions/plans")
         data = response.json()
         
-        expected_plans = ["free", "mongo", "pro", "developer", "neura_plus", "neura_ultra"]
+        # "developer" (19.99) is no longer sold: hidden from the list, refused at checkout.
+        expected_plans = ["free", "mongo", "pro", "neura_plus", "neura_ultra"]
         for plan_id in expected_plans:
             assert plan_id in data, f"Plan {plan_id} not found"
         assert "comme_toi" not in data
+        assert "developer" not in data
         assert len(data) == len(expected_plans)
         print(f"Active plans found: {list(data.keys())}")
     
@@ -132,7 +134,6 @@ class TestSubscriptionPlans:
             "free": (0, 0),
             "mongo": (8.99, 89.99),
             "pro": (22.0, 219.99),
-            "developer": (19.99, 199.99),
             "neura_plus": (119.99, 1199.99),
             "neura_ultra": (299.99, 2999.99),
         }
@@ -295,7 +296,7 @@ class TestTransactionPersistence:
         """Checkout should save transaction to database with pending status"""
         # Create checkout session
         response = test_user_client.post(f"{BASE_URL}/api/subscriptions/checkout", json={
-            "plan": "developer",
+            "plan": "pro",
             "billing_period": "monthly",
             "origin_url": "https://noor-dev.preview.emergentagent.com"
         })

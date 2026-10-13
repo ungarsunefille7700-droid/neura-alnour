@@ -796,9 +796,9 @@ MODEL_PROFILES = {
         "plus_medium_provider": "anthropic",
         "plus_medium_model_id": os.environ.get("PLUS_CLAUDE_MEDIUM_MODEL", "claude-haiku-4-5"),
         "economic_provider": "anthropic",
-        "economic_model_id": os.environ.get("MONGO_CLAUDE_ECONOMIC_MODEL", "claude-3-5-haiku-20241022"),
+        "economic_model_id": os.environ.get("MONGO_CLAUDE_ECONOMIC_MODEL", "claude-haiku-4-5"),
         "plus_instant_provider": "anthropic",
-        "plus_instant_model_id": os.environ.get("PLUS_CLAUDE_INSTANT_MODEL", "claude-3-5-haiku-20241022"),
+        "plus_instant_model_id": os.environ.get("PLUS_CLAUDE_INSTANT_MODEL", "claude-haiku-4-5"),
         "persona": (
             "STYLE DE RÉPONSE — Réfléchi et nuancé :\n"
             "- Explique ton raisonnement, montre les nuances et les différents angles.\n"
@@ -813,15 +813,15 @@ MODEL_PROFILES = {
         "model_id": "gemini-2.5-flash",
         "free_advanced_model_id": os.environ.get("FREE_GEMINI_ADVANCED_MODEL", "gemini-2.5-flash"),
         "medium_provider": "gemini",
-        "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "medium_model_id": os.environ.get("FREE_GEMINI_MEDIUM_MODEL", "gemini-2.5-flash"),
         "mongo_medium_provider": "gemini",
-        "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "mongo_medium_model_id": os.environ.get("MONGO_GEMINI_MEDIUM_MODEL", "gemini-2.5-flash"),
         "plus_medium_provider": "gemini",
-        "plus_medium_model_id": os.environ.get("PLUS_GEMINI_MEDIUM_MODEL", "gemini-2.0-flash"),
+        "plus_medium_model_id": os.environ.get("PLUS_GEMINI_MEDIUM_MODEL", "gemini-2.5-flash"),
         "economic_provider": "gemini",
-        "economic_model_id": os.environ.get("MONGO_GEMINI_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
+        "economic_model_id": os.environ.get("MONGO_GEMINI_ECONOMIC_MODEL", "gemini-2.5-flash"),
         "plus_instant_provider": "gemini",
-        "plus_instant_model_id": os.environ.get("PLUS_GEMINI_INSTANT_MODEL", "gemini-2.0-flash-lite"),
+        "plus_instant_model_id": os.environ.get("PLUS_GEMINI_INSTANT_MODEL", "gemini-2.5-flash"),
         "persona": (
             "STYLE DE RÉPONSE — Synthétique et factuel :\n"
             "- Réponses concises, allant à l'essentiel.\n"
@@ -838,11 +838,11 @@ MODEL_PROFILES = {
         # The existing Grok selector is a Grok-style persona on Gemini. Keep that
         # routing unchanged until a real xAI model is explicitly configured.
         "medium_provider": "gemini",
-        "medium_model_id": os.environ.get("FREE_GROK_MEDIUM_MODEL", "gemini-2.0-flash-lite"),
+        "medium_model_id": os.environ.get("FREE_GROK_MEDIUM_MODEL", "gemini-2.5-flash"),
         "mongo_medium_provider": "gemini",
-        "mongo_medium_model_id": os.environ.get("MONGO_GROK_MEDIUM_MODEL", "gemini-2.0-flash"),
+        "mongo_medium_model_id": os.environ.get("MONGO_GROK_MEDIUM_MODEL", "gemini-2.5-flash"),
         "economic_provider": "gemini",
-        "economic_model_id": os.environ.get("MONGO_GROK_ECONOMIC_MODEL", "gemini-2.0-flash-lite"),
+        "economic_model_id": os.environ.get("MONGO_GROK_ECONOMIC_MODEL", "gemini-2.5-flash"),
         "persona": (
             "STYLE DE RÉPONSE — Cash et direct :\n"
             "- Ton franc et décontracté, sans langue de bois.\n"
@@ -885,8 +885,102 @@ PROVIDER_DISPLAY_NAMES = {
 INTELLIGENCE_MODES = ("auto", "high", "medium", "instant")
 
 
+# Full chat model catalogue, offered on top of the three routers to the plans
+# with Plus capabilities (Plus, Neura+, Ultra, VIP). Every id below answered a
+# real call through the Emergent proxy on 2026-10-14; retired ids (HTTP 404)
+# are left out. Entries: (model_id, provider, display name, router family).
+CATALOG_MODEL_PREFIX = "model:"
+CATALOG_MODEL_ENTRIES = [
+    ("gpt-6-sol", "openai", "GPT-6 Sol", "chatgpt"),
+    ("gpt-6-luna", "openai", "GPT-6 Luna", "chatgpt"),
+    ("gpt-6-astra", "openai", "GPT-6 Astra", "chatgpt"),
+    ("gpt-5.6-sol", "openai", "GPT-5.6 Sol", "chatgpt"),
+    ("gpt-5.6-terra", "openai", "GPT-5.6 Terra", "chatgpt"),
+    ("gpt-5.6-luna", "openai", "GPT-5.6 Luna", "chatgpt"),
+    ("gpt-5.5", "openai", "GPT-5.5", "chatgpt"),
+    ("gpt-5.4", "openai", "GPT-5.4", "chatgpt"),
+    ("gpt-5.4-mini", "openai", "GPT-5.4 mini", "chatgpt"),
+    ("gpt-5.2", "openai", "GPT-5.2", "chatgpt"),
+    ("gpt-5.1", "openai", "GPT-5.1", "chatgpt"),
+    ("gpt-5", "openai", "GPT-5", "chatgpt"),
+    ("gpt-5-mini", "openai", "GPT-5 mini", "chatgpt"),
+    ("gpt-5-nano", "openai", "GPT-5 nano", "chatgpt"),
+    ("o3", "openai", "o3", "chatgpt"),
+    ("o4-mini", "openai", "o4-mini", "chatgpt"),
+    ("o3-mini", "openai", "o3-mini", "chatgpt"),
+    ("o1", "openai", "o1", "chatgpt"),
+    ("gpt-4.1", "openai", "GPT-4.1", "chatgpt"),
+    ("gpt-4.1-mini", "openai", "GPT-4.1 mini", "chatgpt"),
+    ("gpt-4.1-nano", "openai", "GPT-4.1 nano", "chatgpt"),
+    ("gpt-4o", "openai", "GPT-4o", "chatgpt"),
+    ("gpt-4o-mini", "openai", "GPT-4o mini", "chatgpt"),
+    ("gpt-4", "openai", "GPT-4", "chatgpt"),
+    ("claude-fable-5-1", "anthropic", "Claude Fable 5.1", "claude"),
+    ("claude-fable-5", "anthropic", "Claude Fable 5", "claude"),
+    ("claude-opus-5-5", "anthropic", "Claude Opus 5.5", "claude"),
+    ("claude-opus-5", "anthropic", "Claude Opus 5", "claude"),
+    ("claude-sonnet-5-5", "anthropic", "Claude Sonnet 5.5", "claude"),
+    ("claude-sonnet-5", "anthropic", "Claude Sonnet 5", "claude"),
+    ("claude-opus-4-8", "anthropic", "Claude Opus 4.8", "claude"),
+    ("claude-opus-4-7", "anthropic", "Claude Opus 4.7", "claude"),
+    ("claude-opus-4-6", "anthropic", "Claude Opus 4.6", "claude"),
+    ("claude-opus-4-5-20251101", "anthropic", "Claude Opus 4.5", "claude"),
+    ("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6", "claude"),
+    ("claude-sonnet-4-5", "anthropic", "Claude Sonnet 4.5", "claude"),
+    ("claude-haiku-4-5", "anthropic", "Claude Haiku 4.5", "claude"),
+    ("gemini-3.8-flash", "gemini", "Gemini 3.8 Flash", "gemini"),
+    ("gemini-3.7-flash", "gemini", "Gemini 3.7 Flash", "gemini"),
+    ("gemini-3.6-flash", "gemini", "Gemini 3.6 Flash", "gemini"),
+    ("gemini-3.5-flash", "gemini", "Gemini 3.5 Flash", "gemini"),
+    ("gemini-3.1-pro-preview", "gemini", "Gemini 3.1 Pro", "gemini"),
+    ("gemini-3-flash-preview", "gemini", "Gemini 3 Flash", "gemini"),
+    ("gemini-2.5-pro", "gemini", "Gemini 2.5 Pro", "gemini"),
+    ("gemini-2.5-flash", "gemini", "Gemini 2.5 Flash", "gemini"),
+]
+CATALOG_MODELS_BY_KEY = {
+    f"{CATALOG_MODEL_PREFIX}{model_id}": {
+        "key": f"{CATALOG_MODEL_PREFIX}{model_id}",
+        "model_id": model_id,
+        "provider": provider,
+        "display_name": display_name,
+        "family": family,
+    }
+    for model_id, provider, display_name, family in CATALOG_MODEL_ENTRIES
+}
+for _model_id, _provider, _display_name, _family in CATALOG_MODEL_ENTRIES:
+    MODEL_DISPLAY_NAMES.setdefault(_model_id, _display_name)
+
+# These models reject any temperature other than 1 (litellm UnsupportedParamsError,
+# checked 2026-10-14): the parameter is not sent to them.
+FIXED_TEMPERATURE_MODELS = frozenset({
+    "claude-fable-5", "claude-fable-5-1", "claude-opus-4-7", "claude-opus-4-8",
+    "claude-opus-5", "claude-opus-5-5", "claude-sonnet-5", "claude-sonnet-5-5",
+    "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol",
+    "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol",
+    "o1", "o3", "o3-mini", "o4-mini",
+})
+# Reasoning models spend part of max_tokens thinking before writing; below this
+# budget gemini-2.5-pro returned an empty answer in the same check.
+REASONING_MODELS = FIXED_TEMPERATURE_MODELS | {"gemini-2.5-pro", "gemini-3.1-pro-preview"}
+REASONING_MIN_MAX_TOKENS = 4096
+
+
+def _apply_model_constraints(profile: dict) -> dict:
+    model_id = profile.get("model_id")
+    params = dict(profile.get("params", {}))
+    if model_id in FIXED_TEMPERATURE_MODELS:
+        params.pop("temperature", None)
+    if model_id in REASONING_MODELS:
+        params["max_tokens"] = max(int(params.get("max_tokens", 0) or 0), REASONING_MIN_MAX_TOKENS)
+    profile["params"] = params
+    return profile
+
+
 def _normalize_model_key(requested_model: Optional[str]) -> str:
     if requested_model in SELECTABLE_MODEL_KEYS:
+        return requested_model
+    # Catalogue choices are kept as such; access is checked in _chat_profile_for_user.
+    if isinstance(requested_model, str) and requested_model in CATALOG_MODELS_BY_KEY:
         return requested_model
     # Old Grok conversations remain stored, but new requests use the real
     # Gemini route instead of presenting that fallback as an xAI model.
@@ -2424,6 +2518,24 @@ def _chat_history_limit(user: dict) -> int:
 
 
 def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_stage: str = "advanced") -> dict:
+    """Resolve the model for a request: router family + quota stage, then the
+    catalogue model chosen by a Plus-level user, then per-model constraints."""
+    catalog = CATALOG_MODELS_BY_KEY.get(requested_model) if isinstance(requested_model, str) else None
+    if catalog and not _has_plus_capabilities(user):
+        # Downgraded plan: fall back to the router of the same family.
+        requested_model, catalog = catalog["family"], None
+    profile = _router_profile_for_user(user, catalog["family"] if catalog else requested_model, quota_stage)
+    if catalog:
+        profile["selection_key"] = catalog["key"]
+        # The chosen model is used at the advanced stage; when the quota moves
+        # the conversation to a lower stage, the family's lighter model applies.
+        if quota_stage == "advanced":
+            profile["provider"] = catalog["provider"]
+            profile["model_id"] = catalog["model_id"]
+    return _apply_model_constraints(profile)
+
+
+def _router_profile_for_user(user: dict, requested_model: Optional[str], quota_stage: str = "advanced") -> dict:
     """Resolve the multi-provider router and the quota stage for free/Mongo users."""
     selection_key = _normalize_model_key(requested_model)
     base = MODEL_PROFILES[selection_key]
@@ -2531,13 +2643,23 @@ def _resolved_model_public(
 
 
 def _model_options_public(user: dict) -> list[dict]:
-    return [
+    options = [
         {
             "key": key,
             "model": _resolved_model_public(user, key, "advanced"),
         }
         for key in SELECTABLE_MODEL_KEYS
     ]
+    if _has_plus_capabilities(user):
+        options.extend(
+            {
+                "key": key,
+                "group": PROVIDER_DISPLAY_NAMES.get(entry["provider"], entry["provider"]),
+                "model": _resolved_model_public(user, key, "advanced"),
+            }
+            for key, entry in CATALOG_MODELS_BY_KEY.items()
+        )
+    return options
 
 
 async def _active_model_for_conversation(
@@ -15986,10 +16108,15 @@ async def download_neuraco_installer(
     )
 
 
+# Plans no longer sold. Existing subscribers keep their entitlements; only new
+# checkouts are refused and the plan is hidden from the public list.
+RETIRED_PLANS = frozenset({"developer"})
+
+
 @api_router.get("/subscriptions/plans")
 async def get_subscription_plans():
-    """Get all subscription plans"""
-    return SUBSCRIPTION_PLANS
+    """Get the subscription plans on sale"""
+    return {key: plan for key, plan in SUBSCRIPTION_PLANS.items() if key not in RETIRED_PLANS}
 
 def _stripe_client():
     if not STRIPE_API_KEY:
@@ -16077,7 +16204,7 @@ async def _apply_subscription_checkout(session, transaction):
 
 @api_router.post("/subscriptions/checkout")
 async def create_checkout_session(request: SubscriptionRequest, user: dict = Depends(get_current_user)):
-    if request.plan not in SUBSCRIPTION_PLANS or request.plan == "free":
+    if request.plan not in SUBSCRIPTION_PLANS or request.plan == "free" or request.plan in RETIRED_PLANS:
         raise HTTPException(status_code=400, detail="Plan invalide")
     origin = request.origin_url.rstrip("/")
     allowed = {"https://neura-alnour.vercel.app"}
