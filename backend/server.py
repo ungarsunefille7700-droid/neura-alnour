@@ -870,7 +870,8 @@ SUBSCRIPTION_PLANS = {
     "pro": {
         "name": "Plus",
         "price_monthly": 22.0,
-        "price_yearly": 89.99,
+        # Yearly = 10 x monthly (2 months free), like every other paid plan.
+        "price_yearly": 219.99,
         "features": [
             "max_advanced_models",
             "plus_ai_quotas",
@@ -880,7 +881,7 @@ SUBSCRIPTION_PLANS = {
             "max_memory_context",
         ],
     },
-    "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 119.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
+    "developer": {"name": "Développeur", "price_monthly": 19.99, "price_yearly": 199.99, "features": ["api_access", "sdk", "webhooks", "dashboard", "analytics"]},
     "neura_plus": {
         "name": "Neura+",
         "price_monthly": 119.99,
@@ -8199,6 +8200,53 @@ async def get_qiblah_direction(latitude: float, longitude: float):
 
 # ============== NEARBY MOSQUES ==============
 
+async def _photon_mosque_elements(latitude: float, longitude: float, radius: int, headers: dict):
+    """Fallback source for nearby mosques: Photon (komoot), an OpenStreetMap
+    geocoder. Results are returned in the Overpass `elements` shape, or None
+    when Photon itself is unavailable. Name-based, so less exhaustive than
+    Overpass; places outside `radius` are dropped by the caller's distance
+    computation below."""
+    import math
+    lat_delta = radius / 111_320
+    lon_delta = radius / (111_320 * max(math.cos(math.radians(latitude)), 0.01))
+    bbox = f"{longitude - lon_delta},{latitude - lat_delta},{longitude + lon_delta},{latitude + lat_delta}"
+    elements = {}
+    succeeded = False
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+            responses = await asyncio.gather(*[
+                client.get("https://photon.komoot.io/api/", params={
+                    "q": term, "lat": latitude, "lon": longitude, "limit": 50,
+                    "bbox": bbox, "osm_tag": "amenity:place_of_worship",
+                })
+                for term in ("mosquée", "masjid")
+            ], return_exceptions=True)
+        for response in responses:
+            if isinstance(response, Exception) or response.status_code != 200:
+                logger.error(f"Mosques error (Photon fallback failed): {response}")
+                continue
+            succeeded = True
+            for feature in response.json().get("features", []):
+                coordinates = (feature.get("geometry") or {}).get("coordinates") or []
+                props = feature.get("properties") or {}
+                if len(coordinates) != 2:
+                    continue
+                elements[props.get("osm_id")] = {
+                    "id": props.get("osm_id"),
+                    "lat": coordinates[1],
+                    "lon": coordinates[0],
+                    "tags": {
+                        "name": props.get("name", "Mosquée"),
+                        "addr:street": " ".join(filter(None, [props.get("housenumber"), props.get("street")])),
+                        "addr:city": props.get("city", ""),
+                    },
+                }
+    except Exception as e:
+        logger.error(f"Mosques error (Photon fallback unexpected): {e}")
+        return None
+    return {"elements": list(elements.values())} if succeeded else None
+
+
 @api_router.get("/mosques/nearby")
 async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 5000):
     """Get nearby mosques using Overpass API (OpenStreetMap).
@@ -8209,8 +8257,12 @@ async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 50
     page) or an empty/unexpected payload, we log it and degrade gracefully
     by returning an empty list with HTTP 200.
     """
-    # Overpass API query for mosques (unchanged business logic)
-    overpass_url = "https://overpass-api.de/api/interpreter"
+    # Overpass API query for mosques (unchanged business logic).
+    # The main instance is often overloaded (HTTP 504): public mirrors follow.
+    overpass_urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    ]
     query = f"""
     [out:json][timeout:25];
     (
@@ -8221,36 +8273,48 @@ async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 50
     """
 
     try:
-        # 1. Network call: catch timeouts / connection errors -> []
         # Overpass / OSM usage policy requires a descriptive User-Agent; the
         # default httpx User-Agent is rejected by Overpass with HTTP 406.
         headers = {"User-Agent": "NEURA-AL-NOUR/1.0 (mosque-finder)"}
-        try:
-            async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
-                response = await client.post(overpass_url, data={"data": query})
-        except httpx.HTTPError as e:
-            logger.error(f"Mosques error (Overpass request failed): {e}")
-            return []
+        data = None
+        # Short per-instance timeout: an overloaded instance must not delay the fallbacks.
+        async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+            for overpass_url in overpass_urls:
+                # Any failure (timeout, non-200, HTML error page, bad shape)
+                # moves on to the next instance.
+                try:
+                    response = await client.post(overpass_url, data={"data": query})
+                except httpx.HTTPError as e:
+                    logger.error(f"Mosques error (Overpass {overpass_url} request failed): {e}")
+                    continue
+                if response.status_code != 200:
+                    logger.error(
+                        f"Mosques error (Overpass {overpass_url} HTTP {response.status_code}, "
+                        f"content-type={response.headers.get('content-type')})"
+                    )
+                    continue
+                try:
+                    payload = response.json()
+                except ValueError as e:
+                    logger.error(f"Mosques error (Overpass {overpass_url} returned non-JSON): {e}")
+                    continue
+                if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+                    logger.error(f"Mosques error (unexpected payload shape from {overpass_url})")
+                    continue
+                data = payload
+                break
 
-        # 2. Reject any non-200 response (e.g. 406, 429, 5xx) -> []
-        if response.status_code != 200:
-            logger.error(
-                f"Mosques error (Overpass HTTP {response.status_code}, "
-                f"content-type={response.headers.get('content-type')})"
+        if data is None:
+            # All Overpass instances can be down together: fall back to the
+            # Photon geocoder (same OpenStreetMap data, searched by name).
+            data = await _photon_mosque_elements(latitude, longitude, radius, headers)
+
+        if data is None:
+            # Every source failed: say so, rather than "no mosque found".
+            raise HTTPException(
+                status_code=503,
+                detail="Le service de cartographie est momentanément indisponible. Réessayez dans un instant.",
             )
-            return []
-
-        # 3. Parse JSON defensively (Overpass may return HTML or empty body) -> []
-        try:
-            data = response.json()
-        except ValueError as e:
-            logger.error(f"Mosques error (Overpass returned non-JSON): {e}")
-            return []
-
-        # 4. Validate payload shape -> []
-        if not isinstance(data, dict) or not isinstance(data.get("elements"), list):
-            logger.error("Mosques error (unexpected Overpass payload shape)")
-            return []
 
         mosques = []
         for element in data.get("elements", []):
@@ -8268,6 +8332,9 @@ async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 50
                 a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
                 c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
                 distance = R * c
+                if distance > radius:
+                    # Bounding-box fallback results can lie outside the circle.
+                    continue
 
                 tags = element.get("tags", {})
                 mosques.append({
@@ -8284,6 +8351,8 @@ async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 50
         mosques.sort(key=lambda x: x["distance"])
         return mosques[:20]  # Return max 20 mosques
 
+    except HTTPException:
+        raise
     except Exception as e:
         # Final safety net: never propagate a 500 to the client
         logger.error(f"Mosques error (unexpected): {e}")
@@ -8736,15 +8805,16 @@ async def get_surahs():
 async def get_surah(surah_number: int):
     """Get a specific surah with Arabic text and French translation"""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as http_client:
-            # Get Arabic text
-            arabic_url = f"http://api.alquran.cloud/v1/surah/{surah_number}"
-            arabic_response = await http_client.get(arabic_url)
+        if not 1 <= surah_number <= 114:
+            raise HTTPException(status_code=404, detail="Sourate introuvable")
+        # HTTPS directly: the API redirects http:// (301), which httpx does not
+        # follow by default and which made every surah fail with a 500.
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+            arabic_response, french_response = await asyncio.gather(
+                http_client.get(f"https://api.alquran.cloud/v1/surah/{surah_number}"),
+                http_client.get(f"https://api.alquran.cloud/v1/surah/{surah_number}/fr.hamidullah"),
+            )
             arabic_data = arabic_response.json()
-            
-            # Get French translation
-            french_url = f"http://api.alquran.cloud/v1/surah/{surah_number}/fr.hamidullah"
-            french_response = await http_client.get(french_url)
             french_data = french_response.json()
             
             if arabic_data.get("code") == 200 and french_data.get("code") == 200:
@@ -8767,6 +8837,8 @@ async def get_surah(surah_number: int):
                 }
             else:
                 raise HTTPException(status_code=500, detail="Erreur API Quran")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Quran error: {e}")
         raise HTTPException(status_code=500, detail="Impossible de récupérer la sourate")
@@ -9237,6 +9309,9 @@ QUIZ_QUESTIONS = [
 import random
 import json
 
+# Beyond this delay the quiz starts with the built-in question bank.
+QUIZ_GENERATION_TIMEOUT_SECONDS = 15
+
 @api_router.post("/quiz/start")
 async def start_quiz(category: Optional[str] = None):
     """Generate 10 new quiz questions using AI and start a quiz session"""
@@ -9287,8 +9362,11 @@ Règles:
             system_message="Tu es un générateur de quiz islamique. Tu retournes uniquement du JSON valide, sans markdown, sans commentaire."
         ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=4096, temperature=1.0)
         
-        response = await chat.send_message(UserMessage(text=prompt))
-        
+        response = await asyncio.wait_for(
+            chat.send_message(UserMessage(text=prompt)),
+            timeout=QUIZ_GENERATION_TIMEOUT_SECONDS,
+        )
+
         # Parse JSON from response - handle markdown fences and stray text
         text = response.strip()
         if text.startswith("```"):
@@ -9304,6 +9382,8 @@ Règles:
         
         if isinstance(parsed, list) and len(parsed) >= 1:
             questions = parsed[:10]
+    except asyncio.TimeoutError:
+        logger.warning("AI quiz generation timed out, using the built-in questions")
     except Exception as e:
         logger.error(f"AI quiz generation error: {e}")
     
