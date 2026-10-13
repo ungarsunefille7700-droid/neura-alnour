@@ -431,7 +431,27 @@ MODERATION_GUARD = (
     "baisser le regard (ghadd al-basar), la préservation de la chasteté, le mal que ces images font "
     "au cœur, et l'invitation à la pureté et au repentir.\n"
     "4. VARIER à chaque fois : ne répète JAMAIS un message identique en boucle. Change la "
-    "formulation, les angles et les mots d'une fois à l'autre, tout en gardant le fond.\n"
+    "formulation, les angles et les mots d'une fois à l'autre, tout en gardant le fond. Si tu as "
+    "déjà fait un rappel plus haut dans la conversation, n'en recopie aucune phrase : prends un "
+    "autre angle et une autre référence.\n"
+    "   INTERDIT : une réponse courte et générique du type « Je vous rappelle qu'il est important "
+    "de rester respectueux… Merci de votre compréhension ». Le rappel doit contenir au moins une "
+    "référence islamique ci-dessous, expliquée simplement et reliée à ce que la personne a dit.\n"
+    "   Références sûres (cite-les sans en modifier le sens, varie-les) :\n"
+    "   - Coran 17:53 : « Et dis à Mes serviteurs de dire ce qui est meilleur. »\n"
+    "   - Coran 49:11 : ne vous dénigrez pas et ne vous lancez pas de sobriquets.\n"
+    "   - Coran 50:18 : pas une parole n'est prononcée sans qu'un observateur ne l'enregistre.\n"
+    "   - Coran 41:34 : repousse le mal par ce qui est meilleur.\n"
+    "   - Coran 24:30-31 : baisser le regard et préserver sa chasteté.\n"
+    "   - Hadith (Bukhari, Muslim) : « Que celui qui croit en Allah et au Jour dernier dise du bien "
+    "ou se taise. »\n"
+    "   - Hadith (Tirmidhi) : le croyant n'est ni diffamateur, ni maudisseur, ni grossier, ni "
+    "obscène.\n"
+    "   - Hadith (Bukhari) : le musulman est celui dont les musulmans sont à l'abri de la langue "
+    "et de la main.\n"
+    "   - Hadith (Bukhari, Muslim) : la pudeur (al-hayâ') fait partie de la foi.\n"
+    "   - Hadith (Bukhari) : le serviteur prononce parfois une parole qui déplaît à Allah sans y "
+    "prêter attention, et elle le fait chuter.\n"
     "5. Rester exact : appuie-toi sur les principes islamiques bien connus ; n'invente jamais une "
     "citation, un hadith ou une référence précise dont tu n'es pas certain.\n"
     "6. Terminer avec douceur : invite la personne à reprendre une discussion saine et bénéfique.\n"
@@ -469,11 +489,27 @@ Règles importantes:
 2. Pour les questions islamiques, cite tes sources quand possible (Coran, Hadith)
 3. Rappelle que tu n'es pas une autorité religieuse - conseille de consulter un imam pour les questions complexes
 4. Réponds en français par défaut, mais adapte-toi à la langue de l'utilisateur
-5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
+5. Si on te manque de respect, applique la règle « MODÉRATION & RAPPEL ISLAMIQUE » ci-dessous : jamais un simple avertissement générique
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 7. Ne commence pas automatiquement chaque réponse par la basmala. Utilise-la seulement si le contexte religieux la rend pertinente.
 
 """
+
+
+def _undouble_answer(text):
+    """Return `text` once when it is exactly the same answer written twice
+    (assistant messages saved before the StreamDone fix)."""
+    if not isinstance(text, str) or len(text) < 40 or len(text) % 2:
+        return text
+    half = len(text) // 2
+    return text[:half] if text[:half] == text[half:] else text
+
+
+def _clean_history(messages):
+    for item in messages:
+        if item.get("role") == "assistant":
+            item["content"] = _undouble_answer(item.get("content"))
+    return messages
 
 
 def current_ai_context() -> str:
@@ -6152,6 +6188,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         item for item in previous_history
         if item.get("request_id") != request_record.get("request_id")
     ]
+    previous_history = _clean_history(previous_history)
 
     if quota_plan and message.image_base64:
         capture_result = await _accept_free_capture(
@@ -6273,7 +6310,7 @@ Règles importantes:
 2. Pour les questions islamiques, cite tes sources quand possible (Coran, Hadith)
 3. Rappelle que tu n'es pas une autorité religieuse - conseille de consulter un imam pour les questions complexes
 4. Réponds en français par défaut, mais adapte-toi à la langue de l'utilisateur
-5. Si on te manque de respect, avertis poliment une fois, puis refuse de continuer
+5. Si on te manque de respect, applique la règle « MODÉRATION & RAPPEL ISLAMIQUE » ci-dessous : jamais un simple avertissement générique
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 7. Ne commence pas automatiquement chaque réponse par la basmala. Utilise-la seulement si le contexte religieux la rend pertinente.
 
@@ -6630,6 +6667,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 item for item in previous_history
                 if item.get("request_id") != request_record.get("request_id")
             ]
+            previous_history = _clean_history(previous_history)
 
             direct_answer = (
                 None
@@ -6774,6 +6812,10 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             full_text = []
             async for event in chat.stream_message(UserMessage(text=user_text)):
+                # StreamDone repeats the complete answer in `content`: only the
+                # TextDelta pieces are new text (same handling as NeuraCo).
+                if event.__class__.__name__ == "StreamDone":
+                    continue
                 delta = getattr(event, "content", None)
                 if delta:
                     full_text.append(delta)
@@ -7338,8 +7380,8 @@ async def get_conversation_messages(conversation_id: str, user: dict = Depends(g
         {"conversation_id": conversation_id},
         {"_id": 0}
     ).sort("created_at", 1).to_list(1000)
-    
-    return messages
+
+    return _clean_history(messages)
 
 
 @api_router.get("/chat/conversations/{conversation_id}/quota")
