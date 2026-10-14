@@ -89,6 +89,11 @@ async def main():
     parser.add_argument("--load", type=int, default=0, help="simultaneous requests for the load test")
     args = parser.parse_args()
     account, token = os.environ.get("CLOUDFLARE_ACCOUNT_ID"), os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not account or not token:  # fall back to backend/.env written by configurer_cloudflare.py
+        from dotenv import dotenv_values
+        saved = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
+        account = account or saved.get("CLOUDFLARE_ACCOUNT_ID")
+        token = token or saved.get("CLOUDFLARE_API_TOKEN")
     if not account or not token:
         sys.exit("Définis CLOUDFLARE_ACCOUNT_ID et CLOUDFLARE_API_TOKEN (voir DEPLOIEMENT_CLOUDFLARE.md).")
     spend = Spend(args.max_neurons)
