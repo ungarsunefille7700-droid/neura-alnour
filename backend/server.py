@@ -13298,6 +13298,65 @@ class VoiceSpeakRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4096)
     voice: str = Field(default="nova", max_length=20)
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    # Language being learned (tutor): code such as "rif" or "ary", for its native accent.
+    language: Optional[str] = Field(default=None, max_length=12)
+
+
+# Native accent per language (gpt-4o-mini-tts follows spoken instructions).
+VOICE_ACCENTS = {
+    "fr": "un accent français de France, naturel",
+    "ar": "une prononciation arabe littéraire (fusha) claire, comme un récitant ou un professeur arabe",
+    "ar-MA": "une prononciation arabe avec un accent marocain",
+    "ary": "un accent marocain natif de Casablanca (darija), avec les sons arabes bien prononcés (ḥ, ʿ, q, ġ)",
+    "rif": "un accent rifain natif du nord du Maroc (Nador, Al Hoceima), comme un locuteur tarifit de naissance",
+    "shi": "un accent chleuh natif du Souss (Agadir), comme un locuteur tachelhit de naissance",
+    "zgh": "un accent amazigh marocain natif",
+    "tzm": "un accent amazigh natif du Moyen Atlas",
+    "ber": "un accent amazigh natif d'Afrique du Nord",
+    "arq": "un accent algérien natif d'Alger (darija algérienne)",
+    "ber-DZ": "un accent amazigh algérien natif",
+    "kab": "un accent kabyle natif de Tizi Ouzou",
+    "shy": "un accent chaoui natif des Aurès",
+    "aeb": "un accent tunisien natif de Tunis (derja)",
+    "ar-TN": "une prononciation arabe avec un accent tunisien",
+    "en": "un accent anglais natif",
+    "es": "un accent espagnol natif d'Espagne",
+    "de": "un accent allemand natif",
+    "it": "un accent italien natif",
+    "pt": "un accent portugais natif",
+    "tr": "un accent turc natif d'Istanbul",
+    "ur": "un accent ourdou natif",
+    "fa": "un accent persan natif de Téhéran",
+    "id": "un accent indonésien natif",
+    "ms": "un accent malais natif",
+    "ru": "un accent russe natif",
+    "zh": "un accent mandarin natif",
+    "ja": "un accent japonais natif",
+    "ko": "un accent coréen natif",
+    "hi": "un accent hindi natif",
+    "bn": "un accent bengali natif",
+    "nl": "un accent néerlandais natif",
+    "wo": "un accent wolof natif de Dakar",
+    "sw": "un accent swahili natif",
+}
+
+
+def _voice_instructions(language: Optional[str]) -> str:
+    """How to pronounce: native accent for each language, never an English accent on others."""
+    base = (
+        "Parle avec une voix chaleureuse, posée et bienveillante. Prononce chaque phrase avec l'accent "
+        "natif de SA langue : le français avec un accent français, l'arabe et la darija avec un accent "
+        "arabe ou maghrébin, l'amazigh avec un accent amazigh, etc. N'applique jamais un accent anglais "
+        "ou américain à une langue qui n'est pas l'anglais. Les mots religieux (Allah, salat, inchallah, "
+        "hamdoulillah) se prononcent à l'arabe."
+    )
+    accent = VOICE_ACCENTS.get((language or "").strip())
+    if accent:
+        base += (
+            f" La langue apprise ici se prononce avec {accent} : les phrases et mots dans cette langue doivent "
+            "sonner exactement comme un locuteur natif ; les explications en français gardent un accent français."
+        )
+    return base
 
 
 class VoiceTranscribeRequest(BaseModel):
@@ -13342,12 +13401,31 @@ async def _refund_voice_quota(usage_id: Optional[str], field: str, amount: int) 
         await db.voice_usage.update_one({"_id": usage_id, field: {"$gte": amount}}, {"$inc": {field: -amount}})
 
 
-def _speak_sync(text: str, voice: str, speed: float) -> bytes:
-    from emergentintegrations.llm.openai.text_to_speech import OpenAITextToSpeech
-    # The library's call is blocking: it runs in a worker thread with its own loop.
-    return asyncio.run(OpenAITextToSpeech(api_key=AI_LLM_KEY).generate_speech(
-        text=text, model="tts-1", voice=voice, speed=speed,
-    ))
+VOICE_TTS_MODEL = os.environ.get("VOICE_TTS_MODEL", "gpt-4o-mini-tts")
+
+
+def _speak_sync(text: str, voice: str, speed: float, instructions: str) -> bytes:
+    """Blocking call (runs in a worker thread). gpt-4o-mini-tts follows the accent
+    instructions; tts-1 is the fallback if it is unavailable."""
+    from litellm import speech
+    params = {
+        "model": f"openai/{VOICE_TTS_MODEL}", "input": text, "voice": voice,
+        "api_key": AI_LLM_KEY, "instructions": instructions,
+    }
+    if speed != 1.0:
+        params["speed"] = speed
+    if str(AI_LLM_KEY or "").startswith("sk-emergent-"):
+        params["api_base"] = os.environ.get("INTEGRATION_PROXY_URL", "https://integrations.emergentagent.com") + "/llm"
+        params["custom_llm_provider"] = "openai"
+    try:
+        response = speech(**params)
+    except Exception as exc:
+        logger.warning("Accent voice unavailable, falling back to tts-1: %s", str(exc)[:150])
+        from emergentintegrations.llm.openai.text_to_speech import OpenAITextToSpeech
+        return asyncio.run(OpenAITextToSpeech(api_key=AI_LLM_KEY).generate_speech(
+            text=text, model="tts-1", voice=voice, speed=speed,
+        ))
+    return response.content if hasattr(response, "content") else response.read()
 
 
 @api_router.get("/voice/options")
@@ -13364,7 +13442,9 @@ async def voice_speak(request: VoiceSpeakRequest, user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail="Texte vide.")
     usage_id = await _consume_voice_quota(user, "chars", len(text))
     try:
-        audio = await asyncio.to_thread(_speak_sync, text, request.voice, request.speed)
+        audio = await asyncio.to_thread(
+            _speak_sync, text, request.voice, request.speed, _voice_instructions(request.language)
+        )
     except Exception as exc:
         await _refund_voice_quota(usage_id, "chars", len(text))
         logger.error("Voice speak error: %s", str(exc)[:200])
