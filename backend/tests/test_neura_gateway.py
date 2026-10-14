@@ -94,6 +94,27 @@ def test_streaming_is_parsed_and_usage_kept():
     assert done.prompt_tokens == 500 and done.completion_tokens == 4
 
 
+def test_numbers_streamed_as_json_numbers_are_kept_as_text():
+    # Seen live on @cf/qwen/qwen3-30b-a3b-fp8: {"delta": {"content": 5}} for "5 pillars".
+    def numeric(request):
+        lines = ["data: " + json.dumps({"choices": [{"delta": {"content": piece}}]}) for piece in ("Les ", 5, " piliers, ", 0, " doute")]
+        lines += ["data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 5}}), "data: [DONE]"]
+        return httpx.Response(200, text="\n\n".join(lines) + "\n\n")
+
+    async def collect():
+        provider = CloudflareProvider("acc", "tok", MODEL, transport=httpx.MockTransport(numeric))
+        return [e async for e in provider.stream_chat([{"role": "user", "content": "x"}])]
+
+    events = run(collect())
+    assert events[-1][1].text == "Les 5 piliers, 0 doute"
+
+    def numeric_full(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": 42}}]})
+
+    provider = CloudflareProvider("acc", "tok", MODEL, transport=httpx.MockTransport(numeric_full))
+    assert run(provider.chat([{"role": "user", "content": "x"}])).text == "42"
+
+
 def test_provider_errors_are_classified():
     exhausted = FakeCloudflare(status=429, error_body='{"errors":[{"message":"you have used up your daily free allocation of 10,000 neurons"}]}')
     with pytest.raises(ProviderError) as info:

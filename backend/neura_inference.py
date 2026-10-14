@@ -47,6 +47,16 @@ CLOUDFLARE_TTS_MODEL = "@cf/myshell-ai/melotts"
 CLOUDFLARE_TTS_LANGUAGES = {"en", "fr"}
 
 
+def as_text(value) -> str:
+    """Cloudflare sometimes streams a number token (e.g. the "5" of "5 pillars") as a JSON
+    number instead of a string; keep it as text. None and other types give ''."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
 def estimate_tokens(text: str) -> int:
     """Rough multilingual estimate (≈ 3.5 characters per token), never zero."""
     return max(1, math.ceil(len(text or "") / 3.5))
@@ -184,7 +194,7 @@ class OpenAICompatibleProvider(InferenceProvider):
         if "choices" not in data and isinstance(data.get("result"), dict):
             data = data["result"]
         choices = data.get("choices") or [{}]
-        text = ((choices[0] or {}).get("message") or {}).get("content") or ""
+        text = as_text(((choices[0] or {}).get("message") or {}).get("content"))
         return self._result(model, text, data.get("usage"), messages, started)
 
     async def stream_chat(self, messages, *, model=None, max_tokens=700, temperature=0.6):
@@ -217,14 +227,15 @@ class OpenAICompatibleProvider(InferenceProvider):
                             usage = chunk["usage"]
                         for choice in chunk.get("choices") or []:
                             # reasoning_content (thinking) is never shown to the user.
-                            delta = (choice.get("delta") or {}).get("content")
+                            delta = as_text((choice.get("delta") or {}).get("content"))
                             if delta:
                                 pieces.append(delta)
                                 yield ("delta", delta)
                         # Native Workers AI stream format: {"response": "..."}.
-                        if not chunk.get("choices") and isinstance(chunk.get("response"), str) and chunk["response"]:
-                            pieces.append(chunk["response"])
-                            yield ("delta", chunk["response"])
+                        native = as_text(chunk.get("response"))
+                        if not chunk.get("choices") and native:
+                            pieces.append(native)
+                            yield ("delta", native)
         except httpx.HTTPError as exc:
             raise ProviderError(f"Provider unreachable: {type(exc).__name__}", "unavailable") from exc
         yield ("done", self._result(model, "".join(pieces), usage, messages, started))
