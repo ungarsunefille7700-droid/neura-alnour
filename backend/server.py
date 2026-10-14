@@ -1,6 +1,7 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
+import io
 import json
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -13265,6 +13266,140 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ============== VOICE (text-to-speech + transcription for calls) ==============
+
+VOICE_CHOICES = {
+    "nova": {"label": "Nova", "gender": "female"},
+    "shimmer": {"label": "Shimmer", "gender": "female"},
+    "coral": {"label": "Coral", "gender": "female"},
+    "sage": {"label": "Sage", "gender": "female"},
+    "onyx": {"label": "Onyx", "gender": "male"},
+    "echo": {"label": "Echo", "gender": "male"},
+    "ash": {"label": "Ash", "gender": "male"},
+    "fable": {"label": "Fable", "gender": "male"},
+    "alloy": {"label": "Alloy", "gender": "neutral"},
+}
+VOICE_DAILY_LIMITS = {
+    # characters read aloud per day / transcriptions per day
+    "chars": {"free": 15000, "paid": 150000},
+    "transcriptions": {"free": 150, "paid": 1500},
+}
+VOICE_AUDIO_FORMATS = {
+    "audio/webm": "webm", "video/webm": "webm", "audio/mp4": "mp4", "audio/m4a": "m4a",
+    "audio/x-m4a": "m4a", "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav",
+    "audio/x-wav": "wav",
+}
+VOICE_MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+
+class VoiceSpeakRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4096)
+    voice: str = Field(default="nova", max_length=20)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+
+
+class VoiceTranscribeRequest(BaseModel):
+    audio_base64: str = Field(..., min_length=16, max_length=14_000_000)
+    mime_type: str = Field(default="audio/webm", max_length=80)
+    language: Optional[str] = Field(default=None, max_length=8)
+
+
+async def _consume_voice_quota(user: dict, field: str, amount: int) -> Optional[str]:
+    """Atomically counts voice usage for the day; returns the usage id to refund on failure."""
+    if _dev_is_unlimited(user):
+        return None
+    tier = "free" if user.get("subscription", "free") == "free" else "paid"
+    limit = VOICE_DAILY_LIMITS[field][tier]
+    day = datetime.now(timezone.utc).date().isoformat()
+    usage_id = f"{user['id']}:{day}"
+    try:
+        await db.voice_usage.update_one(
+            {"_id": usage_id},
+            {"$setOnInsert": {"user_id": user["id"], "day": day, "chars": 0, "transcriptions": 0}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass
+    counted = await db.voice_usage.find_one_and_update(
+        {"_id": usage_id, field: {"$lte": limit - amount}},
+        {"$inc": {field: amount}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not counted:
+        raise HTTPException(status_code=429, detail={
+            "code": "voice_quota",
+            "message": "Limite vocale du jour atteinte. Réessaie demain ou passe à une offre supérieure.",
+        })
+    return usage_id
+
+
+async def _refund_voice_quota(usage_id: Optional[str], field: str, amount: int) -> None:
+    if usage_id:
+        await db.voice_usage.update_one({"_id": usage_id, field: {"$gte": amount}}, {"$inc": {field: -amount}})
+
+
+def _speak_sync(text: str, voice: str, speed: float) -> bytes:
+    from emergentintegrations.llm.openai.text_to_speech import OpenAITextToSpeech
+    # The library's call is blocking: it runs in a worker thread with its own loop.
+    return asyncio.run(OpenAITextToSpeech(api_key=AI_LLM_KEY).generate_speech(
+        text=text, model="tts-1", voice=voice, speed=speed,
+    ))
+
+
+@api_router.get("/voice/options")
+async def voice_options():
+    return [{"id": key, **value} for key, value in VOICE_CHOICES.items()]
+
+
+@api_router.post("/voice/speak")
+async def voice_speak(request: VoiceSpeakRequest, user: dict = Depends(get_current_user)):
+    if request.voice not in VOICE_CHOICES:
+        raise HTTPException(status_code=400, detail="Voix inconnue.")
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Texte vide.")
+    usage_id = await _consume_voice_quota(user, "chars", len(text))
+    try:
+        audio = await asyncio.to_thread(_speak_sync, text, request.voice, request.speed)
+    except Exception as exc:
+        await _refund_voice_quota(usage_id, "chars", len(text))
+        logger.error("Voice speak error: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="Voix temporairement indisponible. Réessaie.")
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
+@api_router.post("/voice/transcribe")
+async def voice_transcribe(request: VoiceTranscribeRequest, user: dict = Depends(get_current_user)):
+    from emergentintegrations.llm.openai.speech_to_text import OpenAISpeechToText
+
+    extension = VOICE_AUDIO_FORMATS.get(request.mime_type.split(";")[0].strip().lower())
+    if not extension:
+        raise HTTPException(status_code=400, detail="Format audio non pris en charge.")
+    try:
+        audio = base64.b64decode(request.audio_base64, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Audio invalide.")
+    if not audio or len(audio) > VOICE_MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="Audio vide ou trop long.")
+    language = (request.language or "").strip().lower()
+    language = language if re.fullmatch(r"[a-z]{2}", language) else None
+    usage_id = await _consume_voice_quota(user, "transcriptions", 1)
+    try:
+        upload = io.BytesIO(audio)
+        upload.name = f"speech.{extension}"
+        result = await OpenAISpeechToText(api_key=AI_LLM_KEY).transcribe(
+            file=upload, model="whisper-1", response_format="json", language=language,
+        )
+    except Exception as exc:
+        await _refund_voice_quota(usage_id, "transcriptions", 1)
+        logger.error("Voice transcribe error: %s", str(exc)[:200])
+        raise HTTPException(status_code=503, detail="Transcription temporairement indisponible. Réessaie.")
+    text = getattr(result, "text", None)
+    if text is None and isinstance(result, dict):
+        text = result.get("text")
+    return {"text": (text or "").strip()}
 
 
 @api_router.get("/language-tutor/sessions")
