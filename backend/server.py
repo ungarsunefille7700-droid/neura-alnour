@@ -525,6 +525,55 @@ def _email_query(email: str) -> dict:
     return {"email": {"$regex": "^" + re.escape(str(email or "").strip()) + "$", "$options": "i"}}
 
 
+def _reply_language_instruction(interface_language: Optional[str]) -> str:
+    """Answer in the language the user writes in; the interface language is only the fallback."""
+    fallback = interface_language or "French"
+    return (
+        "\n\nLANGUE : réponds dans la langue (et l'écriture) du dernier message de l'utilisateur, "
+        "quelle qu'elle soit : arabe, darija, tarifit, kabyle, anglais, espagnol, turc, etc. "
+        "S'il écrit en darija ou en amazigh avec l'alphabet latin, réponds de la même façon. "
+        "S'il demande explicitement une langue (« parle anglais »), utilise-la jusqu'à nouvel ordre. "
+        f"Si la langue du message est ambiguë (un seul mot, « ok », emoji), réponds en {fallback}, "
+        "la langue de son interface."
+    )
+
+
+def _language_tutor_system(lang: str, level: str, voice: bool) -> str:
+    voice_instruction = (
+        "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
+        "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
+        "clarification au lieu de corriger une erreur probablement créée par la transcription. "
+        "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
+        "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
+        if voice else "Le message a été écrit par l'élève.\n"
+    )
+    return (
+        "Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
+        f"qui enseigne le **{lang}** à un élève de niveau **{level}**.\n"
+        f"- Les exemples, phrases à pratiquer et exercices sont en {lang} (immersion).\n"
+        "- Les EXPLICATIONS se font dans la langue que l'élève utilise pour t'écrire (français, arabe, "
+        "anglais, espagnol…). S'il demande « parle français » (ou une autre langue), explique "
+        f"immédiatement dans cette langue, tout en continuant à lui enseigner le {lang}.\n"
+        "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de "
+        "formulation. Montre la version correcte, puis explique brièvement pourquoi.\n"
+        f"- {voice_instruction}"
+        "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
+        "- Pour une langue surtout orale (darija, tarifit, tachelhit, kabyle…), écris en transcription "
+        "latine simple (avec l'écriture arabe ou tifinagh si utile), signale les variantes régionales "
+        "et ne mélange pas avec une langue voisine (le tarifit n'est pas le kabyle). Si tu n'es pas sûr "
+        "d'un mot, dis-le honnêtement plutôt que d'inventer.\n"
+        f"- Si l'élève demande à apprendre une AUTRE langue que le {lang}, ne réinterprète pas sa "
+        "demande : dis-lui que c'est possible et qu'il suffit de choisir cette langue dans le menu "
+        "« Langue » en haut de la page, ou d'écrire « je veux apprendre le … ».\n"
+        "- Adapte la difficulté au niveau (débutant = phrases simples et plus d'explications ; avancé = "
+        f"presque tout en {lang}).\n"
+        "- Réponds aux demandes : « corrige-moi », « donne-moi des exercices », « fais-moi un quiz », "
+        "« explique cette phrase », « fais-moi parler davantage ».\n"
+        "- Garde la conversation VIVANTE : termine souvent par une petite question pour faire parler "
+        "l'élève. Sois encourageant et concret. Reste respectueux (application à vocation islamique)."
+    )
+
+
 def current_ai_context() -> str:
     """Build request-time context so long-running workers never keep a stale date."""
     now, timezone_label = current_server_time()
@@ -6605,11 +6654,7 @@ Règles importantes:
             
                 # Apply the active language instruction to the vision system prompt as well.
                 vision_system = system_message + MODERATION_GUARD + IDENTITY_GUARD
-                if message.lang:
-                    vision_system += (
-                        f"\n\nLANGUE : réponds toujours en {message.lang}, "
-                        "quelle que soit la langue de la question."
-                    )
+                vision_system += _reply_language_instruction(message.lang)
                 # Preserve the existing Gemini vision route; text routing is separate.
                 chat = LlmChat(
                     api_key=AI_LLM_KEY,
@@ -6641,11 +6686,7 @@ Règles importantes:
                 routed_profile = profile
                 routed_stage = text_reservation["stage"]
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
-                if message.lang:
-                    persona_system += (
-                        f"\n\nLANGUE : réponds toujours en {message.lang}, "
-                        "quelle que soit la langue de la question."
-                    )
+                persona_system += _reply_language_instruction(message.lang)
                 # Build the conversation history as initial_messages so the model
                 # receives the full context in a SINGLE request. (Previously the
                 # history was replayed by issuing one blocking LLM call per past
@@ -7022,11 +7063,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 system_prompt += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
             elif memory_result:
                 system_prompt += "\n\nConfirme brievement que cette preference a ete memorisee, sans en faire trop."
-            if message.lang:
-                system_prompt += (
-                    f"\n\nLANGUE : réponds toujours en {message.lang}, "
-                    "quelle que soit la langue de la question."
-                )
+            system_prompt += _reply_language_instruction(message.lang)
 
             # Optional web search (real phase events)
             sources = []
@@ -7321,8 +7358,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 "Tu peux proposer des fichiers complets et leurs chemins, mais ne prétends jamais "
                 "avoir écrit, exécuté ou déployé un fichier si aucun outil ne l'a réellement fait."
             )
-            if message.lang:
-                system_prompt += f"\n\nLANGUE : réponds toujours en {message.lang}."
+            system_prompt += _reply_language_instruction(message.lang)
             if project_files:
                 system_prompt += "\n\n=== FICHIERS REELS DU WORKSPACE UTILISATEUR ==="
                 for item in project_files:
@@ -13078,31 +13114,7 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     session_id = message.session_id or str(uuid.uuid4())
     level = message.level or "débutant"
     lang = message.language or "English"
-    voice_instruction = (
-        "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
-        "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
-        "clarification au lieu de corriger une erreur probablement créée par la transcription. "
-        "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
-        "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
-        if message.voice else "Le message a été écrit par l'élève.\n"
-    )
-
-    system = (
-        f"Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
-        f"qui enseigne le **{lang}** à un élève de niveau **{level}**.\n"
-        f"- Parle PRINCIPALEMENT en {lang} (immersion), mais explique/aide en français quand l'élève bloque "
-        "ou ne comprend pas (surtout pour les débutants).\n"
-        "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de formulation. "
-        "Montre la version correcte, puis explique brièvement pourquoi.\n"
-        f"- {voice_instruction}"
-        "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
-        "- Adapte la difficulté au niveau (débutant = phrases simples + plus de français ; avancé = "
-        f"presque tout en {lang}).\n"
-        "- Réponds aux demandes : « corrige-moi », « donne-moi des exercices », « fais-moi un quiz », "
-        "« explique cette phrase », « fais-moi parler davantage ».\n"
-        "- Garde la conversation VIVANTE : termine souvent par une petite question pour faire parler l'élève. "
-        "Sois encourageant et concret. Reste respectueux (application à vocation islamique)."
-    )
+    system = _language_tutor_system(lang, level, bool(message.voice))
     system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
     history = await _latest_chronological(db.lang_messages.find(
@@ -13167,27 +13179,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         session_id = message.session_id or str(uuid.uuid4())
         level = message.level or "débutant"
         lang = message.language or "English"
-        voice_instruction = (
-            "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
-            "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
-            "clarification au lieu de corriger une erreur probablement créée par la transcription. "
-            "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
-            "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
-            if message.voice else "Le message a été écrit par l'élève.\n"
-        )
-        system = (
-            "Tu es un PROFESSEUR PARTICULIER de langue, patient, bienveillant et motivant, "
-            f"qui enseigne le **{lang}** à un élève de niveau **{level}**.\n"
-            f"- Parle PRINCIPALEMENT en {lang} (immersion), mais explique/aide en français quand "
-            "l'élève bloque ou ne comprend pas (surtout pour les débutants).\n"
-            "- Corrige avec douceur ses fautes de grammaire, de conjugaison, de vocabulaire et de "
-            "formulation. Montre la version correcte, puis explique brièvement pourquoi.\n"
-            f"- {voice_instruction}"
-            "- Enseigne des EXPRESSIONS de la vraie vie, pas des traductions mot à mot.\n"
-            "- Adapte la difficulté au niveau et garde la conversation vivante.\n"
-            "- Réponds aux demandes de correction, exercices, quiz et explications.\n"
-            "- Termine souvent par une petite question. Reste respectueux et concret."
-        )
+        system = _language_tutor_system(lang, level, bool(message.voice))
         system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
         try:
