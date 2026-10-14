@@ -38,7 +38,7 @@ import struct
 import unicodedata
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 import neura_engine
-from neura_engine import current_ai_subject, user_facing_ai_error
+from neura_engine import current_ai_subject, looks_like_code_request, user_facing_ai_error
 from neura_gateway import create_gateway_routers
 
 ROOT_DIR = Path(__file__).parent
@@ -527,6 +527,19 @@ def _email_query(email: str) -> dict:
     """Case-insensitive exact e-mail match: accounts created before e-mails were
     normalised may be stored with capitals."""
     return {"email": {"$regex": "^" + re.escape(str(email or "").strip()) + "$", "$options": "i"}}
+
+
+CODE_DELIVERY_GUARD = (
+    "\n\nFICHIERS DE CODE ET ZIP : pour CHAQUE fichier de code, écris une ligne "
+    "« Fichier: chemin/exact.ext » juste avant son bloc de code (```langage). L'application "
+    "NEURA AL-NOUR rassemble automatiquement ces fichiers dans une archive .zip téléchargeable "
+    "(bouton « Télécharger le projet (.zip) » sous ta réponse) : tu PEUX donc livrer un projet en "
+    "zip — ne dis jamais que tu ne peux pas créer de fichier zip. Écris du code COMPLET, exécutable "
+    "et testé mentalement : pas de « ... », pas de parties à compléter, gestion des erreurs, noms "
+    "clairs. Pour un projet, inclus aussi README.md (installation et lancement) et le fichier de "
+    "dépendances (requirements.txt, package.json…) seulement s'il est utile (aucun pour un site statique). "
+    "N'écris jamais de ligne « Fichier: » pour l'archive .zip elle-même : l'application la crée."
+)
 
 
 VOICE_REPLY_GUARD = (
@@ -6717,6 +6730,8 @@ Règles importantes:
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
                 if message.voice:
                     persona_system += VOICE_REPLY_GUARD
+                elif looks_like_code_request(message.content):
+                    persona_system += CODE_DELIVERY_GUARD
                 persona_system += _reply_language_instruction(message.lang)
                 # Build the conversation history as initial_messages so the model
                 # receives the full context in a SINGLE request. (Previously the
@@ -7116,6 +7131,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 system_prompt += web_results_context(sources)
             if message.voice:
                 system_prompt += VOICE_REPLY_GUARD
+            elif looks_like_code_request(message.content):
+                system_prompt += CODE_DELIVERY_GUARD
 
             # initial_messages must include the system prompt first (the library does NOT
             # auto-add it when initial_messages is provided).
@@ -12382,7 +12399,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         {"_id": 0},
     ), tier["memory_turns"])
 
-    system_prompt = _build_dev_system_prompt(tier_name) + current_ai_context()
+    system_prompt = _build_dev_system_prompt(tier_name) + CODE_DELIVERY_GUARD + current_ai_context()
     # Expert role (Neura+/Ultra only) — adopt a senior specialist persona.
     if message.role in DEV_ROLES and tier_name in ("plus", "ultra"):
         system_prompt += (

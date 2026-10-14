@@ -313,6 +313,30 @@ def test_llmchat_uses_the_engine_with_the_app_history(monkeypatch):
     assert run(neura_engine.get_runtime().budget.snapshot({"kind": "user", "id": "u9", "plan": "paid"}))["subject"]["requests"] == 2
 
 
+def test_programming_requests_use_the_code_model_with_room_for_whole_files():
+    fake = FakeCloudflare(answer="Fichier: app.py\n```python\nprint('salam')\n```")
+    runtime_with(fake, {"NEURA_ENGINE_CODE_MODEL": "@cf/zai-org/glm-4.7-flash"})
+    chat = LlmChat(api_key="k", session_id="neura_stream_1", system_message="Tu es Neura.") \
+        .with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=600)
+    run(chat.send_message(UserMessage(text="Crée-moi un script Python qui affiche salam, dans un zip")))
+    run(chat.send_message(UserMessage(text="Quelles sont les conditions de la prière ?")))
+    dev = LlmChat(api_key="k", session_id="dev_42", system_message="Tu es Neura Dev.")
+    run(dev.send_message(UserMessage(text="Et maintenant ?")))
+    code, religion, workspace = (body for _, body, _ in fake.requests)
+    assert code["model"] == "@cf/zai-org/glm-4.7-flash" and code["max_tokens"] == 4096
+    assert religion["model"] == MODEL and religion["max_tokens"] == 600
+    assert workspace["model"] == "@cf/zai-org/glm-4.7-flash"
+
+
+def test_code_detection():
+    from neura_engine import looks_like_code_request
+    for text in ("tu sais faire du code puis les mettre dans un zip ?", "Crée-moi un site web", "corrige ce bug",
+                 "```js\nlet a\n```", "une API FastAPI"):
+        assert looks_like_code_request(text), text
+    for text in ("Quelles sont les conditions de la prière ?", "Explique la sourate Al-Fatiha", "Salam, ça va ?"):
+        assert not looks_like_code_request(text), text
+
+
 def test_llmchat_keeps_the_legacy_path_when_no_engine_is_configured(monkeypatch):
     neura_engine.configure(fresh_db(), None, {}, from_env=False)
     calls = []

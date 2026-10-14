@@ -18,6 +18,8 @@ import contextvars
 import hashlib
 import logging
 import os
+import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -48,6 +50,25 @@ current_ai_subject: contextvars.ContextVar[Optional[dict]] = contextvars.Context
 )
 
 QUOTA_PREFIX = "NEURA_QUOTA:"
+
+# A request about programming: it goes to the code model with room for whole files.
+_CODE_WORDS = re.compile(
+    r"\b(code|coder|codes|script|scripts|programme|programmer|fonction|function|classe|class|api|bug|debug|"
+    r"erreur de compilation|compile|traceback|stack trace|python|javascript|typescript|java|kotlin|swift|php|"
+    r"html|css|sql|react|vue|angular|node|nodejs|fastapi|django|flask|express|laravel|lua|fivem|c\+\+|c#|"
+    r"rust|golang|bash|powershell|regex|json|yaml|dockerfile|docker|git|zip|repo|frontend|backend|"
+    r"site web|application web|appli|composant|component|algorithme|refactor\w*|developpe\w*)\b"
+)
+
+
+def looks_like_code_request(text: str) -> bool:
+    if not text:
+        return False
+    if "```" in text:
+        return True
+    plain = unicodedata.normalize("NFKD", text)
+    plain = "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
+    return bool(_CODE_WORDS.search(plain))
 
 
 class EngineRefused(ChatError):
@@ -121,6 +142,10 @@ class NeuraRuntime:
         self.db = db
         self.provider = provider
         self.model = (provider.default_model if provider else "") or env.get("NEURA_ENGINE_MODEL", "")
+        # Measured on Workers AI (programs run against tests): GLM-4.7-flash passed 3/3 for the
+        # lowest cost; empty = use the main model for code too.
+        self.code_model = (env.get("NEURA_ENGINE_CODE_MODEL", "@cf/zai-org/glm-4.7-flash") or "").strip() or self.model
+        self.code_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_CODE_MAX_OUTPUT_TOKENS", 4096))
         self.public_model = env.get("NEURA_PUBLIC_MODEL_NAME", "neura-al-noor")
         self.legacy_allowed = env.get("NEURA_LEGACY_AI", "on").strip().lower() != "off"
         self.max_output_tokens = int(_env_float(env, "NEURA_ENGINE_MAX_OUTPUT_TOKENS", 700))
@@ -167,6 +192,8 @@ class NeuraRuntime:
         return {
             "provider": self.provider.name if self.provider else "emergent",
             "model": self.model or None,
+            "code_model": self.code_model or None,
+            "code_max_output_tokens": self.code_max_output_tokens,
             "public_model": self.public_model,
             "legacy_ai": self.legacy_allowed,
             "max_output_tokens": self.max_output_tokens,
@@ -193,14 +220,14 @@ class NeuraRuntime:
             max_input_tokens=self.max_input_tokens,
         )
 
-    def _cache_key(self, messages: List[dict]) -> Optional[str]:
+    def _cache_key(self, messages: List[dict], model: Optional[str] = None) -> Optional[str]:
         # Only first questions (system + one user message) are cacheable: their answer
         # does not depend on a conversation. The system prompt is part of the key, so
         # personal context (memory, name) never leaks between users.
         if not self.cache_enabled or len(messages) != 2 or messages[-1]["role"] != "user":
             return None
         question = " ".join(messages[-1]["content"].lower().split())
-        raw = f"{self.model}\n{messages[0]['content']}\n{question}"
+        raw = f"{model or self.model}\n{messages[0]['content']}\n{question}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     async def _cache_get(self, key):
@@ -222,7 +249,8 @@ class NeuraRuntime:
                 {"_id": key}, {"$set": {"text": text, "created_at": datetime.now(timezone.utc)}}, upsert=True
             )
 
-    async def _log(self, *, source, subject, status, result=None, neurons=0.0, cached=False, latency_ms=0, error=None):
+    async def _log(self, *, source, subject, status, result=None, neurons=0.0, cached=False, latency_ms=0, error=None,
+                   model=None):
         now = datetime.now(timezone.utc)
         doc = {
             "created_at": now,
@@ -232,7 +260,7 @@ class NeuraRuntime:
             "subject_id": (subject or {}).get("id"),
             "plan": (subject or {}).get("plan"),
             "provider": self.provider.name if self.provider else "emergent",
-            "model": self.model,
+            "model": model or self.model,
             "status": status,
             "cached": cached,
             "prompt_tokens": getattr(result, "prompt_tokens", 0),
@@ -257,29 +285,36 @@ class NeuraRuntime:
             return EngineRefused("Neura Al Noor reçoit trop de demandes. Réessaie dans une minute.", "saturated")
         raise exc
 
+    def _plan(self, task: str, max_tokens):
+        """(model, max output tokens) for a task: code gets the code model and room for whole files."""
+        if task == "code":
+            return self.code_model, self.code_max_output_tokens
+        return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
+
     # ---------- inference ----------
-    async def complete(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app") -> tuple:
+    async def complete(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app",
+                       task="chat") -> tuple:
         """Returns (text, info) where info has tokens, neurons, cached, latency_ms."""
         if not self.provider:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        max_tokens = min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
-        key = self._cache_key(prepared)
+        model, max_tokens = self._plan(task, max_tokens)
+        key = self._cache_key(prepared, model)
         cached = await self._cache_get(key)
         if cached is not None:
             await self._log(source=source, subject=subject, status="ok", cached=True)
             return cached, {"cached": True, "neurons": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "latency_ms": 0}
-        worst = self.provider.max_neurons(self.model, estimate_messages_tokens(prepared), max_tokens)
+        worst = self.provider.max_neurons(model, estimate_messages_tokens(prepared), max_tokens)
         try:
             reservation = await self.budget.reserve(subject, worst)
         except BudgetExceeded as exc:
-            await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope)
+            await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope, model=model)
             raise self._refusal(exc)
         try:
             async with self.gate.slot():
                 result = await self.provider.chat(
-                    prepared, model=self.model, max_tokens=max_tokens, temperature=temperature
+                    prepared, model=model, max_tokens=max_tokens, temperature=temperature
                 )
         except (Saturated, ProviderError) as exc:
             await self.budget.release(reservation)
@@ -290,21 +325,22 @@ class NeuraRuntime:
             await self._log(source=source, subject=subject, status="error", error="exception")
             raise
         await self.budget.settle(reservation, result.neurons)
-        await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons)
+        await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons,
+                        model=model)
         await self._cache_put(key, result.text)
         return result.text, {
             "cached": False, "neurons": result.neurons, "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
         }
 
-    async def stream(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app"):
+    async def stream(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app", task="chat"):
         """Yields ("delta", str) then ("done", info)."""
         if not self.provider:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        max_tokens = min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
-        key = self._cache_key(prepared)
+        model, max_tokens = self._plan(task, max_tokens)
+        key = self._cache_key(prepared, model)
         cached = await self._cache_get(key)
         if cached is not None:
             await self._log(source=source, subject=subject, status="ok", cached=True)
@@ -312,18 +348,18 @@ class NeuraRuntime:
             yield ("done", {"cached": True, "neurons": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
                             "latency_ms": 0, "text": cached})
             return
-        worst = self.provider.max_neurons(self.model, estimate_messages_tokens(prepared), max_tokens)
+        worst = self.provider.max_neurons(model, estimate_messages_tokens(prepared), max_tokens)
         try:
             reservation = await self.budget.reserve(subject, worst)
         except BudgetExceeded as exc:
-            await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope)
+            await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope, model=model)
             raise self._refusal(exc)
         result = None
         pieces: List[str] = []
         try:
             async with self.gate.slot():
                 async for kind, value in self.provider.stream_chat(
-                    prepared, model=self.model, max_tokens=max_tokens, temperature=temperature
+                    prepared, model=model, max_tokens=max_tokens, temperature=temperature
                 ):
                     if kind == "delta":
                         pieces.append(value)
@@ -340,7 +376,7 @@ class NeuraRuntime:
             if result is None and reservation.neurons and pieces:
                 # Client went away mid-answer: charge what was generated.
                 partial = self.provider.neurons(
-                    self.model, estimate_messages_tokens(prepared), estimate_tokens("".join(pieces))
+                    model, estimate_messages_tokens(prepared), estimate_tokens("".join(pieces))
                 )
                 await self.budget.settle(reservation, partial)
             elif result is None and reservation.neurons:
@@ -348,7 +384,8 @@ class NeuraRuntime:
         if result is None:
             return
         await self.budget.settle(reservation, result.neurons)
-        await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons)
+        await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons,
+                        model=model)
         await self._cache_put(key, result.text)
         yield ("done", {"cached": False, "neurons": result.neurons, "prompt_tokens": result.prompt_tokens,
                         "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
@@ -473,13 +510,21 @@ class LlmChat(_LegacyLlmChat):
     def _params(self):
         return self.extra_params.get("max_tokens"), self.extra_params.get("temperature", 0.6)
 
+    def _task(self, user_message) -> str:
+        """The Developer workspace, and any chat message about programming, use the code model."""
+        if str(self.session_id or "").startswith("dev_"):
+            return "code"
+        text = user_message.text if user_message is not None else ""
+        return "code" if looks_like_code_request(text) else "chat"
+
     async def send_message(self, user_message):
         runtime = self._engine_for(user_message)
         if runtime is None:
             return await super().send_message(user_message)
         max_tokens, temperature = self._params()
         messages = self._engine_messages(user_message)
-        text, _info = await runtime.complete(messages, max_tokens=max_tokens, temperature=temperature)
+        text, _info = await runtime.complete(messages, max_tokens=max_tokens, temperature=temperature,
+                                             task=self._task(user_message))
         self.messages = messages + [{"role": "assistant", "content": text}]
         return text
 
@@ -493,7 +538,8 @@ class LlmChat(_LegacyLlmChat):
         messages = self._engine_messages(user_message)
         full = []
         info = {}
-        async for kind, value in runtime.stream(messages, max_tokens=max_tokens, temperature=temperature):
+        async for kind, value in runtime.stream(messages, max_tokens=max_tokens, temperature=temperature,
+                                                task=self._task(user_message)):
             if kind == "delta":
                 full.append(value)
                 yield TextDelta(content=value)

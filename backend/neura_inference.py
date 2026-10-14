@@ -35,6 +35,7 @@ CLOUDFLARE_TEXT_NEURONS: Dict[str, Tuple[float, float]] = {
     "@cf/google/gemma-3-12b-it": (31371, 50560),
     "@cf/openai/gpt-oss-20b": (18182, 27273),
     "@cf/openai/gpt-oss-120b": (31818, 68182),
+    "@cf/qwen/qwen2.5-coder-32b-instruct": (60000, 90909),
     "@cf/zai-org/glm-4.7-flash": (5500, 36400),
     "@cf/ibm-granite/granite-4.0-h-micro": (1542, 10158),
 }
