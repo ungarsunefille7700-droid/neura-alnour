@@ -9625,6 +9625,7 @@ import json
 
 # Beyond this delay the quiz starts with the built-in question bank.
 QUIZ_GENERATION_TIMEOUT_SECONDS = 15
+QUIZ_GENERATION_MODEL = os.environ.get("QUIZ_GENERATION_MODEL", "gpt-4.1-mini")
 
 @api_router.post("/quiz/start")
 async def start_quiz(category: Optional[str] = None):
@@ -9670,11 +9671,12 @@ Règles:
     questions = None
     
     try:
+        # gpt-4.1-mini: ~4 s for 10 questions (gemini-2.5-flash "thinks" first: ~9-11 s).
         chat = LlmChat(
             api_key=AI_LLM_KEY,
             session_id=f"quiz_gen_{uuid.uuid4()}",
             system_message="Tu es un générateur de quiz islamique. Tu retournes uniquement du JSON valide, sans markdown, sans commentaire."
-        ).with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=4096, temperature=1.0)
+        ).with_model("openai", QUIZ_GENERATION_MODEL).with_params(max_tokens=4096, temperature=1.0)
         
         response = await asyncio.wait_for(
             chat.send_message(UserMessage(text=prompt)),
