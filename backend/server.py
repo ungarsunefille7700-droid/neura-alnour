@@ -529,6 +529,15 @@ def _email_query(email: str) -> dict:
     return {"email": {"$regex": "^" + re.escape(str(email or "").strip()) + "$", "$options": "i"}}
 
 
+VOICE_REPLY_GUARD = (
+    "\n\nMODE APPEL VOCAL : ta réponse sera lue à voix haute pendant un appel. Réponds en 2 à 4 "
+    "phrases courtes et naturelles (au maximum environ 60 mots), comme dans une vraie conversation : "
+    "pas de listes, pas de titres, pas de markdown, pas d'émojis, pas de liens. Si le sujet est long, "
+    "donne l'essentiel puis propose d'en dire plus. Le message vient d'une transcription vocale : "
+    "si un mot paraît incohérent, déduis le sens ou pose une courte question."
+)
+
+
 def _reply_language_instruction(interface_language: Optional[str]) -> str:
     """Answer in the language the user writes in; the interface language is only the fallback."""
     fallback = interface_language or "French"
@@ -547,7 +556,9 @@ def _language_tutor_system(lang: str, level: str, voice: bool) -> str:
         "Le message vient d'une transcription vocale qui peut contenir une erreur de reconnaissance. "
         "Déduis le sens grâce au contexte ; si un mot paraît incohérent, pose une courte question de "
         "clarification au lieu de corriger une erreur probablement créée par la transcription. "
-        "Réponds avec des phrases courtes et naturelles, faciles à écouter. Donne une prononciation "
+        "Ta réponse sera lue à voix haute pendant un appel : 2 à 4 phrases courtes et naturelles "
+        "(au maximum environ 60 mots), sans listes, titres, markdown ni émojis ; une seule notion à "
+        "la fois, puis une petite question pour faire parler l'élève. Donne une prononciation "
         "simple et utile, sans prétendre avoir analysé directement le son ou l'accent.\n"
         if voice else "Le message a été écrit par l'élève.\n"
     )
@@ -4598,6 +4609,7 @@ class MessageCreate(BaseModel):
     lang: Optional[str] = None
     web_search: Optional[bool] = False
     web_mode: Optional[str] = "auto"
+    voice: Optional[bool] = False  # sent from a voice call: short spoken answer
 
 
 class WorkMessageCreate(BaseModel):
@@ -6703,6 +6715,8 @@ Règles importantes:
                 routed_profile = profile
                 routed_stage = text_reservation["stage"]
                 persona_system = system_message + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+                if message.voice:
+                    persona_system += VOICE_REPLY_GUARD
                 persona_system += _reply_language_instruction(message.lang)
                 # Build the conversation history as initial_messages so the model
                 # receives the full context in a SINGLE request. (Previously the
@@ -7100,6 +7114,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     sources = []
                 yield sse({"type": "phase", "phase": "reading_sources", "sources": sources})
                 system_prompt += web_results_context(sources)
+            if message.voice:
+                system_prompt += VOICE_REPLY_GUARD
 
             # initial_messages must include the system prompt first (the library does NOT
             # auto-add it when initial_messages is provided).
@@ -13323,6 +13339,8 @@ class VoiceSpeakRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     # Language being learned (tutor): code such as "rif" or "ary", for its native accent.
     language: Optional[str] = Field(default=None, max_length=12)
+    # Its name ("tarifit (rifain)", "swahili"…): gives the accent of languages not listed below.
+    language_name: Optional[str] = Field(default=None, max_length=80)
 
 
 # Native accent per language (gpt-4o-mini-tts follows spoken instructions).
@@ -13364,7 +13382,7 @@ VOICE_ACCENTS = {
 }
 
 
-def _voice_instructions(language: Optional[str]) -> str:
+def _voice_instructions(language: Optional[str], language_name: Optional[str] = None) -> str:
     """How to pronounce: native accent for each language, never an English accent on others."""
     base = (
         "Parle avec une voix chaleureuse, posée et bienveillante. Prononce chaque phrase avec l'accent "
@@ -13374,6 +13392,9 @@ def _voice_instructions(language: Optional[str]) -> str:
         "hamdoulillah) se prononcent à l'arabe."
     )
     accent = VOICE_ACCENTS.get((language or "").strip())
+    name = re.sub(r"[^\w\s()'’-]", "", language_name or "", flags=re.UNICODE).strip()[:80]
+    if not accent and name:
+        accent = f"l'accent natif d'un locuteur de naissance de la langue « {name} », dans sa région d'origine"
     if accent:
         base += (
             f" La langue apprise ici se prononce avec {accent} : les phrases et mots dans cette langue doivent "
@@ -13511,7 +13532,8 @@ async def voice_speak(request: VoiceSpeakRequest, user: dict = Depends(get_curre
     usage_id = await _consume_voice_quota(user, "chars", len(text))
     try:
         audio = await asyncio.to_thread(
-            _speak_sync, text, request.voice, request.speed, _voice_instructions(request.language)
+            _speak_sync, text, request.voice, request.speed,
+            _voice_instructions(request.language, request.language_name)
         )
     except Exception as exc:
         await _refund_voice_quota(usage_id, "chars", len(text))
