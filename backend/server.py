@@ -512,6 +512,19 @@ def _clean_history(messages):
     return messages
 
 
+async def _latest_chronological(cursor, limit: int) -> list:
+    """The `limit` most recent documents of `cursor`, oldest first (model history)."""
+    items = await cursor.sort("created_at", -1).to_list(limit)
+    items.reverse()
+    return items
+
+
+def _email_query(email: str) -> dict:
+    """Case-insensitive exact e-mail match: accounts created before e-mails were
+    normalised may be stored with capitals."""
+    return {"email": {"$regex": "^" + re.escape(str(email or "").strip()) + "$", "$options": "i"}}
+
+
 def current_ai_context() -> str:
     """Build request-time context so long-running workers never keep a stale date."""
     now, timezone_label = current_server_time()
@@ -5050,6 +5063,9 @@ async def _user_from_bearer_token(
         if valid_after:
             if isinstance(valid_after, str):
                 valid_after = datetime.fromisoformat(valid_after.replace("Z", "+00:00"))
+            # Mongo returns naive UTC datetimes (client created without tz_aware).
+            if isinstance(valid_after, datetime):
+                valid_after = _aware_utc(valid_after)
             issued_at = payload.get("iat")
             if isinstance(issued_at, (int, float)):
                 issued_at = datetime.fromtimestamp(issued_at, tz=timezone.utc)
@@ -5272,13 +5288,13 @@ async def google_auth_session(request: Request):
         is_vip = is_vip_email(email)
         
         # Check if user exists
-        existing_user = await db.users.find_one({"email": email}, {"_id": 0})
+        existing_user = await db.users.find_one(_email_query(email), {"_id": 0})
         
         if existing_user:
             user_id = existing_user["id"]
             subscription = "neura_ultra" if is_vip else existing_user.get("subscription", "free")
             user_write = db.users.update_one(
-                {"email": email},
+                {"id": user_id},
                 {"$set": {
                     "name": name,
                     "picture": picture,
@@ -5365,7 +5381,7 @@ async def google_auth_session(request: Request):
 @api_router.post("/auth/register")
 async def register(user_data: UserCreate, request: Request):
     # Check if email exists
-    existing = await db.users.find_one({"email": user_data.email})
+    existing = await db.users.find_one(_email_query(user_data.email))
     if existing:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
     
@@ -5420,7 +5436,7 @@ async def register(user_data: UserCreate, request: Request):
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin, request: Request):
-    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
+    user = await db.users.find_one(_email_query(credentials.email), {"_id": 0})
     
     # Check VIP admin login
     vip_admin = next((admin for admin in VIP_ADMINS if admin["email"] == credentials.email), None)
@@ -5628,7 +5644,7 @@ async def confirm_email_verification(
 @api_router.post("/auth/password-reset/request")
 async def request_password_reset(request: PasswordResetRequest):
     user = await db.users.find_one(
-        {"email": request.email.lower()},
+        _email_query(request.email),
         {"_id": 0},
     )
     if user and user.get("password"):
@@ -5656,7 +5672,7 @@ async def request_password_reset(request: PasswordResetRequest):
 @api_router.post("/auth/password-reset/confirm")
 async def confirm_password_reset(request: PasswordResetConfirmRequest):
     user = await db.users.find_one(
-        {"email": request.email.lower()},
+        _email_query(request.email),
         {"_id": 0},
     )
     if not user or not user.get("password") or not await _consume_auth_action_token(
@@ -5716,6 +5732,8 @@ async def enable_two_factor(
     expires_at = (fresh_user or {}).get("two_factor_pending_expires_at")
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if isinstance(expires_at, datetime):
+        expires_at = _aware_utc(expires_at)
     if (
         not encrypted_secret
         or not isinstance(expires_at, datetime)
@@ -6198,6 +6216,12 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         and not web_decision["should_search"]
     ):
         early_direct_answer = _current_date_direct_answer(message.content, message.lang)
+    if early_direct_answer and message.conversation_id:
+        owned = await db.conversations.find_one(
+            {"id": message.conversation_id, "user_id": user["id"]}, {"_id": 1}
+        )
+        if not owned:
+            raise HTTPException(status_code=404, detail="Conversation non trouvée")
     if early_direct_answer:
         direct_conversation_id = message.conversation_id or str(uuid.uuid4())
         asyncio.create_task(_safe_background_db_write(
@@ -6303,9 +6327,9 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     image_quota = _image_quota_public(None, False)
     quota_plan = _quota_plan(user)
 
-    previous_history = await db.messages.find(
+    previous_history = await _latest_chronological(db.messages.find(
         {"conversation_id": conversation_id}, {"_id": 0}
-    ).sort("created_at", 1).to_list(_chat_history_limit(user))
+    ), _chat_history_limit(user))
     previous_history = [
         item for item in previous_history
         if item.get("request_id") != request_record.get("request_id")
@@ -6782,9 +6806,9 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 return
             yield sse({"type": "conversation", "conversation_id": conversation_id})
 
-            previous_history = await db.messages.find(
+            previous_history = await _latest_chronological(db.messages.find(
                 {"conversation_id": conversation_id}, {"_id": 0}
-            ).sort("created_at", 1).to_list(_chat_history_limit(user))
+            ), _chat_history_limit(user))
             previous_history = [
                 item for item in previous_history
                 if item.get("request_id") != request_record.get("request_id")
@@ -7170,9 +7194,9 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 "file_count": len(project_files),
             })
 
-            history = await db.messages.find(
+            history = await _latest_chronological(db.messages.find(
                 {"conversation_id": conversation_id}, {"_id": 0}
-            ).sort("created_at", 1).to_list(_chat_history_limit(user))
+            ), _chat_history_limit(user))
 
             work_tier = (
                 "ultra"
@@ -7844,7 +7868,7 @@ async def get_remaining_generations(user: dict = Depends(get_current_user)):
     if subscription == "pro" and not is_vip:
         return _plus_generation_quota_public(await _get_plus_generation_quota_doc(user["id"], False))
 
-    if subscription == "neura_plus" and not is_vip:
+    if subscription in ("neura_plus", "neura_ultra") and not is_vip:
         return _neura_plus_generation_quota_public(
             await _get_neura_plus_generation_doc(user["id"], False)
         )
@@ -8209,7 +8233,8 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
                 detail=f"Quota Plus de 50 générations atteint. Renouvellement à {reset_at}.",
             )
         plus_generation_reserved = True
-    elif subscription == "neura_plus" and not is_vip:
+    elif subscription in ("neura_plus", "neura_ultra") and not is_vip:
+        # Neura Ultra includes Neura+, so it shares the Neura+ image quota.
         generation_reservation = await _reserve_neura_plus_generation(user["id"])
         if not generation_reservation["allowed"]:
             reset_at = generation_reservation["quota"].get("reset_at")
@@ -8227,7 +8252,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
         neura_plus_generation_reserved = generation_reservation["reserved_units"]
     
     # VIP and pro/developer keep their existing unlimited entitlement.
-    if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus"):
+    if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus", "neura_ultra"):
         # Plans without unlimited image entitlement: 3 total free generations
         used = user.get("image_generations_count", 0)
         if used >= 3:
@@ -8264,7 +8289,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
             image_base64 = images[0]
             
             # Increment the legacy free counter. Mongo was reserved atomically above.
-            if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus"):
+            if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus", "neura_ultra"):
                 await db.users.update_one(
                     {"id": user["id"]},
                     {"$inc": {"image_generations_count": 1}}
@@ -8833,7 +8858,7 @@ async def update_learn_progress(
     user: dict = Depends(get_current_user)
 ):
     """Update user's learning progress"""
-    progress = await db.learn_progress.find_one({"user_id": user["id"]})
+    progress = await db.learn_progress.find_one({"user_id": user["id"]}, {"_id": 0})
     was_completed = lesson_id in (progress or {}).get("completed_lessons", [])
     
     if not progress:
@@ -11066,10 +11091,10 @@ async def founder_admin_users(search: str = "", limit: int = 50, user: dict = De
     term = search.strip()
     if term:
         query = {"$or": [
-            {"name": {"$regex": term, "$options": "i"}},
-            {"username": {"$regex": term, "$options": "i"}},
-            {"email": {"$regex": term, "$options": "i"}},
-            {"id": {"$regex": term, "$options": "i"}},
+            {"name": {"$regex": re.escape(term), "$options": "i"}},
+            {"username": {"$regex": re.escape(term), "$options": "i"}},
+            {"email": {"$regex": re.escape(term), "$options": "i"}},
+            {"id": {"$regex": re.escape(term), "$options": "i"}},
         ]}
     users = await db.users.find(query, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
     user_ids = [item["id"] for item in users]
@@ -12125,14 +12150,14 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     project_id = (message.project_id or "default").strip()[:120] or "default"
 
     # Project memory: recent turns of this developer session (bounded by tier)
-    history = await db.dev_messages.find(
+    history = await _latest_chronological(db.dev_messages.find(
         {
             "session_id": session_id,
             "user_id": user["id"],
             "project_id": {"$in": [project_id, None]},
         },
         {"_id": 0},
-    ).sort("created_at", 1).to_list(tier["memory_turns"])
+    ), tier["memory_turns"])
 
     system_prompt = _build_dev_system_prompt(tier_name) + current_ai_context()
     # Expert role (Neura+/Ultra only) — adopt a senior specialist persona.
@@ -12924,9 +12949,9 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
     )
     system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
-    history = await db.lang_messages.find(
+    history = await _latest_chronological(db.lang_messages.find(
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
-    ).sort("created_at", 1).to_list(40)
+    ), 40)
     initial = [{"role": "system", "content": system}]
     for m in history:
         if m.get("role") in ("user", "assistant") and m.get("content"):
@@ -13010,9 +13035,9 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
         try:
-            history = await db.lang_messages.find(
+            history = await _latest_chronological(db.lang_messages.find(
                 {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
-            ).sort("created_at", 1).to_list(40)
+            ), 40)
             initial = [{"role": "system", "content": system}]
             for item in history:
                 if item.get("role") in ("user", "assistant") and item.get("content"):
@@ -13173,9 +13198,9 @@ async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_cu
         system += f"\n\nThème demandé pour cette session : {topic}."
     system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
 
-    history = await db.islam_messages.find(
+    history = await _latest_chronological(db.islam_messages.find(
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
-    ).sort("created_at", 1).to_list(40)
+    ), 40)
     initial = [{"role": "system", "content": system}]
     for m in history:
         if m.get("role") in ("user", "assistant") and m.get("content"):
@@ -13280,7 +13305,7 @@ async def search_islam_academy(q: str = "", user: dict = Depends(get_current_use
     notes = []
     if term:
         notes = await db.islam_learning_notes.find(
-            {"user_id": user["id"], "content": {"$regex": term, "$options": "i"}},
+            {"user_id": user["id"], "content": {"$regex": re.escape(term), "$options": "i"}},
             {"_id": 0}
         ).sort("updated_at", -1).to_list(50)
     return {"chapters": chapters, "notes": notes}
