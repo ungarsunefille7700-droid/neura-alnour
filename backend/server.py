@@ -13304,6 +13304,8 @@ class VoiceTranscribeRequest(BaseModel):
     audio_base64: str = Field(..., min_length=16, max_length=14_000_000)
     mime_type: str = Field(default="audio/webm", max_length=80)
     language: Optional[str] = Field(default=None, max_length=8)
+    # Recent conversation text: helps Whisper with names and vocabulary.
+    prompt: Optional[str] = Field(default=None, max_length=800)
 
 
 async def _consume_voice_quota(user: dict, field: str, amount: int) -> Optional[str]:
@@ -13391,6 +13393,7 @@ async def voice_transcribe(request: VoiceTranscribeRequest, user: dict = Depends
         upload.name = f"speech.{extension}"
         result = await OpenAISpeechToText(api_key=AI_LLM_KEY).transcribe(
             file=upload, model="whisper-1", response_format="json", language=language,
+            prompt=(request.prompt or "").strip()[-400:] or None, temperature=0,
         )
     except Exception as exc:
         await _refund_voice_quota(usage_id, "transcriptions", 1)
