@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
+
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 from neura_inference import CloudflareProvider, ProviderError  # noqa: E402
@@ -40,23 +42,82 @@ async def check(account: str, token: str, model: str):
     return await provider.chat([{"role": "user", "content": "Réponds juste : salam"}], max_tokens=10, temperature=0)
 
 
+def clean(value: str) -> str:
+    """Drop spaces, line breaks and invisible characters added by copy/paste (Ctrl+V can add an invisible control character)."""
+    return "".join(ch for ch in (value or "") if ch.isprintable() and not ch.isspace())
+
+
+def clipboard() -> str:
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout
+    except Exception:
+        return ""
+
+
+def cloudflare_errors(response) -> str:
+    try:
+        errors = response.json().get("errors") or []
+        return "; ".join(f"{e.get('code')} {e.get('message')}" for e in errors) or response.text[:200]
+    except Exception:
+        return response.text[:200]
+
+
+def verify_token(account: str, token: str) -> bool:
+    """Ask Cloudflare whether the token is valid, without spending any Neuron."""
+    headers = {"Authorization": f"Bearer {token}"}
+    for url in ("https://api.cloudflare.com/client/v4/user/tokens/verify",
+                f"https://api.cloudflare.com/client/v4/accounts/{account}/tokens/verify"):
+        try:
+            response = httpx.get(url, headers=headers, timeout=20)
+        except httpx.HTTPError as exc:
+            print(f"  Connexion à Cloudflare impossible ({type(exc).__name__}).")
+            return False
+        if response.status_code == 200 and (response.json().get("result") or {}).get("status") == "active":
+            print("  Jeton reconnu et actif.")
+            return True
+        last = f"HTTP {response.status_code} : {cloudflare_errors(response)}"
+    print(f"  Cloudflare ne reconnaît pas ce jeton ({last}).")
+    return False
+
+
 def main():
     print("=== Configuration de Cloudflare Workers AI pour Neura Al Noor ===\n")
-    account = input("Colle ton Account ID : ").strip()
-    token = getpass.getpass("Colle ton jeton API (il reste invisible pendant la saisie) : ").strip()
-    if not account or not token:
-        sys.exit("Account ID ou jeton manquant : rien n'a été modifié.")
+    account = clean(input("Colle ton Account ID : "))
+    if len(account) != 32:
+        sys.exit(f"L'Account ID doit faire 32 caractères (reçu : {len(account)}). Rien n'a été modifié.")
+    print("\nPour le jeton : copie-le dans Cloudflare (bouton Copy), puis appuie juste sur Entrée ici :")
+    print("le programme le lira directement dans le presse-papiers (rien ne s'affiche).")
+    token = clean(getpass.getpass("Entrée pour lire le presse-papiers (ou colle le jeton avec clic droit) : "))
+    if not token:
+        token = clean(clipboard())
+    if not token:
+        sys.exit("Aucun jeton trouvé (presse-papiers vide). Rien n'a été modifié.")
+    print(f"Jeton reçu : {len(token)} caractères (un jeton Cloudflare en fait environ 40).")
+    print("\n1) Vérification du jeton (gratuit)…")
+    if not verify_token(account, token):
+        sys.exit("Échec : recrée le jeton (modèle « Workers AI »), clique sur Copy, puis relance. Rien n'a été modifié.")
     model = "@cf/google/gemma-4-26b-a4b-it"
-    print("\nVérification du jeton auprès de Cloudflare (≈ 1 Neuron)…")
+    print("2) Petite question à l'IA (≈ 1 Neuron)…")
     try:
         result = asyncio.run(check(account, token, model))
     except ProviderError as exc:
+        detail = ""
+        try:
+            response = httpx.post(
+                f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {token}"}, timeout=60,
+                json={"model": model, "messages": [{"role": "user", "content": "salam"}], "max_tokens": 5})
+            detail = f" (HTTP {response.status_code} : {cloudflare_errors(response)})"
+        except Exception:
+            pass
         hints = {
-            "config": "Jeton refusé : recrée-le avec « Create a Workers AI API Token ».",
-            "bad_request": "Requête refusée : vérifie l'Account ID.",
+            "config": "Accès refusé à Workers AI : vérifie que l'Account ID est celui de la barre d'adresse.",
+            "bad_request": "Requête refusée par Cloudflare.",
             "provider_quota": "Le quota gratuit du jour est déjà épuisé : réessaie après minuit UTC.",
         }
-        sys.exit(f"Échec : {hints.get(exc.code, str(exc))} Rien n'a été modifié.")
+        sys.exit(f"Échec : {hints.get(exc.code, str(exc))}{detail} Rien n'a été modifié.")
     print(f"OK : Cloudflare répond (« {result.text.strip()[:40]} »), {result.neurons} Neuron(s) utilisé(s).")
     write_env({
         "NEURA_INFERENCE_PROVIDER": "cloudflare",
