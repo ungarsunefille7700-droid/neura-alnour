@@ -328,6 +328,23 @@ def test_programming_requests_use_the_code_model_with_room_for_whole_files():
     assert workspace["model"] == "@cf/zai-org/glm-4.7-flash"
 
 
+def test_asking_for_a_zip_puts_the_correction_next_to_the_question_but_not_in_history():
+    fake = FakeCloudflare(answer="Oui, voici le projet.")
+    runtime_with(fake)
+    chat = LlmChat(api_key="k", session_id="neura_stream_9", system_message="Tu es Neura.", initial_messages=[
+        {"role": "system", "content": "Tu es Neura."},
+        {"role": "user", "content": "tu sais faire un zip ?"},
+        {"role": "assistant", "content": "Je ne peux pas créer de fichier .zip."},
+    ])
+    run(chat.send_message(UserMessage(text="normalement là tu peux envoyer des fichiers zip")))
+    sent = fake.requests[0][1]["messages"][-1]["content"]
+    assert sent.startswith("normalement là tu peux envoyer des fichiers zip")
+    assert "Tu PEUX donc livrer un zip" in sent
+    assert chat.messages[-2] == {"role": "user", "content": "normalement là tu peux envoyer des fichiers zip"}
+    run(chat.send_message(UserMessage(text="Merci, et la prière du soir ?")))
+    assert "Tu PEUX" not in fake.requests[1][1]["messages"][-1]["content"]
+
+
 def test_code_detection():
     from neura_engine import looks_like_code_request
     for text in ("tu sais faire du code puis les mettre dans un zip ?", "Crée-moi un site web", "corrige ce bug",
