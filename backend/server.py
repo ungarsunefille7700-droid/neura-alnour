@@ -1071,9 +1071,21 @@ def is_vip_email(email: Optional[str]) -> bool:
 def _identity_entitlements(user: dict) -> dict:
     user = dict(user)
     if not (user.get("is_vip") or is_vip_email(user.get("email"))) and user.get("subscription", "free") != "free":
+        now = datetime.now(timezone.utc)
+        if user.get("gifted_subscription"):
+            try:
+                gift_end = _parse_neuraco_expiry(user.get("gifted_until"))
+            except (TypeError, ValueError, OverflowError):
+                gift_end = None
+            if gift_end and gift_end > now:
+                # A running founder gift grants the plan whatever the Stripe state.
+                return user
         status = user.get("subscription_status")
         expiry = _parse_neuraco_expiry(user.get("subscription_expires_at"))
-        if (status and status not in {"active", "paid", "trialing"}) or (expiry and expiry <= datetime.now(timezone.utc)):
+        if (status and status not in {"active", "paid", "trialing"}) or (expiry and expiry <= now):
+            user["subscription"] = "free"
+        elif user.get("gifted_subscription") and not (expiry and expiry > now):
+            # Expired gift and no paid period still running.
             user["subscription"] = "free"
     return user
 
@@ -4460,6 +4472,11 @@ class TwoFactorCodeRequest(BaseModel):
     code: str = Field(..., min_length=6, max_length=32)
 
 
+class GoogleTwoFactorRequest(BaseModel):
+    challenge: str = Field(..., min_length=16, max_length=128)
+    code: str = Field(..., min_length=6, max_length=32)
+
+
 class PrivacySettingsRequest(BaseModel):
     analytics_enabled: bool = True
     product_emails_enabled: bool = True
@@ -5325,6 +5342,27 @@ async def google_auth_session(request: Request):
             user_write = db.users.insert_one(user)
             user_write_required = True
         
+        if existing_user and existing_user.get("two_factor_enabled"):
+            # Same rule as the password login: no token before the 2FA code.
+            if not user_write_required:
+                asyncio.create_task(_safe_background_db_write(user_write, "google_user_update"))
+            challenge = secrets.token_urlsafe(24)
+            now = datetime.now(timezone.utc)
+            await db.auth_two_factor_challenges.insert_one({
+                "_id": hashlib.sha256(challenge.encode("utf-8")).hexdigest(),
+                "user_id": user_id,
+                "session_token": session_token,
+                "attempts": 0,
+                "used_at": None,
+                "created_at": now,
+                "expires_at": now + timedelta(minutes=GOOGLE_TWO_FACTOR_TTL_MINUTES),
+            })
+            raise HTTPException(status_code=401, detail={
+                "code": "two_factor_required",
+                "message": "Code de double authentification requis.",
+                "challenge": challenge,
+            })
+
         # Store session in database
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         session_write = db.user_sessions.update_one(
@@ -5377,6 +5415,71 @@ async def google_auth_session(request: Request):
     except Exception as e:
         logger.error(f"Google auth error: {e}")
         raise HTTPException(status_code=500, detail="Erreur d'authentification Google")
+
+GOOGLE_TWO_FACTOR_TTL_MINUTES = 5
+GOOGLE_TWO_FACTOR_MAX_ATTEMPTS = 5
+
+
+@api_router.post("/auth/google/2fa")
+async def google_auth_two_factor(data: GoogleTwoFactorRequest, request: Request):
+    """Finish a Google sign-in for an account protected by two-factor authentication."""
+    challenge_id = hashlib.sha256(data.challenge.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    expired = HTTPException(status_code=401, detail={
+        "code": "two_factor_expired",
+        "message": "La vérification a expiré. Reconnectez-vous avec Google.",
+    })
+    challenge = await db.auth_two_factor_challenges.find_one_and_update(
+        {"_id": challenge_id, "used_at": None, "attempts": {"$lt": GOOGLE_TWO_FACTOR_MAX_ATTEMPTS}},
+        {"$inc": {"attempts": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not challenge or _aware_utc(challenge["expires_at"]) <= now:
+        raise expired
+    user = await db.users.find_one({"id": challenge["user_id"]}, {"_id": 0})
+    if not user:
+        raise expired
+    if not await _verify_two_factor_code(user, data.code):
+        raise HTTPException(status_code=401, detail={
+            "code": "two_factor_invalid",
+            "message": "Code de double authentification invalide.",
+        })
+    claimed = await db.auth_two_factor_challenges.update_one(
+        {"_id": challenge_id, "used_at": None}, {"$set": {"used_at": now}}
+    )
+    if not claimed.modified_count:
+        raise expired
+
+    is_vip = is_vip_email(user.get("email"))
+    session_token = challenge.get("session_token")
+    await db.user_sessions.update_one(
+        {"user_id": user["id"]},
+        {"$set": {
+            "user_id": user["id"],
+            "session_token": session_token,
+            "expires_at": (now + timedelta(days=7)).isoformat(),
+            "created_at": now.isoformat(),
+        }},
+        upsert=True,
+    )
+    token = await _issue_auth_token(
+        {"id": user["id"], "email": user["email"], "is_vip": is_vip},
+        request,
+    )
+    entitled = _identity_entitlements(user)
+    return {
+        "token": token,
+        "session_token": session_token,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user.get("name"),
+            "picture": user.get("picture"),
+            "subscription": "neura_ultra" if is_vip else entitled.get("subscription", "free"),
+            "is_vip": is_vip,
+        },
+    }
+
 
 @api_router.post("/auth/register")
 async def register(user_data: UserCreate, request: Request):
@@ -5519,6 +5622,7 @@ async def get_me(user: dict = Depends(get_current_user)):
         "two_factor_enabled": bool(user.get("two_factor_enabled", False)),
         "subscription_status": user.get("subscription_status"),
         "subscription_expires_at": _iso_utc(_parse_neuraco_expiry(user.get("subscription_expires_at"))),
+        "gifted_until": user.get("gifted_until") if user.get("gifted_subscription") else None,
         "subscription_cancel_at_period_end": bool(user.get("subscription_cancel_at_period_end")),
         "has_recurring_subscription": bool(user.get("stripe_subscription_id")),
     }
@@ -9733,9 +9837,8 @@ async def submit_quiz_answer(answer: QuizAnswerRequest, user: dict = Depends(get
             "is_correct": is_correct,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
-        await _record_gamification_event(user["id"], "quiz_completed", f"legacy-quiz:{uuid.uuid4()}")
-        if is_correct:
-            await _record_gamification_event(user["id"], "exercise_passed", f"legacy-answer:{uuid.uuid4()}")
+        # One isolated answer is not a completed quiz; missions are fed by the
+        # quiz sessions (/quiz/session/{id}/answer), each answer counted once.
     
     return {
         "correct": is_correct,
@@ -10417,9 +10520,16 @@ async def _start_multiplayer_game(code: str, countdown_id: str):
     if not selected:
         return False
     now = datetime.now(timezone.utc).isoformat()
+    # A new game in the same room starts every player from zero.
+    fresh_stats = {
+        "score": 0, "correct_count": 0, "wrong_count": 0, "streak": 0, "best_streak": 0,
+        "answered_count": 0, "total_response_ms": 0, "xp_earned": 0, "level_gained": 0,
+        "badges_earned": [], "abandoned": False,
+    }
     await db.multiplayer_rooms.update_one(
         {"code": code, "countdown_id": countdown_id, "status": "countdown"},
         {"$set": {
+            **{f"players.$[].{field}": value for field, value in fresh_stats.items()},
             "status": "playing",
             "game": {
                 "phase": "welcome",
@@ -12107,6 +12217,41 @@ async def _dev_quota_state(user: dict):
     return tier_name, tier, used, reset_at, window_start
 
 
+async def _reserve_dev_quota(user: dict, tier: dict, unlimited: bool) -> Optional[dict]:
+    """Atomically count one developer request in the current window.
+    Returns the quota document after the increment, or None if the limit is reached."""
+    now = datetime.now(timezone.utc)
+    window = timedelta(hours=tier["window_hours"])
+    try:
+        await db.dev_quota.update_one(
+            {"user_id": user["id"]},
+            {"$setOnInsert": {"_id": f"dev:{user['id']}", "user_id": user["id"], "used": 0,
+                              "window_start": now.isoformat()}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass  # a parallel request created it
+    await db.dev_quota.update_one(
+        {"user_id": user["id"], "window_start": {"$lte": (now - window).isoformat()}},
+        {"$set": {"used": 0, "window_start": now.isoformat()}},
+    )
+    query = {"user_id": user["id"]}
+    if not unlimited and tier["requests"] is not None:
+        query["used"] = {"$lt": tier["requests"]}
+    return await db.dev_quota.find_one_and_update(
+        query,
+        {"$inc": {"used": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def _refund_dev_quota(user: dict, reserved: dict) -> None:
+    await db.dev_quota.update_one(
+        {"user_id": user["id"], "window_start": reserved["window_start"], "used": {"$gt": 0}},
+        {"$inc": {"used": -1}},
+    )
+
+
 @api_router.post("/developer/intent")
 async def developer_intent(
     request: DeveloperIntentRequest,
@@ -12128,6 +12273,18 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     tier_name, tier, used, reset_at, window_start = await _dev_quota_state(user)
     unlimited = _dev_is_unlimited(user)
 
+    def dev_limit_error(used_now: int, reset_at_now: str) -> HTTPException:
+        return HTTPException(status_code=429, detail={
+            "message": (
+                "Tu as atteint la limite de génération de code de ton abonnement actuel. "
+                "Tu peux attendre la prochaine régénération de crédits ou passer à "
+                "Neura+ / Neura Ultra pour continuer sans attendre avec plus de puissance, "
+                "plus de mémoire et plus de génération."
+            ),
+            "quota": {"tier": tier_name, "limit": tier["requests"], "used": used_now,
+                      "remaining": 0, "reset_at": reset_at_now, "window_hours": tier["window_hours"]},
+        })
+
     # Enforce quota (founders/VIP are never blocked)
     if (
         tier_name != "plus"
@@ -12135,16 +12292,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         and tier["requests"] is not None
         and used >= tier["requests"]
     ):
-        raise HTTPException(status_code=429, detail={
-            "message": (
-                "Tu as atteint la limite de génération de code de ton abonnement actuel. "
-                "Tu peux attendre la prochaine régénération de crédits ou passer à "
-                "Neura+ / Neura Ultra pour continuer sans attendre avec plus de puissance, "
-                "plus de mémoire et plus de génération."
-            ),
-            "quota": {"tier": tier_name, "limit": tier["requests"], "used": used,
-                      "remaining": 0, "reset_at": reset_at, "window_hours": tier["window_hours"]},
-        })
+        raise dev_limit_error(used, reset_at)
 
     session_id = message.session_id or str(uuid.uuid4())
     project_id = (message.project_id or "default").strip()[:120] or "default"
@@ -12185,6 +12333,15 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
     for m in history:
         if m.get("role") in ("user", "assistant") and m.get("content"):
             initial_messages.append({"role": m["role"], "content": m["content"]})
+
+    # Count this request now, atomically: parallel requests cannot all pass the check.
+    dev_reservation = await _reserve_dev_quota(user, tier, unlimited or tier_name == "plus")
+    if dev_reservation is None:
+        _, _, used_now, reset_at_now, _ = await _dev_quota_state(user)
+        raise dev_limit_error(used_now, reset_at_now)
+    used = int(dev_reservation["used"]) - 1
+    window_start = datetime.fromisoformat(dev_reservation["window_start"])
+    reset_at = (window_start + timedelta(hours=tier["window_hours"])).isoformat()
 
     # Save the user request first (so memory persists even across the regeneration delay)
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -12240,6 +12397,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             task_type="developer",
         )
         if not agent_guard["allowed"]:
+            await _refund_dev_quota(user, dev_reservation)
             quota = agent_guard["quota"]
             raise HTTPException(status_code=429, detail={
                 "message": (
@@ -12288,6 +12446,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
             break
 
     if last_err is not None:
+        await _refund_dev_quota(user, dev_reservation)
         if agent_guard and agent_guard.get("allowed"):
             await _release_neura_plus_agent_usage(
                 user,
@@ -12331,12 +12490,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
         upsert=True,
     )
 
-    # Consume one unit of quota (track usage for everyone; only block non-unlimited)
-    await db.dev_quota.update_one(
-        {"user_id": user["id"]},
-        {"$set": {"user_id": user["id"], "used": used + 1, "window_start": window_start.isoformat()}},
-        upsert=True,
-    )
+    # The unit of quota was already counted by _reserve_dev_quota.
 
     if agent_guard and agent_guard.get("allowed"):
         actual_agent_units = min(
@@ -16439,6 +16593,7 @@ async def resume_neuraco_cloud_tasks():
         ]),
         db.auth_sessions.create_index("expires_at", expireAfterSeconds=0),
         db.auth_action_tokens.create_index("expires_at", expireAfterSeconds=0),
+        db.auth_two_factor_challenges.create_index("expires_at", expireAfterSeconds=0),
         db.neuraco_promotions.create_index("code", unique=True),
         db.neuraco_pricing_history.create_index(
             [("revision", 1), ("created_at", -1)],
