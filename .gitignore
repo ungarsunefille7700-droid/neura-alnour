@@ -45,3 +45,6 @@ neuraco/extensions/jetbrains/build/
 *.exe
 *.msi
 *.blockmap
+
+# Neura engine benchmark reports
+backend/scripts/bench_cloudflare_*.md

@@ -37,6 +37,9 @@ import re
 import struct
 import unicodedata
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
+import neura_engine
+from neura_engine import current_ai_subject, user_facing_ai_error
+from neura_gateway import create_gateway_routers
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1164,6 +1167,18 @@ def get_dev_tier(user: dict) -> str:
 
 def _dev_is_unlimited(user: dict) -> bool:
     return bool(user.get("is_vip") or is_vip_email(user.get("email")))
+
+def _ai_subject(user: dict) -> dict:
+    """Budget subject of the Neura engine: free / paid / vip (VIP and founders are never capped)."""
+    email = user.get("email")
+    if user.get("is_vip") or is_vip_email(email) or is_founder((email or "").strip().lower()):
+        plan = "vip"
+    elif (user.get("subscription") or "free") != "free":
+        plan = "paid"
+    else:
+        plan = "free"
+    return {"kind": "user", "id": user.get("id"), "plan": plan}
+
 
 def _is_premium_ai(user: dict) -> bool:
     """Resolve the legacy paid-model entitlement outside the free quota router.
@@ -5143,6 +5158,7 @@ async def _user_from_bearer_token(
             user = {**user, "is_vip": True, "subscription": "neura_ultra"}
         if session_id:
             user = {**user, "_auth_session_id": session_id}
+        current_ai_subject.set(_ai_subject(user))
         return user
     except HTTPException:
         if optional:
@@ -6352,7 +6368,7 @@ async def _ai_memory_context(user: dict) -> str:
 
 @api_router.post("/chat/message")
 async def send_message(message: MessageCreate, user: dict = Depends(get_current_user)):
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from neura_engine import LlmChat, UserMessage
 
     selected_model = _normalize_model_key(message.model)
     requested_mode = (
@@ -6644,7 +6660,7 @@ Règles importantes:
         try:
             if effective_image_data:
                 # Use FileContent with content_type="image" for vision
-                from emergentintegrations.llm.chat import FileContent
+                from neura_engine import FileContent
             
                 # Prepare image data - ensure proper format
                 image_data = effective_image_data
@@ -6722,6 +6738,7 @@ Règles importantes:
     if last_err is not None:
         es = str(last_err)
         logger.error(f"LLM error: {es[:300]}")
+        refusal = user_facing_ai_error(last_err)
         await _release_text_quota(
             user,
             conversation_id,
@@ -6730,6 +6747,8 @@ Règles importantes:
         )
         await _release_capture_analysis(capture, capture_reservation.get("reserved_units", 0))
         await _fail_chat_request(request_record)
+        if refusal:
+            raise HTTPException(status_code=429, detail=refusal)
         if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
             raise HTTPException(status_code=429, detail="Quota IA gratuit atteint pour le moment (limite du palier gratuit, partagée par l'app). Réessaie dans une minute.")
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
@@ -6882,7 +6901,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     async def event_generator():
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        from neura_engine import LlmChat, UserMessage
         request_record = None
         selected_model = _normalize_model_key(message.model)
         requested_mode = (
@@ -7175,7 +7194,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 text_reservation.get("reserved_units", 0),
             )
             await _fail_chat_request(request_record)
-            yield sse({"type": "error", "detail": "Service IA temporairement indisponible."})
+            yield sse({"type": "error", "detail": user_facing_ai_error(e) or "Service IA temporairement indisponible."})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -7186,7 +7205,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
     if not _has_plus_capabilities(user):
         raise HTTPException(status_code=403, detail="Le mode Work nécessite l’offre Plus ou supérieure.")
 
-    from emergentintegrations.llm.chat import FileContent, LlmChat, UserMessage
+    from neura_engine import FileContent, LlmChat, UserMessage
 
     def work_sse(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -8347,6 +8366,7 @@ async def generate_neuraco_images(
 
 @api_router.post("/images/generate")
 async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get_current_user)):
+    _require_legacy_ai("La génération d'images")
     subscription = user.get("subscription", "free")
     is_vip = bool(user.get("is_vip") or is_vip_email(user.get("email")))
     
@@ -9667,7 +9687,7 @@ QUIZ_GENERATION_MODEL = os.environ.get("QUIZ_GENERATION_MODEL", "gpt-4.1-mini")
 @api_router.post("/quiz/start")
 async def start_quiz(category: Optional[str] = None):
     """Generate 10 new quiz questions using AI and start a quiz session"""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from neura_engine import LlmChat, UserMessage
     
     category_hint = ""
     if category:
@@ -12307,7 +12327,7 @@ async def developer_intent(
 async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_current_user)):
     """Developer AI assistant. Real Gemini-backed code generation with per-tier
     quota (requests / response size / files / memory) and project memory."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from neura_engine import LlmChat, UserMessage
 
     tier_name, tier, used, reset_at, window_start = await _dev_quota_state(user)
     unlimited = _dev_is_unlimited(user)
@@ -12404,7 +12424,7 @@ async def developer_chat(message: DevMessageCreate, user: dict = Depends(get_cur
 
     # Build the user message (with optional image for screenshot / code analysis).
     if message.image_base64:
-        from emergentintegrations.llm.chat import FileContent
+        from neura_engine import FileContent
         image_data = message.image_base64
         if image_data.startswith("data:"):
             parts = image_data.split(",", 1)
@@ -13110,7 +13130,7 @@ class LangTutorMessage(BaseModel):
 async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_current_user)):
     """AI private language tutor. Teaches in the chosen language, adapts to level,
     corrects grammar/vocab/phrasing, gives exercises/quizzes, keeps a real conversation."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from neura_engine import LlmChat, UserMessage
 
     session_id = message.session_id or str(uuid.uuid4())
     level = message.level or "débutant"
@@ -13152,6 +13172,9 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
             break
     if last_err is not None:
         logger.error(f"Language tutor error: {str(last_err)[:200]}")
+        refusal = user_facing_ai_error(last_err)
+        if refusal:
+            raise HTTPException(status_code=429, detail=refusal)
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Réessaie.")
 
     await db.lang_messages.insert_one({
@@ -13176,7 +13199,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     async def event_generator():
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        from neura_engine import LlmChat, UserMessage
 
         session_id = message.session_id or str(uuid.uuid4())
         level = message.level or "débutant"
@@ -13259,7 +13282,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
             yield sse({"type": "done", "session_id": session_id})
         except Exception as exc:
             logger.error("Language tutor stream error: %s", str(exc)[:200])
-            yield sse({"type": "error", "detail": "Service IA temporairement indisponible. Réessaie."})
+            yield sse({"type": "error", "detail": user_facing_ai_error(exc) or "Service IA temporairement indisponible. Réessaie."})
 
     return StreamingResponse(
         event_generator(),
@@ -13431,6 +13454,18 @@ def _speak_sync(text: str, voice: str, speed: float, instructions: str) -> bytes
 VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "gpt-4o-mini-transcribe")
 
 
+# Neura engine voice (Cloudflare MeloTTS is documented for English and French).
+VOICE_ENGINE_TTS_LANGUAGES = {"fr", "en"}
+VOICE_ENGINE_TTS_MAX_CHARS = 1000
+
+
+def _require_legacy_ai(feature: str):
+    """In strict free mode (NEURA_LEGACY_AI=off) the paid legacy providers are never called."""
+    runtime = neura_engine.get_runtime()
+    if runtime and runtime.enabled and not runtime.legacy_allowed:
+        raise HTTPException(status_code=503, detail=f"{feature} n'est pas disponible en mode IA gratuit.")
+
+
 async def _transcribe_fast(audio: bytes, extension: str, language: Optional[str], prompt: Optional[str]):
     """gpt-4o-mini-transcribe: about 1 s for a sentence (whisper-1: about 1.5 s)."""
     from litellm import atranscription
@@ -13459,6 +13494,20 @@ async def voice_speak(request: VoiceSpeakRequest, user: dict = Depends(get_curre
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Texte vide.")
+    runtime = neura_engine.get_runtime()
+    engine_lang = (request.language or "fr").split("-")[0].lower()
+    if runtime and runtime.tts_enabled and engine_lang in VOICE_ENGINE_TTS_LANGUAGES:
+        usage_id = await _consume_voice_quota(user, "chars", len(text))
+        try:
+            audio = await runtime.speak(text[:VOICE_ENGINE_TTS_MAX_CHARS], language=engine_lang)
+        except Exception as exc:
+            await _refund_voice_quota(usage_id, "chars", len(text))
+            refusal = user_facing_ai_error(exc)
+            logger.error("Engine voice speak error: %s", str(exc)[:200])
+            raise HTTPException(status_code=429 if refusal else 503,
+                                detail=refusal or "Voix temporairement indisponible. Réessaie.")
+        return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+    _require_legacy_ai("La voix de synthèse dans cette langue")
     usage_id = await _consume_voice_quota(user, "chars", len(text))
     try:
         audio = await asyncio.to_thread(
@@ -13488,6 +13537,22 @@ async def voice_transcribe(request: VoiceTranscribeRequest, user: dict = Depends
     language = language if re.fullmatch(r"[a-z]{2}", language) else None
     usage_id = await _consume_voice_quota(user, "transcriptions", 1)
     prompt = (request.prompt or "").strip()[-400:] or None
+    runtime = neura_engine.get_runtime()
+    if runtime and runtime.stt_enabled:
+        try:
+            text = await runtime.transcribe(audio, language=language, prompt=prompt)
+        except Exception as exc:
+            await _refund_voice_quota(usage_id, "transcriptions", 1)
+            refusal = user_facing_ai_error(exc)
+            logger.error("Engine transcription error: %s", str(exc)[:200])
+            raise HTTPException(status_code=429 if refusal else 503,
+                                detail=refusal or "Transcription temporairement indisponible. Réessaie.")
+        return {"text": text.strip()}
+    try:
+        _require_legacy_ai("La reconnaissance vocale")
+    except HTTPException:
+        await _refund_voice_quota(usage_id, "transcriptions", 1)
+        raise
     try:
         result = await _transcribe_fast(audio, extension, language, prompt)
     except Exception as fast_error:
@@ -13605,7 +13670,7 @@ class IslamAcademyFavorite(BaseModel):
 async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_current_user)):
     """Cautious AI Islam teacher: step-by-step lessons, cites sources, never invents
     verses/hadiths, and refers fatwas/serious matters to a qualified scholar."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from neura_engine import LlmChat, UserMessage
 
     session_id = message.session_id or str(uuid.uuid4())
     level = message.level or "débutant"
@@ -13671,6 +13736,9 @@ async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_cu
             break
     if last_err is not None:
         logger.error(f"Islam learning error: {str(last_err)[:200]}")
+        refusal = user_facing_ai_error(last_err)
+        if refusal:
+            raise HTTPException(status_code=429, detail=refusal)
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Réessaie.")
 
     await db.islam_messages.insert_one({
@@ -14347,7 +14415,7 @@ async def _neuraco_ai_completion(
     runtime_config: Optional[dict] = None,
     max_output_tokens: int = 4096,
 ) -> dict:
-    from emergentintegrations.llm.chat import FileContent, LlmChat, UserMessage
+    from neura_engine import FileContent, LlmChat, UserMessage
 
     runtime_config = runtime_config or await _neuraco_pricing_overrides()
     _require_neuraco_operational(runtime_config)
@@ -15385,7 +15453,7 @@ async def neuraco_agent_stream(
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     async def event_generator():
-        from emergentintegrations.llm.chat import FileContent, LlmChat, UserMessage
+        from neura_engine import FileContent, LlmChat, UserMessage
 
         started_at = datetime.now(timezone.utc)
         settled = False
@@ -16826,6 +16894,30 @@ async def system_logs(limit: int = 100, user: dict = Depends(get_current_user)):
 
 # Include router
 app.include_router(api_router)
+
+# ---------- Neura engine + Neura Gateway (own API, own nan_ keys) ----------
+neura_engine.configure(db)
+_gateway_public, _gateway_admin, _gateway_indexes = create_gateway_routers(
+    db=db,
+    get_current_user=get_current_user,
+    require_admin=_require_founder_admin,
+    pepper=os.environ.get("NEURA_API_KEY_PEPPER") or JWT_SECRET,
+    admin_log=_admin_log,
+)
+app.include_router(_gateway_public)
+app.include_router(_gateway_admin)
+
+
+@app.on_event("startup")
+async def prepare_neura_engine():
+    try:
+        await _gateway_indexes()
+        runtime = neura_engine.get_runtime()
+        if runtime:
+            await runtime.ensure_indexes()
+            logger.info("Neura engine: %s", runtime.status())
+    except Exception as exc:  # never block startup
+        logger.warning("Neura engine startup step skipped: %s", str(exc)[:200])
 
 # Serve Digital Asset Links for Google Play domain verification
 from fastapi.responses import JSONResponse
