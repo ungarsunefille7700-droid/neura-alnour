@@ -13428,6 +13428,25 @@ def _speak_sync(text: str, voice: str, speed: float, instructions: str) -> bytes
     return response.content if hasattr(response, "content") else response.read()
 
 
+VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "gpt-4o-mini-transcribe")
+
+
+async def _transcribe_fast(audio: bytes, extension: str, language: Optional[str], prompt: Optional[str]):
+    """gpt-4o-mini-transcribe: about 1 s for a sentence (whisper-1: about 1.5 s)."""
+    from litellm import atranscription
+    upload = io.BytesIO(audio)
+    upload.name = f"speech.{extension}"
+    params = {"model": f"openai/{VOICE_STT_MODEL}", "file": upload, "api_key": AI_LLM_KEY}
+    if language:
+        params["language"] = language
+    if prompt:
+        params["prompt"] = prompt
+    if str(AI_LLM_KEY or "").startswith("sk-emergent-"):
+        params["api_base"] = os.environ.get("INTEGRATION_PROXY_URL", "https://integrations.emergentagent.com") + "/llm"
+        params["custom_llm_provider"] = "openai"
+    return await atranscription(**params)
+
+
 @api_router.get("/voice/options")
 async def voice_options():
     return [{"id": key, **value} for key, value in VOICE_CHOICES.items()]
@@ -13468,17 +13487,22 @@ async def voice_transcribe(request: VoiceTranscribeRequest, user: dict = Depends
     language = (request.language or "").strip().lower()
     language = language if re.fullmatch(r"[a-z]{2}", language) else None
     usage_id = await _consume_voice_quota(user, "transcriptions", 1)
+    prompt = (request.prompt or "").strip()[-400:] or None
     try:
-        upload = io.BytesIO(audio)
-        upload.name = f"speech.{extension}"
-        result = await OpenAISpeechToText(api_key=AI_LLM_KEY).transcribe(
-            file=upload, model="whisper-1", response_format="json", language=language,
-            prompt=(request.prompt or "").strip()[-400:] or None, temperature=0,
-        )
-    except Exception as exc:
-        await _refund_voice_quota(usage_id, "transcriptions", 1)
-        logger.error("Voice transcribe error: %s", str(exc)[:200])
-        raise HTTPException(status_code=503, detail="Transcription temporairement indisponible. Réessaie.")
+        result = await _transcribe_fast(audio, extension, language, prompt)
+    except Exception as fast_error:
+        logger.warning("Fast transcription unavailable, using whisper-1: %s", str(fast_error)[:150])
+        try:
+            upload = io.BytesIO(audio)
+            upload.name = f"speech.{extension}"
+            result = await OpenAISpeechToText(api_key=AI_LLM_KEY).transcribe(
+                file=upload, model="whisper-1", response_format="json", language=language,
+                prompt=prompt, temperature=0,
+            )
+        except Exception as exc:
+            await _refund_voice_quota(usage_id, "transcriptions", 1)
+            logger.error("Voice transcribe error: %s", str(exc)[:200])
+            raise HTTPException(status_code=503, detail="Transcription temporairement indisponible. Réessaie.")
     text = getattr(result, "text", None)
     if text is None and isinstance(result, dict):
         text = result.get("text")
