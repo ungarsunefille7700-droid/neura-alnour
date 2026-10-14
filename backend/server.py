@@ -13155,7 +13155,8 @@ async def language_tutor(message: LangTutorMessage, user: dict = Depends(get_cur
 
     await db.lang_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
-        "role": "assistant", "content": response, "created_at": datetime.now(timezone.utc).isoformat(),
+        "role": "assistant", "content": response, "language": lang,
+        "created_at": datetime.now(timezone.utc).isoformat(),
     })
     await db.lang_progress.update_one(
         {"user_id": user["id"], "language": lang},
@@ -13245,7 +13246,7 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
 
             await db.lang_messages.insert_one({
                 "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
-                "role": "assistant", "content": answer,
+                "role": "assistant", "content": answer, "language": lang,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
             await db.lang_progress.update_one(
@@ -13264,6 +13265,55 @@ async def language_tutor_stream(message: LangTutorMessage, user: dict = Depends(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@api_router.get("/language-tutor/sessions")
+async def language_tutor_sessions(language: Optional[str] = None, user: dict = Depends(get_current_user)):
+    """The learner's saved tutor conversations, most recent first (optionally for one language)."""
+    match = {"user_id": user["id"], "role": "user"}
+    if language:
+        match["language"] = language[:120]
+    rows = await db.lang_messages.aggregate([
+        {"$match": match},
+        {"$sort": {"created_at": 1}},
+        {"$group": {
+            "_id": "$session_id",
+            "language": {"$last": "$language"},
+            "title": {"$first": "$content"},
+            "created_at": {"$first": "$created_at"},
+            "updated_at": {"$last": "$created_at"},
+            "message_count": {"$sum": 1},
+        }},
+        {"$sort": {"updated_at": -1}},
+        {"$limit": 50},
+    ]).to_list(50)
+    return [{
+        "session_id": row["_id"],
+        "language": row.get("language"),
+        "title": (row.get("title") or "")[:80],
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "message_count": int(row.get("message_count", 0)),
+    } for row in rows if row.get("_id")]
+
+
+@api_router.get("/language-tutor/sessions/{session_id}/messages")
+async def language_tutor_session_messages(session_id: str, user: dict = Depends(get_current_user)):
+    messages = await _latest_chronological(db.lang_messages.find(
+        {"session_id": session_id, "user_id": user["id"]},
+        {"_id": 0, "role": 1, "content": 1, "created_at": 1},
+    ), 200)
+    if not messages:
+        raise HTTPException(status_code=404, detail="Conversation introuvable")
+    return messages
+
+
+@api_router.delete("/language-tutor/sessions/{session_id}")
+async def delete_language_tutor_session(session_id: str, user: dict = Depends(get_current_user)):
+    result = await db.lang_messages.delete_many({"session_id": session_id, "user_id": user["id"]})
+    if not result.deleted_count:
+        raise HTTPException(status_code=404, detail="Conversation introuvable")
+    return {"deleted": True}
 
 
 @api_router.get("/language-tutor/progress")
