@@ -541,7 +541,9 @@ CODE_DELIVERY_GUARD = (
     "N'écris jamais de ligne « Fichier: » pour l'archive .zip elle-même : l'application la crée. "
     "CONCENTRATION : pour une demande de code, réponds UNIQUEMENT à cette demande — commence par UNE "
     "seule phrase qui annonce ce que tu vas créer (« Je vais créer … avec … »), livre ensuite le "
-    "code demandé, puis 1 à 3 phrases pour l'installer ou le lancer. Ne parle d'aucun autre sujet : pas de "
+    "code demandé, puis, comme le code n'est PAS affiché dans le chat (l'utilisateur le télécharge), "
+    "termine par un court résumé : ce que tu as créé (nom du projet), ses fonctionnalités principales "
+    "en une courte liste, et comment le lancer en 1 à 3 phrases. Ne parle d'aucun autre sujet : pas de "
     "rappel religieux, pas de morale, pas de présentation de toi-même, pas de liste d'idées ou de projets "
     "non demandés, pas d'émojis décoratifs. Si la demande est assez claire pour coder, code tout de suite "
     "sans poser de questions ; s'il manque une information indispensable, pose au plus 2 questions courtes."
@@ -7158,6 +7160,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
 
             full_text = []
             thinking_text = []
+            answer_started = time.monotonic()
             async for event in chat.stream_message(UserMessage(text=user_text)):
                 if event.__class__.__name__ == "ThinkingDelta":
                     # The model's reasoning: shown folded under "Réflexion en cours".
@@ -7183,6 +7186,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "role": "assistant",
                 "content": answer,
                 "thinking": "".join(thinking_text)[:20000] or None,
+                "duration_ms": int((time.monotonic() - answer_started) * 1000),
                 "model": routed_model,
                 "sources": sources,
                 "web_search": _web_search_public(
