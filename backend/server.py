@@ -539,7 +539,8 @@ CODE_DELIVERY_GUARD = (
     "clairs. Pour un projet, inclus aussi README.md (installation et lancement) et le fichier de "
     "dépendances (requirements.txt, package.json…) seulement s'il est utile (aucun pour un site statique). "
     "N'écris jamais de ligne « Fichier: » pour l'archive .zip elle-même : l'application la crée. "
-    "CONCENTRATION : pour une demande de code, réponds UNIQUEMENT à cette demande — livre directement le "
+    "CONCENTRATION : pour une demande de code, réponds UNIQUEMENT à cette demande — commence par UNE "
+    "seule phrase qui annonce ce que tu vas créer (« Je vais créer … avec … »), livre ensuite le "
     "code demandé, puis 1 à 3 phrases pour l'installer ou le lancer. Ne parle d'aucun autre sujet : pas de "
     "rappel religieux, pas de morale, pas de présentation de toi-même, pas de liste d'idées ou de projets "
     "non demandés, pas d'émojis décoratifs. Si la demande est assez claire pour coder, code tout de suite "
@@ -7156,7 +7157,13 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             ).with_model(profile.get("provider", "gemini"), profile["model_id"]).with_params(**profile["params"])
 
             full_text = []
+            thinking_text = []
             async for event in chat.stream_message(UserMessage(text=user_text)):
+                if event.__class__.__name__ == "ThinkingDelta":
+                    # The model's reasoning: shown folded under "Réflexion en cours".
+                    thinking_text.append(event.thinking)
+                    yield sse({"type": "thinking", "content": event.thinking})
+                    continue
                 # StreamDone repeats the complete answer in `content`: only the
                 # TextDelta pieces are new text (same handling as NeuraCo).
                 if event.__class__.__name__ == "StreamDone":
@@ -7175,6 +7182,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "user_id": user["id"],
                 "role": "assistant",
                 "content": answer,
+                "thinking": "".join(thinking_text)[:20000] or None,
                 "model": routed_model,
                 "sources": sources,
                 "web_search": _web_search_public(

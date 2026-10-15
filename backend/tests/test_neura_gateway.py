@@ -94,6 +94,29 @@ def test_streaming_is_parsed_and_usage_kept():
     assert done.prompt_tokens == 500 and done.completion_tokens == 4
 
 
+def test_the_model_reasoning_is_kept_apart_from_the_answer():
+    def thinking(request):
+        lines = ["data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "Il veut un quiz. "}}]}),
+                 "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": "3 fichiers."}}]}),
+                 "data: " + json.dumps({"choices": [{"delta": {"content": "Je vais créer un quiz."}}]}),
+                 "data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 20}}),
+                 "data: [DONE]"]
+        return httpx.Response(200, text="\n\n".join(lines) + "\n\n")
+
+    neura_engine.configure(fresh_db(), CloudflareProvider("a", "t", MODEL, transport=httpx.MockTransport(thinking)),
+                           ENV, from_env=False)
+    chat = LlmChat(api_key="k", session_id="neura_stream_t", system_message="sys")
+
+    async def collect():
+        return [e async for e in chat.stream_message(UserMessage(text="Crée un quiz en HTML"))]
+
+    events = run(collect())
+    names = [e.__class__.__name__ for e in events]
+    assert names == ["ThinkingDelta", "ThinkingDelta", "TextDelta", "StreamDone"]
+    assert "".join(e.thinking for e in events[:2]) == "Il veut un quiz. 3 fichiers."
+    assert events[-1].content == "Je vais créer un quiz."  # the reasoning is not part of the answer
+
+
 def test_numbers_streamed_as_json_numbers_are_kept_as_text():
     # Seen live on @cf/qwen/qwen3-30b-a3b-fp8: {"delta": {"content": 5}} for "5 pillars".
     def numeric(request):

@@ -33,6 +33,8 @@ from emergentintegrations.llm.chat import (  # noqa: F401  (re-exported for serv
     UserMessage,
 )
 
+from dataclasses import dataclass
+
 from neura_budget import BudgetExceeded, ConcurrencyGate, NeuronBudget, Saturated
 from neura_inference import (
     InferenceProvider,
@@ -88,6 +90,12 @@ def looks_like_code_request(text: str) -> bool:
     plain = unicodedata.normalize("NFKD", text)
     plain = "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
     return bool(_CODE_WORDS.search(plain))
+
+
+@dataclass
+class ThinkingDelta:
+    """A piece of the model's reasoning: shown apart from the answer ("Réflexion en cours")."""
+    thinking: str
 
 
 class EngineRefused(ChatError):
@@ -383,6 +391,8 @@ class NeuraRuntime:
                     if kind == "delta":
                         pieces.append(value)
                         yield ("delta", value)
+                    elif kind == "reasoning":
+                        yield ("reasoning", value)
                     else:
                         result = value
         except (Saturated, ProviderError) as exc:
@@ -571,6 +581,8 @@ class LlmChat(_LegacyLlmChat):
             if kind == "delta":
                 full.append(value)
                 yield TextDelta(content=value)
+            elif kind == "reasoning":
+                yield ThinkingDelta(thinking=value)
             else:
                 info = value
         text = "".join(full)

@@ -227,8 +227,13 @@ class OpenAICompatibleProvider(InferenceProvider):
                         if chunk.get("usage"):
                             usage = chunk["usage"]
                         for choice in chunk.get("choices") or []:
-                            # reasoning_content (thinking) is never shown to the user.
-                            delta = as_text((choice.get("delta") or {}).get("content"))
+                            raw_delta = choice.get("delta") or {}
+                            # The model's reasoning ("thinking") is not part of the answer: it is
+                            # shown apart, folded under "Réflexion en cours".
+                            thought = as_text(raw_delta.get("reasoning_content") or raw_delta.get("reasoning"))
+                            if thought:
+                                yield ("reasoning", thought)
+                            delta = as_text(raw_delta.get("content"))
                             if delta:
                                 pieces.append(delta)
                                 yield ("delta", delta)

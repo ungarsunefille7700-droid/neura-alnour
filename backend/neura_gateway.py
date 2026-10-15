@@ -308,6 +308,8 @@ def create_gateway_routers(*, db, get_current_user: Callable, require_admin: Cal
                             break
                     if kind == "delta":
                         yield chunk({"content": value})
+                    elif kind == "reasoning":
+                        yield chunk({"reasoning_content": value})
                     else:
                         info = value
                 usage = {"prompt_tokens": info.get("prompt_tokens", 0),
