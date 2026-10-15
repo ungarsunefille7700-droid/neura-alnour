@@ -78,6 +78,17 @@ Calcul : (tokens d'entrée × tarif d'entrée + tokens de sortie × tarif de sor
 - le **cache** des premières questions identiques est gratuit (7 jours) ;
 - la mémoire de l'utilisateur (`/ai/memory`) reste dans le prompt système, donc elle est toujours prise en compte.
 
+### Modèles de code (mesuré le 15/10/2026 sur des projets complets, vérifiés et joués)
+
+| Modèle | Projets corrects | Coût par projet | Utilisé pour |
+|---|---|---|---|
+| @cf/openai/gpt-oss-120b | 5/5 | ≈ 200 Neurons | code des abonnés et VIP (`NEURA_ENGINE_CODE_MODEL`) |
+| @cf/google/gemma-4-26b-a4b-it | 5/5 | ≈ 85 Neurons | code des comptes gratuits (`NEURA_ENGINE_CODE_MODEL_FREE`) |
+| @cf/zai-org/glm-4.7-flash | 5/8 (3 projets cassés) | ≈ 115 Neurons | plus utilisé |
+
+Le quiz IA (10 questions) prend ≈ 18 à 25 s avec Gemma 4 : le délai d'attente du quiz passe à 35 s
+quand Cloudflare est actif (`QUIZ_GENERATION_TIMEOUT_SECONDS`).
+
 ## 5. Ce qui marche gratuitement, et ce qui ne marche pas
 
 | Fonction | Gratuit avec Cloudflare ? | Détail |

@@ -44,3 +44,16 @@ services:
         sync: false
       - key: VIP_ADMIN_2_PASSWORD
         sync: false
+      # --- Neura engine (Cloudflare Workers AI, plan gratuit, sans carte) : voir DEPLOIEMENT_CLOUDFLARE.md ---
+      - key: NEURA_INFERENCE_PROVIDER
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: NEURA_ENGINE_MODEL
+        sync: false
+      - key: NEURA_LEGACY_AI
+        sync: false
+      - key: NEURA_API_KEY_PEPPER
+        sync: false
