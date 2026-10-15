@@ -338,17 +338,29 @@ def test_llmchat_uses_the_engine_with_the_app_history(monkeypatch):
 
 def test_programming_requests_use_the_code_model_with_room_for_whole_files():
     fake = FakeCloudflare(answer="Fichier: app.py\n```python\nprint('salam')\n```")
-    runtime_with(fake, {"NEURA_ENGINE_CODE_MODEL": "@cf/zai-org/glm-4.7-flash"})
-    chat = LlmChat(api_key="k", session_id="neura_stream_1", system_message="Tu es Neura.") \
-        .with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=600)
-    run(chat.send_message(UserMessage(text="Crée-moi un script Python qui affiche salam, dans un zip")))
-    run(chat.send_message(UserMessage(text="Quelles sont les conditions de la prière ?")))
-    dev = LlmChat(api_key="k", session_id="dev_42", system_message="Tu es Neura Dev.")
-    run(dev.send_message(UserMessage(text="Et maintenant ?")))
-    code, religion, workspace = (body for _, body, _ in fake.requests)
-    assert code["model"] == "@cf/zai-org/glm-4.7-flash" and code["max_tokens"] == 4096
+    runtime_with(fake)
+    token = neura_engine.current_ai_subject.set({"kind": "user", "id": "p1", "plan": "paid"})
+    try:
+        chat = LlmChat(api_key="k", session_id="neura_stream_1", system_message="Tu es Neura.") \
+            .with_model("gemini", "gemini-2.5-flash").with_params(max_tokens=600)
+        run(chat.send_message(UserMessage(text="Crée-moi un script Python qui affiche salam, dans un zip")))
+        run(chat.send_message(UserMessage(text="Quelles sont les conditions de la prière ?")))
+        dev = LlmChat(api_key="k", session_id="dev_42", system_message="Tu es Neura Dev.")
+        run(dev.send_message(UserMessage(text="Et maintenant ?")))
+    finally:
+        neura_engine.current_ai_subject.reset(token)
+    token = neura_engine.current_ai_subject.set({"kind": "user", "id": "f1", "plan": "free"})
+    try:
+        free = LlmChat(api_key="k", session_id="neura_stream_2", system_message="Tu es Neura.")
+        run(free.send_message(UserMessage(text="Crée-moi un site web en HTML")))
+    finally:
+        neura_engine.current_ai_subject.reset(token)
+    code, religion, workspace, free_code = (body for _, body, _ in fake.requests)
+    # Measured best for whole projects; free accounts get gemma-4 (fits their daily limit).
+    assert code["model"] == "@cf/openai/gpt-oss-120b" and code["max_tokens"] == 6000
     assert religion["model"] == MODEL and religion["max_tokens"] == 600
-    assert workspace["model"] == "@cf/zai-org/glm-4.7-flash"
+    assert workspace["model"] == "@cf/openai/gpt-oss-120b"
+    assert free_code["model"] == "@cf/google/gemma-4-26b-a4b-it"
 
 
 def test_asking_for_a_zip_puts_the_correction_next_to_the_question_but_not_in_history():

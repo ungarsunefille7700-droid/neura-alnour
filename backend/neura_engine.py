@@ -169,10 +169,12 @@ class NeuraRuntime:
         self.db = db
         self.provider = provider
         self.model = (provider.default_model if provider else "") or env.get("NEURA_ENGINE_MODEL", "")
-        # Measured on Workers AI (programs run against tests): GLM-4.7-flash passed 3/3 for the
-        # lowest cost; empty = use the main model for code too.
-        self.code_model = (env.get("NEURA_ENGINE_CODE_MODEL", "@cf/zai-org/glm-4.7-flash") or "").strip() or self.model
-        self.code_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_CODE_MAX_OUTPUT_TOKENS", 4096))
+        # Measured on Workers AI (2026-10-15, the same multi-file web project generated, checked
+        # and played): gpt-oss-120b 5/5 working (~200 Neurons), gemma-4 5/5 (~85 Neurons),
+        # glm-4.7-flash 5/8. Free accounts get gemma-4, whose worst case fits their daily limit.
+        self.code_model = (env.get("NEURA_ENGINE_CODE_MODEL", "@cf/openai/gpt-oss-120b") or "").strip() or self.model
+        self.code_model_free = (env.get("NEURA_ENGINE_CODE_MODEL_FREE", "@cf/google/gemma-4-26b-a4b-it") or "").strip()             or self.code_model
+        self.code_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_CODE_MAX_OUTPUT_TOKENS", 6000))
         self.public_model = env.get("NEURA_PUBLIC_MODEL_NAME", "neura-al-noor")
         self.legacy_allowed = env.get("NEURA_LEGACY_AI", "on").strip().lower() != "off"
         self.max_output_tokens = int(_env_float(env, "NEURA_ENGINE_MAX_OUTPUT_TOKENS", 700))
@@ -220,6 +222,7 @@ class NeuraRuntime:
             "provider": self.provider.name if self.provider else "emergent",
             "model": self.model or None,
             "code_model": self.code_model or None,
+            "code_model_free": self.code_model_free or None,
             "code_max_output_tokens": self.code_max_output_tokens,
             "public_model": self.public_model,
             "legacy_ai": self.legacy_allowed,
@@ -312,10 +315,11 @@ class NeuraRuntime:
             return EngineRefused("Neura Al Noor reçoit trop de demandes. Réessaie dans une minute.", "saturated")
         raise exc
 
-    def _plan(self, task: str, max_tokens):
+    def _plan(self, task: str, max_tokens, subject=None):
         """(model, max output tokens) for a task: code gets the code model and room for whole files."""
         if task == "code":
-            return self.code_model, self.code_max_output_tokens
+            free = (subject or {}).get("kind") == "user" and (subject or {}).get("plan", "free") == "free"
+            return (self.code_model_free if free else self.code_model), self.code_max_output_tokens
         return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
 
     # ---------- inference ----------
@@ -326,7 +330,7 @@ class NeuraRuntime:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        model, max_tokens = self._plan(task, max_tokens)
+        model, max_tokens = self._plan(task, max_tokens, subject)
         key = self._cache_key(prepared, model)
         cached = await self._cache_get(key)
         if cached is not None:
@@ -366,7 +370,7 @@ class NeuraRuntime:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        model, max_tokens = self._plan(task, max_tokens)
+        model, max_tokens = self._plan(task, max_tokens, subject)
         key = self._cache_key(prepared, model)
         cached = await self._cache_get(key)
         if cached is not None:
