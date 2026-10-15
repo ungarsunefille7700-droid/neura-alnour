@@ -358,7 +358,7 @@ class NeuraRuntime:
             await self.budget.release(reservation)
             await self._log(source=source, subject=subject, status="error", error=getattr(exc, "code", "saturated"))
             raise self._refusal(exc)
-        except Exception:
+        except BaseException:  # also a cancelled call (timeout, client gone): give the reservation back
             await self.budget.release(reservation)
             await self._log(source=source, subject=subject, status="error", error="exception")
             raise
@@ -444,7 +444,7 @@ class NeuraRuntime:
         except (Saturated, ProviderError) as exc:
             await self.budget.release(reservation)
             raise self._refusal(exc)
-        except Exception:
+        except BaseException:  # also a cancelled call (timeout, client gone): give the reservation back
             await self.budget.release(reservation)
             raise
         await self.budget.settle(reservation, neurons)
@@ -464,7 +464,7 @@ class NeuraRuntime:
         except (Saturated, ProviderError) as exc:
             await self.budget.release(reservation)
             raise self._refusal(exc)
-        except Exception:
+        except BaseException:  # also a cancelled call (timeout, client gone): give the reservation back
             await self.budget.release(reservation)
             raise
         await self._log(source="voice_tts", subject=subject, status="ok", neurons=neurons)

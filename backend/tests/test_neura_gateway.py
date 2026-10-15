@@ -301,6 +301,27 @@ def test_runtime_refuses_without_calling_the_provider_when_budget_is_gone():
     assert "minuit UTC" in user_facing_ai_error(info.value)
 
 
+def test_an_abandoned_request_gives_its_reservation_back():
+    # Seen on 2026-10-15: the quiz gave up after its timeout (asyncio.wait_for cancels the
+    # call); the reserved worst case was never released and the day's budget leaked.
+    async def slow(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "trop tard"}}]})
+
+    runtime = neura_engine.configure(fresh_db(), CloudflareProvider("a", "t", MODEL, transport=httpx.MockTransport(slow)),
+                                     ENV, from_env=False)
+
+    async def scenario():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(runtime.complete([{"role": "user", "content": "x"}],
+                                                    subject={"kind": "user", "id": "q", "plan": "free"}), timeout=0.2)
+        return await runtime.budget.snapshot({"kind": "user", "id": "q", "plan": "free"})
+
+    snap = run(scenario())
+    assert snap["used"] == 0
+    assert snap["subject"]["used"] == 0
+
+
 def test_cloudflare_exhaustion_becomes_a_clear_refusal_and_frees_the_reservation():
     runtime = runtime_with(FakeCloudflare(status=429, error_body="daily free allocation exhausted"))
     with pytest.raises(EngineRefused):
