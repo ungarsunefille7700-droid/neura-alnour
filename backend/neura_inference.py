@@ -38,12 +38,14 @@ CLOUDFLARE_TEXT_NEURONS: Dict[str, Tuple[float, float]] = {
     "@cf/qwen/qwen2.5-coder-32b-instruct": (60000, 90909),
     "@cf/zai-org/glm-4.7-flash": (5500, 36400),
     "@cf/ibm-granite/granite-4.0-h-micro": (1542, 10158),
+    "@cf/meta/m2m100-1.2b": (31091, 31091),
 }
 # Neurons per audio minute.
 CLOUDFLARE_WHISPER_TURBO_NEURONS_PER_MIN = 46.63
 CLOUDFLARE_MELOTTS_NEURONS_PER_MIN = 18.63
 CLOUDFLARE_STT_MODEL = "@cf/openai/whisper-large-v3-turbo"
 CLOUDFLARE_TTS_MODEL = "@cf/myshell-ai/melotts"
+CLOUDFLARE_TRANSLATE_MODEL = "@cf/meta/m2m100-1.2b"
 # Languages MeloTTS is documented for on Workers AI ('en', 'fr' are the documented examples).
 CLOUDFLARE_TTS_LANGUAGES = {"en", "fr"}
 
@@ -119,6 +121,7 @@ class InferenceProvider:
 
     supports_stt = False
     supports_tts = False
+    supports_translate = False
 
 
 class OpenAICompatibleProvider(InferenceProvider):
@@ -255,6 +258,7 @@ class CloudflareProvider(OpenAICompatibleProvider):
     name = "cloudflare"
     supports_stt = True
     supports_tts = True
+    supports_translate = True
 
     def __init__(self, account_id: str, api_token: str, default_model: str, *,
                  disable_thinking: bool = True, transport: Optional[httpx.AsyncBaseTransport] = None,
@@ -307,6 +311,21 @@ class CloudflareProvider(OpenAICompatibleProvider):
         seconds = info.get("duration") if isinstance(info.get("duration"), (int, float)) else None
         seconds = seconds or self.audio_seconds_estimate(audio)
         return (result.get("text") or "").strip(), self.stt_neurons(seconds)
+
+    def translate_neurons(self, text: str) -> float:
+        tokens = max(1, len(text) // 3)  # worst case: ~3 characters per token, as many out as in
+        return self.neurons(CLOUDFLARE_TRANSLATE_MODEL, tokens, tokens)
+
+    async def translate(self, text: str, *, source: str = "english", target: str = "french") -> Tuple[str, float]:
+        response = await self._run(CLOUDFLARE_TRANSLATE_MODEL,
+                                   {"text": text, "source_lang": source, "target_lang": target})
+        result = response.json().get("result") or {}
+        usage = result.get("usage") or {}
+        neurons = usage.get("neurons")
+        if not isinstance(neurons, (int, float)):
+            neurons = self.neurons(CLOUDFLARE_TRANSLATE_MODEL, usage.get("prompt_tokens") or len(text) // 3,
+                                   usage.get("completion_tokens") or len(text) // 3)
+        return as_text(result.get("translated_text")).strip(), float(neurons)
 
     async def speak(self, text: str, *, language: str = "fr") -> bytes:
         response = await self._run(CLOUDFLARE_TTS_MODEL, {"prompt": text, "lang": language})

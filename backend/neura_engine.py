@@ -19,7 +19,9 @@ import hashlib
 import logging
 import os
 import re
+import asyncio
 import unicodedata
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -158,6 +160,26 @@ def reasoning_effort_for(text: str, level: Optional[str] = None) -> str:
     return "low"
 
 
+def translation_pieces(text: str, size: int = 300) -> List[str]:
+    """Sentences grouped up to `size` characters; line breaks are kept as their own pieces."""
+    pieces: List[str] = []
+    for line_index, line in enumerate(text.split("\n")):
+        if line_index:
+            pieces.append("\n")
+        current = ""
+        for sentence in re.split(r"(?<=[.!?])\s+", line.strip()):
+            if not sentence:
+                continue
+            if current and len(current) + len(sentence) + 1 > size:
+                pieces.append(current)
+                current = sentence
+            else:
+                current = f"{current} {sentence}".strip()
+        if current:
+            pieces.append(current)
+    return pieces
+
+
 @dataclass
 class ThinkingDelta:
     """A piece of the model's reasoning: shown apart from the answer ("Réflexion en cours")."""
@@ -254,6 +276,8 @@ class NeuraRuntime:
                                 and env.get("NEURA_VOICE_STT_PROVIDER", "legacy").lower() == "engine")
         self.tts_enabled = bool(provider and provider.supports_tts
                                 and env.get("NEURA_VOICE_TTS_PROVIDER", "legacy").lower() == "engine")
+        self.translate_enabled = bool(provider and getattr(provider, "supports_translate", False))
+        self._translations: "OrderedDict[str, str]" = OrderedDict()
 
         def plan_limit(name, default):
             value = env.get(name, default)
@@ -524,6 +548,46 @@ class NeuraRuntime:
         await self.budget.settle(reservation, neurons)
         await self._log(source="voice_stt", subject=subject, status="ok", neurons=neurons)
         return text
+
+    async def translate(self, text: str, *, subject=None) -> str:
+        """English -> French (the reasoning of gpt-oss is always written in English).
+        Translated in short pieces: the translation model drops the end of long ones."""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        if text in self._translations:
+            self._translations.move_to_end(text)
+            return self._translations[text]
+        pieces = translation_pieces(text)
+        subject = subject if subject is not None else current_ai_subject.get()
+        worst = sum(self.provider.translate_neurons(piece) for piece in pieces)
+        try:
+            reservation = await self.budget.reserve(subject, worst)
+        except BudgetExceeded as exc:
+            raise self._refusal(exc)
+
+        async def one(piece):
+            if not re.search(r"[A-Za-z]{3}", piece):
+                return piece, 0.0
+            async with self.gate.slot():
+                return await self.provider.translate(piece)
+
+        try:
+            done = await asyncio.gather(*(one(piece) for piece in pieces))
+        except (Saturated, ProviderError) as exc:
+            await self.budget.release(reservation)
+            raise self._refusal(exc)
+        except BaseException:  # also a cancelled call: give the reservation back
+            await self.budget.release(reservation)
+            raise
+        neurons = round(sum(cost for _, cost in done), 3)
+        await self.budget.settle(reservation, neurons)
+        await self._log(source="thinking_translate", subject=subject, status="ok", neurons=neurons)
+        french = " ".join(piece for piece, _ in done if piece).replace(" \n ", "\n").strip()
+        self._translations[text] = french
+        while len(self._translations) > 300:
+            self._translations.popitem(last=False)
+        return french
 
     async def speak(self, text: str, *, language: str, subject=None) -> bytes:
         subject = subject if subject is not None else current_ai_subject.get()

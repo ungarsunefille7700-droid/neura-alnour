@@ -6310,7 +6310,7 @@ async def get_account_dashboard(user: dict = Depends(get_current_user)):
 async def get_ai_memory(user: dict = Depends(get_current_user)):
     return await db.ai_memories.find(
         {"user_id": user["id"]}, {"_id": 0}
-    ).sort("updated_at", -1).to_list(100)
+    ).sort("updated_at", -1).to_list(MEMORY_MAX_PER_USER)
 
 @api_router.post("/ai/memory")
 async def create_ai_memory(data: AiMemoryCreate, user: dict = Depends(get_current_user)):
@@ -6328,6 +6328,11 @@ async def create_ai_memory(data: AiMemoryCreate, user: dict = Depends(get_curren
     }
     await db.ai_memories.insert_one(memory)
     return {k: v for k, v in memory.items() if k != "_id"}
+
+@api_router.delete("/ai/memory")
+async def delete_all_ai_memory(user: dict = Depends(get_current_user)):
+    result = await db.ai_memories.delete_many({"user_id": user["id"]})
+    return {"ok": True, "deleted": result.deleted_count}
 
 @api_router.delete("/ai/memory/{memory_id}")
 async def delete_ai_memory(memory_id: str, user: dict = Depends(get_current_user)):
@@ -6367,6 +6372,12 @@ def _is_safe_memory_value(value: str) -> bool:
 async def _save_ai_memory_from_text(user: dict, text: str) -> Optional[dict]:
     value = _extract_explicit_memory_request(text)
     if not value:
+        # Nothing asked explicitly: what is worth keeping is picked out in the background,
+        # after the reply has started (the answer is never slowed down by it).
+        if _auto_memory_candidate(text):
+            task = asyncio.create_task(_auto_remember(user, text))
+            _MEMORY_TASKS.add(task)
+            task.add_done_callback(_MEMORY_TASKS.discard)
         return None
     if not _is_safe_memory_value(value):
         return {"blocked": True, "reason": "sensitive"}
@@ -6384,21 +6395,184 @@ async def _save_ai_memory_from_text(user: dict, text: str) -> Optional[dict]:
     return memory
 
 
-async def _ai_memory_context(user: dict) -> str:
-    memory_limit = 24 if _has_plus_capabilities(user) else 12
-    memories = await db.ai_memories.find(
-        {"user_id": user["id"]}, {"_id": 0, "label": 1, "value": 1}
-    ).sort("updated_at", -1).to_list(memory_limit)
-    if not memories:
+# ---------- Long-term memory (like Claude: what the user tells, remembered months later) ----------
+MEMORY_MAX_PER_USER = 400
+_MEMORY_TASKS: set = set()
+_FRENCH_MONTHS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+                  "septembre", "octobre", "novembre", "décembre")
+_FIRST_PERSON = re.compile(
+    r"\b(je|j'|moi|mon|ma|mes|nous|notre|nos|m'appelle|i|i'm|my|me)\b", re.IGNORECASE)
+_RECALL_MARKERS = (
+    "souviens", "rappelles", "rappelle-toi", "rappelle toi", "je t'ai dit", "je t'avais dit",
+    "on a parle", "on avait parle", "la derniere fois", "l'autre jour", "tu sais que je",
+    "qu'est-ce que je t'ai", "remember", "i told you",
+)
+_MEMORY_STOPWORDS = {
+    "avec", "dans", "pour", "sans", "sous", "vers", "chez", "mais", "donc", "comme", "quand", "alors",
+    "aussi", "tres", "plus", "moins", "tout", "tous", "toute", "cette", "celui", "elle", "elles", "nous",
+    "vous", "leur", "leurs", "mon", "mes", "ton", "tes", "son", "ses", "est-ce", "quoi", "quel", "quelle",
+    "fait", "faire", "suis", "sont", "etre", "avoir", "avait", "etait", "dit", "dire", "souviens",
+    "rappelles", "rappelle", "tu", "te", "toi", "moi", "the", "what", "that", "this", "with",
+}
+
+
+def _memory_plain(text: str) -> str:
+    text = unicodedata.normalize("NFKD", (text or "").replace("’", "'"))
+    return "".join(c for c in text if not unicodedata.combining(c)).lower().strip()
+
+
+def _memory_words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]{4,}", _memory_plain(text)) if w not in _MEMORY_STOPWORDS}
+
+
+def _french_date(iso: Optional[str]) -> str:
+    try:
+        day = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return ""
-    lines = [f"- {item.get('label', 'memoire')}: {item.get('value', '')}" for item in memories if item.get("value")]
-    if not lines:
+    return f"{day.day} {_FRENCH_MONTHS[day.month - 1]} {day.year}"
+
+
+def _auto_memory_candidate(text: str) -> bool:
+    raw = (text or "").strip()
+    if len(raw) < 12 or len(raw) > 4000 or "```" in raw:
+        return False
+    return bool(_FIRST_PERSON.search(raw.replace("’", "'")))
+
+
+MEMORY_EXTRACTION_PROMPT = """Tu tiens la mémoire à long terme de NEURA AL-NOUR, comme un ami qui se souvient de ce qu'on lui confie.
+Date du jour : {today}
+
+Souvenirs déjà enregistrés :
+{existing}
+
+Nouveau message de l'utilisateur :
+\"\"\"{message}\"\"\"
+
+Garde UNIQUEMENT ce qui sera encore utile dans des semaines ou des mois : prénom, âge, ville, pays, famille, études, travail, projets en cours (avec leur nom, même techniques : un site, un serveur de jeu, une appli), objectifs, goûts, habitudes, préférences de réponse, événements importants de sa vie (avec leur date si elle est connue).
+Ignore : les questions, les demandes ponctuelles, le code lui-même, et tout secret (mot de passe, clé, code, numéro de carte).
+Écris chaque souvenir en une phrase courte en français, à la troisième personne (exemple : « Habite à Lyon. »). Une date relative (« demain », « samedi prochain ») est convertie en date réelle à partir de la date du jour.
+Si un souvenir existant change ou se précise, modifie-le avec son numéro au lieu d'en ajouter un nouveau. N'ajoute jamais un souvenir déjà présent.
+Réponds uniquement avec ce JSON : {{"ajouter": ["..."], "modifier": [{{"numero": 1, "texte": "..."}}]}}
+Si rien n'est à retenir : {{"ajouter": [], "modifier": []}}"""
+
+
+def _memory_json(raw: str) -> dict:
+    text = (raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+async def _auto_remember(user: dict, text: str) -> None:
+    from neura_engine import LlmChat, UserMessage
+    try:
+        existing = await db.ai_memories.find(
+            {"user_id": user["id"]}, {"_id": 0, "id": 1, "value": 1}
+        ).sort("updated_at", -1).to_list(80)
+        listing = "\n".join(f"{index + 1}. {item.get('value', '')}" for index, item in enumerate(existing)) or "(aucun)"
+        prompt = MEMORY_EXTRACTION_PROMPT.format(
+            today=_french_date(datetime.now(timezone.utc).isoformat()), existing=listing, message=text[:3000])
+        chat = LlmChat(
+            api_key=AI_LLM_KEY,
+            session_id=f"memory_{uuid.uuid4()}",
+            system_message="Tu réponds uniquement avec du JSON valide, sans markdown.",
+        ).with_model("openai", "gpt-4.1-mini").with_params(max_tokens=300, temperature=0.1)
+        data = _memory_json(await asyncio.wait_for(chat.send_message(UserMessage(text=prompt)), timeout=45))
+        now = datetime.now(timezone.utc).isoformat()
+        for item in (data.get("modifier") or [])[:5]:
+            try:
+                number = int(item.get("numero"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            value = str(item.get("texte") or "").strip()[:500]
+            if 1 <= number <= len(existing) and value and _is_safe_memory_value(value):
+                await db.ai_memories.update_one(
+                    {"id": existing[number - 1]["id"], "user_id": user["id"]},
+                    {"$set": {"value": value, "updated_at": now}},
+                )
+        known = {_memory_plain(item.get("value", "")) for item in existing}
+        for value in (data.get("ajouter") or [])[:5]:
+            value = str(value or "").strip()[:500]
+            if not value or not _is_safe_memory_value(value) or _memory_plain(value) in known:
+                continue
+            known.add(_memory_plain(value))
+            await db.ai_memories.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "label": "souvenir",
+                "value": value,
+                "source": "auto",
+                "created_at": now,
+                "updated_at": now,
+            })
+        extra = await db.ai_memories.count_documents({"user_id": user["id"]}) - MEMORY_MAX_PER_USER
+        if extra > 0:
+            oldest = await db.ai_memories.find(
+                {"user_id": user["id"], "source": "auto"}, {"_id": 0, "id": 1}
+            ).sort("updated_at", 1).to_list(extra)
+            await db.ai_memories.delete_many({"id": {"$in": [item["id"] for item in oldest]}})
+    except Exception as exc:  # memory must never break a conversation
+        logger.warning("Auto memory skipped: %s", str(exc)[:200])
+
+
+async def _past_conversations_context(user: dict, query: str) -> str:
+    """"Tu te souviens… ?": the user's own earlier messages on that subject, with their date."""
+    plain = _memory_plain(query)
+    if not any(marker in plain for marker in _RECALL_MARKERS):
         return ""
+    words = sorted(_memory_words(query), key=len, reverse=True)[:6]
+    if not words:
+        return ""
+    pattern = "|".join(re.escape(word) for word in words)
+    found = await db.messages.find(
+        {"user_id": user["id"], "role": "user", "content": {"$regex": pattern, "$options": "i"}},
+        {"_id": 0, "content": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(8)
+    found = [item for item in found if _memory_plain(item.get("content", "")) != plain][:6]
+    if not found:
+        return ""
+    lines = [f"- le {_french_date(item.get('created_at'))} : « {str(item.get('content', ''))[:300]} »" for item in found]
     return (
-        "\n\nMEMOIRE UTILISATEUR AUTORISEE :\n"
-        "Utilise uniquement ces informations explicitement enregistrees par l'utilisateur. "
-        "Ne revele pas cette liste sauf si l'utilisateur demande a voir sa memoire.\n"
+        "\n\nMESSAGES PRÉCÉDENTS DE L'UTILISATEUR SUR CE SUJET (ses propres mots, avec la date) :\n"
         + "\n".join(lines)
+        + "\nAppuie-toi dessus pour répondre à sa question sur ce qu'il t'a dit avant."
+    )
+
+
+async def _ai_memory_context(user: dict, query: str = "") -> str:
+    memory_limit = 60 if _has_plus_capabilities(user) else 30
+    memories = await db.ai_memories.find(
+        {"user_id": user["id"]}, {"_id": 0, "label": 1, "value": 1, "created_at": 1, "updated_at": 1}
+    ).sort("updated_at", -1).to_list(MEMORY_MAX_PER_USER)
+    memories = [item for item in memories if item.get("value")]
+    if len(memories) > memory_limit:
+        # The memories about what the user is talking about first, then the most recent ones.
+        wanted = _memory_words(query)
+        related = [item for item in memories if wanted & _memory_words(item["value"])]
+        recent = [item for item in memories if item not in related]
+        memories = (related + recent)[:memory_limit]
+    past = await _past_conversations_context(user, query) if query else ""
+    if not memories:
+        return past
+    lines = []
+    for item in memories:
+        said = _french_date(item.get("created_at"))
+        label = "" if item.get("label") in (None, "", "souvenir", "preference") else f"{item['label']} : "
+        lines.append(f"- {label}{item['value']}" + (f" (dit le {said})" if said else ""))
+    return (
+        "\n\nCE QUE TU SAIS DE L'UTILISATEUR (souvenirs de vos conversations précédentes, avec la date) :\n"
+        + "\n".join(lines)
+        + "\nUtilise ces souvenirs naturellement quand ils sont utiles, comme un ami qui se souvient "
+        "(sans réciter la liste). Si l'utilisateur demande ce qu'il t'a dit, ou quand, réponds avec ces dates. "
+        "Si une information n'y est pas, ne l'invente pas.\n"
+        "Pour voir, ajouter ou effacer ses souvenirs, il peut aller dans Paramètres, rubrique Mémoire."
+        + past
     )
 
 
@@ -6667,7 +6841,7 @@ Règles importantes:
 6. Si l'utilisateur envoie une image, analyse-la attentivement et décris ce que tu vois
 7. Ne commence pas automatiquement chaque réponse par la basmala. Utilise-la seulement si le contexte religieux la rend pertinente.
 
-""" + current_ai_context() + await _ai_memory_context(user)
+""" + current_ai_context() + await _ai_memory_context(user, message.content)
     system_message += document_context
     if memory_result and memory_result.get("blocked"):
         system_message += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
@@ -7119,7 +7293,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             )
             yield sse({"type": "model", "model": routed_model})
             memory_result = await _save_ai_memory_from_text(user, message.content)
-            memory_context = await _ai_memory_context(user)
+            memory_context = await _ai_memory_context(user, message.content)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             if memory_result and memory_result.get("blocked"):
                 system_prompt += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
@@ -13547,6 +13721,26 @@ async def _transcribe_fast(audio: bytes, extension: str, language: Optional[str]
         params["api_base"] = os.environ.get("INTEGRATION_PROXY_URL", "https://integrations.emergentagent.com") + "/llm"
         params["custom_llm_provider"] = "openai"
     return await atranscription(**params)
+
+
+class ThinkingTranslateRequest(BaseModel):
+    text: str = Field(..., max_length=20000)
+
+
+@api_router.post("/chat/thinking/translate")
+async def translate_thinking(request: ThinkingTranslateRequest, user: dict = Depends(get_current_user)):
+    """The model reasons in English: translated to French only when the user opens "Réflexion"."""
+    runtime = neura_engine.get_runtime()
+    if not (runtime and runtime.enabled and runtime.translate_enabled):
+        raise HTTPException(status_code=503, detail="Traduction de la réflexion indisponible.")
+    try:
+        text = await runtime.translate(request.text)
+    except Exception as exc:
+        refusal = user_facing_ai_error(exc)
+        logger.error("Thinking translation error: %s", str(exc)[:200])
+        raise HTTPException(status_code=429 if refusal else 503,
+                            detail=refusal or "Traduction temporairement indisponible.")
+    return {"text": text}
 
 
 @api_router.get("/voice/options")
