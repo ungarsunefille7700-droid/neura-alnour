@@ -144,7 +144,7 @@ class OpenAICompatibleProvider(InferenceProvider):
             headers["Authorization"] = f"Bearer {self.api_key}"
         return httpx.AsyncClient(headers=headers, timeout=self.timeout, transport=self.transport)
 
-    def _payload(self, messages, model, max_tokens, temperature, stream):
+    def _payload(self, messages, model, max_tokens, temperature, stream, reasoning_effort=None):
         payload = {
             "model": model or self.default_model,
             "messages": messages,
@@ -155,6 +155,8 @@ class OpenAICompatibleProvider(InferenceProvider):
         if stream:
             payload["stream_options"] = {"include_usage": True}
         payload.update(self.extra_body)
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
         return payload
 
     def _result(self, model, text, usage, messages, started) -> ChatResult:
@@ -177,14 +179,14 @@ class OpenAICompatibleProvider(InferenceProvider):
             usage_reported=reported,
         )
 
-    async def chat(self, messages, *, model=None, max_tokens=700, temperature=0.6) -> ChatResult:
+    async def chat(self, messages, *, model=None, max_tokens=700, temperature=0.6, reasoning_effort=None) -> ChatResult:
         model = model or self.default_model
         started = time.monotonic()
         try:
             async with self._client() as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
-                    json=self._payload(messages, model, max_tokens, temperature, False),
+                    json=self._payload(messages, model, max_tokens, temperature, False, reasoning_effort),
                 )
         except httpx.HTTPError as exc:
             raise ProviderError(f"Provider unreachable: {type(exc).__name__}", "unavailable") from exc
@@ -198,7 +200,7 @@ class OpenAICompatibleProvider(InferenceProvider):
         text = as_text(((choices[0] or {}).get("message") or {}).get("content"))
         return self._result(model, text, data.get("usage"), messages, started)
 
-    async def stream_chat(self, messages, *, model=None, max_tokens=700, temperature=0.6):
+    async def stream_chat(self, messages, *, model=None, max_tokens=700, temperature=0.6, reasoning_effort=None):
         """Yields ("delta", str) for each text piece, then ("done", ChatResult)."""
         model = model or self.default_model
         started = time.monotonic()
@@ -208,7 +210,7 @@ class OpenAICompatibleProvider(InferenceProvider):
             async with self._client() as client:
                 async with client.stream(
                     "POST", f"{self.base_url}/chat/completions",
-                    json=self._payload(messages, model, max_tokens, temperature, True),
+                    json=self._payload(messages, model, max_tokens, temperature, True, reasoning_effort),
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")

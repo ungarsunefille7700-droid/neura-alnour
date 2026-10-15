@@ -53,6 +53,9 @@ current_ai_subject: contextvars.ContextVar[Optional[dict]] = contextvars.Context
 
 QUOTA_PREFIX = "NEURA_QUOTA:"
 
+# The reflection level chosen in the app (auto | instant | medium | high), set per request.
+current_ai_level: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("neura_ai_level", default=None)
+
 # A request about programming: it goes to the code model with room for whole files.
 _CODE_WORDS = re.compile(
     r"\b(code|coder|codes|script|scripts|programme|programmer|fonction|function|classe|class|api|bug|debug|"
@@ -87,14 +90,72 @@ CONVERSATION_SESSIONS = ("neura_stream_", "neura_", "work_")
 GENERATION_SESSIONS = ("quiz_gen_",)
 
 
+# Asking to WRITE / FIX code, versus asking what a technical word means.
+_CODE_ACTIONS = re.compile(
+    r"\b(cree|creer|crees|creez|ecris|ecrire|ecrit|genere|generer|fais|fait|faire|code|coder|developpe\w*|"
+    r"programme|programmer|corrige\w*|debug\w*|debogue\w*|refactor\w*|optimise\w*|ajoute\w*|modifie\w*|"
+    r"implemente\w*|construis|construire|realise\w*|automatise\w*|convertis|convertir|traduis ce code|"
+    r"build|write|create|fix|make)\b"
+)
+_CODE_TROUBLE = re.compile(r"\b(traceback|stack trace|erreur de compilation|exception|bug|crash\w*|plante)\b")
+_EXPLANATION = re.compile(
+    r"\b(explique\w*|c'?est quoi|qu'?est[- ]ce|definition|difference entre|pourquoi|a quoi sert|"
+    r"comment fonctionne|que veut dire|signifie|what is|explain)\b"
+)
+
+
+def _plain(text: str) -> str:
+    plain = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
+
+
 def looks_like_code_request(text: str) -> bool:
+    """True when the user wants code written or fixed. « Explique-moi ce qu'est une API »
+    is a question about a word, not a code request (measured: it was sent to the slow code
+    model and took 12 s for a simple explanation)."""
     if not text:
         return False
     if "```" in text:
         return True
-    plain = unicodedata.normalize("NFKD", text)
-    plain = "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
-    return bool(_CODE_WORDS.search(plain))
+    plain = _plain(text)
+    if not _CODE_WORDS.search(plain) and not _CODE_TROUBLE.search(plain):
+        return False
+    if _CODE_ACTIONS.search(plain) or _CODE_TROUBLE.search(plain):
+        return True
+    return not _EXPLANATION.search(plain)
+
+
+# Reasoning effort for models that support it (gpt-oss on Workers AI honours
+# reasoning_effort: measured 149 / 890 / 8 707 characters of reasoning for low / medium /
+# high on the same small script, first word 2.9 s / 3.7 s / 32.5 s).
+_COMPLEXITY = re.compile(
+    r"\b(complet|complete|systeme|plusieurs|interface|interfaces|nui|base de donnees|sql|mysql|"
+    r"client et serveur|serveur|backend|frontend|authentification|connexion|architecture|multijoueur|"
+    r"paiement|tableau de bord|dashboard|admin|temps reel|securite|api|inventaire|economie|"
+    r"framework|react|fastapi|module|modules|avance|avancee|avancees)\b"
+)
+_SMALL = re.compile(r"\b(petit|petite|simple|rapide|court|courte|basique|exemple)\b")
+EFFORT_BY_LEVEL = {"instant": "low", "medium": "medium", "high": "high"}
+# Models whose reasoning effort can be set (others ignore it, so it is not sent to them).
+REASONING_EFFORT_MODELS = {"@cf/openai/gpt-oss-120b", "@cf/openai/gpt-oss-20b"}
+
+
+def reasoning_effort_for(text: str, level: Optional[str] = None) -> str:
+    """The user's level when chosen (Instantané / Moyen / Élevé); in Auto, proportional to the
+    request: a small script thinks little, a complete multi-part project thinks a lot."""
+    chosen = EFFORT_BY_LEVEL.get(str(level or "auto").lower())
+    if chosen:
+        return chosen
+    plain = _plain(text)
+    score = len(set(_COMPLEXITY.findall(plain)))
+    score += 1 if len(plain) > 150 else 0
+    score += 1 if len(plain) > 500 else 0
+    score -= 2 if _SMALL.search(plain) else 0
+    if score >= 5:
+        return "high"
+    if score >= 1:
+        return "medium"
+    return "low"
 
 
 @dataclass
@@ -285,7 +346,7 @@ class NeuraRuntime:
             )
 
     async def _log(self, *, source, subject, status, result=None, neurons=0.0, cached=False, latency_ms=0, error=None,
-                   model=None):
+                   model=None, effort=None):
         now = datetime.now(timezone.utc)
         doc = {
             "created_at": now,
@@ -296,6 +357,7 @@ class NeuraRuntime:
             "plan": (subject or {}).get("plan"),
             "provider": self.provider.name if self.provider else "emergent",
             "model": model or self.model,
+            "effort": effort,
             "status": status,
             "cached": cached,
             "prompt_tokens": getattr(result, "prompt_tokens", 0),
@@ -329,6 +391,14 @@ class NeuraRuntime:
             return self.model, min(int(max_tokens or self.max_output_tokens), self.code_max_output_tokens)
         return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
 
+    @staticmethod
+    def _effort(model: str, task: str, prepared: List[dict]) -> Optional[str]:
+        """Reasoning effort proportional to the request (or the level the user chose)."""
+        if model not in REASONING_EFFORT_MODELS or task != "code":
+            return None
+        last = next((m["content"] for m in reversed(prepared) if m["role"] == "user"), "")
+        return reasoning_effort_for(last, current_ai_level.get())
+
     # ---------- inference ----------
     async def complete(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app",
                        task="chat") -> tuple:
@@ -349,10 +419,12 @@ class NeuraRuntime:
         except BudgetExceeded as exc:
             await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope, model=model)
             raise self._refusal(exc)
+        effort = self._effort(model, task, prepared)
         try:
             async with self.gate.slot():
                 result = await self.provider.chat(
-                    prepared, model=model, max_tokens=max_tokens, temperature=temperature
+                    prepared, model=model, max_tokens=max_tokens, temperature=temperature,
+                    **({"reasoning_effort": effort} if effort else {}),
                 )
         except (Saturated, ProviderError) as exc:
             await self.budget.release(reservation)
@@ -364,7 +436,7 @@ class NeuraRuntime:
             raise
         await self.budget.settle(reservation, result.neurons)
         await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons,
-                        model=model)
+                        model=model, effort=effort)
         await self._cache_put(key, result.text)
         return result.text, {
             "cached": False, "neurons": result.neurons, "prompt_tokens": result.prompt_tokens,
@@ -394,10 +466,12 @@ class NeuraRuntime:
             raise self._refusal(exc)
         result = None
         pieces: List[str] = []
+        effort = self._effort(model, task, prepared)
         try:
             async with self.gate.slot():
                 async for kind, value in self.provider.stream_chat(
-                    prepared, model=model, max_tokens=max_tokens, temperature=temperature
+                    prepared, model=model, max_tokens=max_tokens, temperature=temperature,
+                    **({"reasoning_effort": effort} if effort else {}),
                 ):
                     if kind == "delta":
                         pieces.append(value)
@@ -425,7 +499,7 @@ class NeuraRuntime:
             return
         await self.budget.settle(reservation, result.neurons)
         await self._log(source=source, subject=subject, status="ok", result=result, neurons=result.neurons,
-                        model=model)
+                        model=model, effort=effort)
         await self._cache_put(key, result.text)
         yield ("done", {"cached": False, "neurons": result.neurons, "prompt_tokens": result.prompt_tokens,
                         "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,

@@ -417,12 +417,40 @@ def test_the_quiz_generator_is_not_mistaken_for_a_code_request():
     assert fake.requests[1][1]["model"] == MODEL
 
 
+def test_reasoning_effort_is_proportional_to_the_request_or_the_chosen_level():
+    fake = FakeCloudflare(answer="ok")
+    runtime_with(fake)
+    subject = neura_engine.current_ai_subject.set({"kind": "user", "id": "v", "plan": "vip"})
+    try:
+        def ask(text, level=None):
+            token = neura_engine.current_ai_level.set(level)
+            try:
+                chat = LlmChat(api_key="k", session_id="neura_stream_e", system_message="Tu es Neura.")
+                run(chat.send_message(UserMessage(text=text)))
+            finally:
+                neura_engine.current_ai_level.reset(token)
+            return fake.requests[-1][1]
+
+        small = ask("Crée-moi un petit script Lua pour FiveM qui affiche un message de bienvenue.")
+        project = ask("Développe un système complet de gestion d'entreprises pour FiveM avec une interface NUI, "
+                      "des scripts client et serveur et une base de données SQL.")
+        chosen = ask("Crée-moi un petit script Lua pour FiveM.", level="high")
+        question = ask("Explique-moi ce qu'est une API.")
+    finally:
+        neura_engine.current_ai_subject.reset(subject)
+    assert small["model"] == "@cf/openai/gpt-oss-120b" and small["reasoning_effort"] == "low"
+    assert project["reasoning_effort"] == "high"
+    assert chosen["reasoning_effort"] == "high"  # the level chosen by the user wins
+    assert question["model"] == MODEL and "reasoning_effort" not in question  # a question, not code
+
+
 def test_code_detection():
     from neura_engine import looks_like_code_request
     for text in ("tu sais faire du code puis les mettre dans un zip ?", "Crée-moi un site web", "corrige ce bug",
                  "```js\nlet a\n```", "une API FastAPI"):
         assert looks_like_code_request(text), text
-    for text in ("Quelles sont les conditions de la prière ?", "Explique la sourate Al-Fatiha", "Salam, ça va ?"):
+    for text in ("Quelles sont les conditions de la prière ?", "Explique la sourate Al-Fatiha", "Salam, ça va ?",
+                 "Explique-moi ce qu'est une API.", "C'est quoi la différence entre Python et JavaScript ?"):
         assert not looks_like_code_request(text), text
 
 

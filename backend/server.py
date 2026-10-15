@@ -38,7 +38,7 @@ import struct
 import unicodedata
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 import neura_engine
-from neura_engine import current_ai_subject, looks_like_code_request, user_facing_ai_error
+from neura_engine import current_ai_level, current_ai_subject, looks_like_code_request, user_facing_ai_error
 from neura_gateway import create_gateway_routers
 
 ROOT_DIR = Path(__file__).parent
@@ -6412,6 +6412,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
         if _has_plus_capabilities(user)
         else "auto"
     )
+    current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
     web_decision = _web_search_decision(
         message.content, message.web_mode, bool(message.web_search)
     )
@@ -6949,6 +6950,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             if _has_plus_capabilities(user)
             else "auto"
         )
+        current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
         web_decision = _web_search_decision(
             message.content, message.web_mode, bool(message.web_search)
         )
@@ -7275,6 +7277,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
 
             selected_model = _normalize_model_key(message.model)
             requested_mode = _normalize_intelligence_mode(message.intelligence_mode)
+            current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
             web_decision = _web_search_decision(
                 message.content, message.web_mode, bool(message.web_search)
             )
