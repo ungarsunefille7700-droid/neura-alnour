@@ -9734,7 +9734,12 @@ import random
 import json
 
 # Beyond this delay the quiz starts with the built-in question bank.
-QUIZ_GENERATION_TIMEOUT_SECONDS = 15
+# The previous provider answered in ~4 s; on Cloudflare Workers AI, gemma-4 needs ~21 s for the
+# 10 questions (measured 2026-10-15), so the wait is longer there. Built-in questions remain the fallback.
+QUIZ_GENERATION_TIMEOUT_SECONDS = float(os.environ.get(
+    "QUIZ_GENERATION_TIMEOUT_SECONDS",
+    "15" if os.environ.get("NEURA_INFERENCE_PROVIDER", "emergent").strip().lower() == "emergent" else "35",
+))
 QUIZ_GENERATION_MODEL = os.environ.get("QUIZ_GENERATION_MODEL", "gpt-4.1-mini")
 
 @api_router.post("/quiz/start")

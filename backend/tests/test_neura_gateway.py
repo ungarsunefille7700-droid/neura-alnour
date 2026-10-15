@@ -380,6 +380,22 @@ def test_asking_for_a_zip_puts_the_correction_next_to_the_question_but_not_in_hi
     assert "Tu PEUX" not in fake.requests[1][1]["messages"][-1]["content"]
 
 
+def test_the_quiz_generator_is_not_mistaken_for_a_code_request():
+    # Regression seen on 2026-10-15: the quiz prompt says "JSON", it was sent to the slow
+    # code model and capped, timed out, and the app fell back to the built-in questions.
+    fake = FakeCloudflare(answer='[{"question": "?", "options": ["a","b","c","d"], "correct_answer": 0}]')
+    runtime_with(fake)
+    quiz = LlmChat(api_key="k", session_id="quiz_gen_1", system_message="Tu retournes uniquement du JSON valide.") \
+        .with_model("openai", "gpt-4.1-mini").with_params(max_tokens=4096, temperature=1.0)
+    run(quiz.send_message(UserMessage(text="Génère exactement 10 questions. Retourne UNIQUEMENT un tableau JSON valide.")))
+    body = fake.requests[0][1]
+    assert body["model"] == MODEL  # the main model, not the code model
+    assert body["max_tokens"] == 4096  # the length the quiz asks for, not the 700 chat cap
+    tutor = LlmChat(api_key="k", session_id="lang_stream_1", system_message="Professeur")
+    run(tutor.send_message(UserMessage(text="Explique-moi le mot code en anglais")))
+    assert fake.requests[1][1]["model"] == MODEL
+
+
 def test_code_detection():
     from neura_engine import looks_like_code_request
     for text in ("tu sais faire du code puis les mettre dans un zip ?", "Crée-moi un site web", "corrige ce bug",

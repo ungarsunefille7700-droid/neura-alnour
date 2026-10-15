@@ -82,6 +82,11 @@ def asks_for_zip(text: str) -> bool:
     return bool(_ZIP_WORDS.search(plain))
 
 
+# Conversations where the user may ask for code (chat, Work); the app's own generations.
+CONVERSATION_SESSIONS = ("neura_stream_", "neura_", "work_")
+GENERATION_SESSIONS = ("quiz_gen_",)
+
+
 def looks_like_code_request(text: str) -> bool:
     if not text:
         return False
@@ -320,6 +325,8 @@ class NeuraRuntime:
         if task == "code":
             free = (subject or {}).get("kind") == "user" and (subject or {}).get("plan", "free") == "free"
             return (self.code_model_free if free else self.code_model), self.code_max_output_tokens
+        if task == "generation":
+            return self.model, min(int(max_tokens or self.max_output_tokens), self.code_max_output_tokens)
         return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
 
     # ---------- inference ----------
@@ -553,11 +560,18 @@ class LlmChat(_LegacyLlmChat):
         return self.extra_params.get("max_tokens"), self.extra_params.get("temperature", 0.6)
 
     def _task(self, user_message) -> str:
-        """The Developer workspace, and any chat message about programming, use the code model."""
-        if str(self.session_id or "").startswith("dev_"):
+        """code: the Developer workspace, and a conversation message about programming.
+        generation: the app's own requests (quiz…) — never mistaken for code because their
+        prompt says "JSON", and given the length they ask for. chat: everything else."""
+        session = str(self.session_id or "")
+        if session.startswith("dev_"):
             return "code"
+        if session.startswith(GENERATION_SESSIONS):
+            return "generation"
         text = user_message.text if user_message is not None else ""
-        return "code" if looks_like_code_request(text) else "chat"
+        if session.startswith(CONVERSATION_SESSIONS) and looks_like_code_request(text):
+            return "code"
+        return "chat"
 
     async def send_message(self, user_message):
         runtime = self._engine_for(user_message)
