@@ -17513,8 +17513,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def prepare_first_quiz():
-    # The first player after a restart does not wait for the AI either.
-    task = asyncio.create_task(_refill_quiz_pool(None))
+    # The first player after a restart does not wait for the AI either. Started a little after
+    # the start, never in its way.
+    async def later():
+        await asyncio.sleep(10)
+        await _refill_quiz_pool(None)
+
+    task = asyncio.create_task(later())
     _QUIZ_REFILLS.add(task)
     task.add_done_callback(_QUIZ_REFILLS.discard)
 
