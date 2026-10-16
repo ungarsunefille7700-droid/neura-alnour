@@ -1270,7 +1270,21 @@ def _ai_subject(user: dict) -> dict:
         plan = "paid"
     else:
         plan = "free"
-    return {"kind": "user", "id": user.get("id"), "plan": plan}
+    subject = {"kind": "user", "id": user.get("id"), "plan": plan}
+    if plan == "paid":
+        # Each paid offer has its own daily AI allowance (the offers say "higher"), all of
+        # them inside the app's overall daily budget.
+        limit = PAID_PLAN_NEURONS.get(user.get("subscription"))
+        if limit is not None:
+            subject["limit"] = limit
+    return subject
+
+
+PAID_PLAN_NEURONS = {
+    plan: float(os.environ.get(f"NEURA_AI_USER_NEURONS_{plan.upper()}", default))
+    for plan, default in (("mongo", 600), ("pro", 1200), ("developer", 1200), ("neura_plus", 2000),
+                          ("neura_ultra", 3000))
+}
 
 
 def _is_premium_ai(user: dict) -> bool:
@@ -2704,8 +2718,9 @@ def _chat_profile_for_user(user: dict, requested_model: Optional[str], quota_sta
     """Resolve the model for a request: router family + quota stage, then the
     catalogue model chosen by a Plus-level user, then per-model constraints."""
     catalog = CATALOG_MODELS_BY_KEY.get(requested_model) if isinstance(requested_model, str) else None
-    if catalog and not _has_plus_capabilities(user):
-        # Downgraded plan: fall back to the router of the same family.
+    runtime = neura_engine.get_runtime()
+    if catalog and (not _has_plus_capabilities(user) or (runtime and runtime.enabled)):
+        # Downgraded plan, or the Neura engine (no catalogue): the style of the same family.
         requested_model, catalog = catalog["family"], None
     profile = _router_profile_for_user(user, catalog["family"] if catalog else requested_model, quota_stage)
     if catalog:
@@ -2842,7 +2857,10 @@ def _model_options_public(user: dict) -> list[dict]:
         }
         for key in SELECTABLE_MODEL_KEYS
     ]
-    if _has_plus_capabilities(user):
+    runtime = neura_engine.get_runtime()
+    # With the Neura engine every catalogue name would answer exactly like its style: they are
+    # not offered (the 3 styles stay). The catalogue comes back with the legacy providers.
+    if _has_plus_capabilities(user) and not (runtime and runtime.enabled):
         options.extend(
             {
                 "key": key,

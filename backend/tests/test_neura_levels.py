@@ -163,3 +163,23 @@ def test_a_stopped_answer_is_charged_and_logged_never_left_open():
     first, logs = asyncio.run(scenario())
     assert first[0] == "reasoning" and time.monotonic() - start < 5
     assert [row["status"] for row in logs] == ["cancelled"] and logs[0]["neurons"] > 0
+
+
+def test_each_paid_offer_has_a_higher_daily_ai_limit():
+    limits = [server._ai_subject({"id": "u", "subscription": plan}).get("limit")
+              for plan in ("mongo", "pro", "neura_plus", "neura_ultra")]
+    assert limits == sorted(limits) and len(set(limits)) == 4
+    assert "limit" not in server._ai_subject({"id": "u", "subscription": "free"})
+
+
+def test_the_menu_offers_styles_not_other_companies_models():
+    engine()
+    options = server._model_options_public({"id": "u", "email": "u@neura-test.fr", "subscription": "neura_ultra"})
+    assert [option["key"] for option in options] == ["chatgpt", "claude", "gemini"]
+
+
+def test_a_conversation_that_had_picked_a_catalogue_name_goes_back_to_its_style():
+    engine()
+    user = {"id": "u", "email": "u@neura-test.fr", "subscription": "neura_ultra"}
+    public = server._resolved_model_public(user, "model:gpt-5.6-sol", "advanced")
+    assert public["selection_key"] == "chatgpt" and public["label"].startswith("Neura Al Noor · style ChatGPT")
