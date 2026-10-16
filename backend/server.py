@@ -483,7 +483,8 @@ IDENTITY_GUARD = (
     "ou quelle société est derrière toi, réponds uniquement que tu es l'intelligence artificielle "
     "de l'application NEURA AL-NOUR, développée pour accompagner les musulmans, SANS jamais nommer "
     "ni un fournisseur ni un modèle sous-jacent, et sans dire que tu as été entraîné par une "
-    "société tierce.\n"
+    "société tierce. Ne commence jamais une réponse par ton propre nom ni par un titre "
+    "« NEURA AL-NOUR » : réponds directement, comme dans une conversation.\n"
 )
 
 # Base chat system prompt (used by the streaming endpoint). Mirrors the prompt of /chat/message
@@ -991,7 +992,18 @@ PROVIDER_DISPLAY_NAMES = {
     "anthropic": "Anthropic",
     "gemini": "Google Gemini",
 }
-INTELLIGENCE_MODES = ("auto", "high", "medium", "instant")
+INTELLIGENCE_MODES = ("auto", "very_high", "high", "medium", "instant")
+REASONING_LEVEL_LABELS = {"instant": "Instantané", "medium": "Moyenne", "high": "Élevée", "very_high": "Très élevée"}
+# The reasoning levels each subscription gives (checked by the server, not only hidden in the app).
+REASONING_LEVELS_BY_PLAN = {
+    "free": ("instant",),
+    "mongo": ("instant", "medium"),
+    "pro": ("instant", "medium", "high"),
+    "developer": ("instant", "medium", "high"),  # retired plan: kept at the Plus level
+    "neura_plus": ("instant", "medium", "high", "very_high"),
+    "neura_ultra": ("instant", "medium", "high", "very_high"),
+}
+REASONING_LEVEL_PLAN_NEEDED = {"medium": "Mongo", "high": "Plus", "very_high": "Neura+"}
 
 
 # Full chat model catalogue, offered on top of the three routers to the plans
@@ -2887,7 +2899,7 @@ async def _active_model_for_conversation(
                     mode = _normalize_intelligence_mode(quota_doc.get("last_requested_mode") or mode)
                 if intelligence_mode is not None and mode != "auto":
                     levels_available = _plus_available_levels(quota_doc, plan)
-                    preferred = {"high": "advanced", "medium": "medium", "instant": "economic"}[mode]
+                    preferred = {"very_high": "advanced", "high": "advanced", "medium": "medium", "instant": "economic"}[mode]
                     if preferred == "advanced" and not levels_available["high"]:
                         stage = "medium" if levels_available["medium"] else "economic"
                         reason = "quota"
@@ -2898,13 +2910,13 @@ async def _active_model_for_conversation(
                         stage = preferred
                         reason = "manual"
     elif _has_plus_capabilities(user):
-        levels_available = {"high": True, "medium": True, "instant": True}
-        stage = {"high": "advanced", "medium": "medium", "instant": "economic"}.get(mode, "advanced")
+        levels_available = {"very_high": True, "high": True, "medium": True, "instant": True}
+        stage = {"very_high": "advanced", "high": "advanced", "medium": "medium", "instant": "economic"}.get(mode, "advanced")
     return _resolved_model_public(
         user,
         selection_key,
         stage,
-        requested_mode=mode if _has_plus_capabilities(user) else None,
+        requested_mode=_allowed_reasoning_level(user, mode),
         selection_reason=reason if _has_plus_capabilities(user) else None,
         levels_available=levels_available,
         reset_at=reset_at,
@@ -3660,6 +3672,12 @@ async def _maybe_text_notice(doc: dict, kind: str) -> Optional[dict]:
 def _normalize_intelligence_mode(value: Optional[str]) -> str:
     aliases = {
         "auto": "auto",
+        "very_high": "very_high",
+        "very-high": "very_high",
+        "xhigh": "very_high",
+        "très élevée": "very_high",
+        "tres elevee": "very_high",
+        "tres_elevee": "very_high",
         "high": "high",
         "advanced": "high",
         "élevée": "high",
@@ -3674,9 +3692,46 @@ def _normalize_intelligence_mode(value: Optional[str]) -> str:
     return aliases.get(str(value or "auto").strip().lower(), "auto")
 
 
+def _reasoning_levels_for(user: dict) -> tuple:
+    if user.get("is_vip") or is_vip_email(user.get("email")):
+        return REASONING_LEVELS_BY_PLAN["neura_ultra"]
+    return REASONING_LEVELS_BY_PLAN.get(user.get("subscription") or "free", REASONING_LEVELS_BY_PLAN["free"])
+
+
+def _allowed_reasoning_level(user: dict, requested: Optional[str]) -> str:
+    """The level really applied: the one chosen when the subscription includes it, otherwise
+    the highest one it includes below it. Auto stays for the plans that already had it."""
+    mode = _normalize_intelligence_mode(requested)
+    allowed = _reasoning_levels_for(user)
+    if mode == "auto":
+        return "auto" if _has_plus_capabilities(user) else allowed[0]
+    order = ("instant", "medium", "high", "very_high")
+    for level in reversed(order[: order.index(mode) + 1]):
+        if level in allowed:
+            return level
+    return allowed[0]
+
+
+def _reasoning_mode_options(user: dict) -> list:
+    allowed = _reasoning_levels_for(user)
+    options = [{"key": "auto", "label": "Auto", "available": True}] if _has_plus_capabilities(user) else []
+    for key in ("instant", "medium", "high", "very_high"):
+        options.append({"key": key, "label": REASONING_LEVEL_LABELS[key], "available": key in allowed,
+                        "plan_needed": None if key in allowed else REASONING_LEVEL_PLAN_NEEDED.get(key)})
+    return options
+
+
+def _level_after_quota(requested_mode: str, reservation: dict) -> str:
+    """A Plus quota that switched to a lighter stage also lightens the engine's reasoning."""
+    if requested_mode in ("auto", "instant") or reservation.get("selection_reason") != "quota":
+        return requested_mode
+    return {"medium": "medium", "economic": "instant"}.get(reservation.get("stage"), requested_mode)
+
+
 def _plus_available_levels(doc: Optional[dict], plan: str = "plus") -> dict:
     config = _text_quota_config(plan)
     return {
+        "very_high": int((doc or {}).get("advanced_used", 0)) < config["advanced_budget"],
         "high": int((doc or {}).get("advanced_used", 0)) < config["advanced_budget"],
         "medium": int((doc or {}).get("medium_used", 0)) < config["medium_budget"],
         "instant": True,
@@ -3724,6 +3779,7 @@ async def _reserve_plus_text_quota(
     mode = _normalize_intelligence_mode(requested_mode)
     doc = await _get_text_quota_doc(user["id"], conversation_id, True, plan)
     preferred = {
+        "very_high": "advanced",
         "high": "advanced",
         "medium": "medium",
         "instant": "economic",
@@ -3824,6 +3880,7 @@ async def _reserve_text_quota(
         if _has_plus_capabilities(user):
             mode = _normalize_intelligence_mode(requested_mode)
             stage = {
+                "very_high": "advanced",
                 "high": "advanced",
                 "medium": "medium",
                 "instant": "economic",
@@ -6751,12 +6808,8 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     from neura_engine import LlmChat, UserMessage
 
     selected_model = _normalize_model_key(message.model)
-    requested_mode = (
-        _normalize_intelligence_mode(message.intelligence_mode)
-        if _has_plus_capabilities(user)
-        else "auto"
-    )
-    current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
+    requested_mode = _allowed_reasoning_level(user, message.intelligence_mode)
+    current_ai_level.set(requested_mode)  # reasoning level of the Neura engine
     web_decision = _web_search_decision(
         message.content, message.web_mode, bool(message.web_search)
     )
@@ -6951,6 +7004,7 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
             has_tools=bool(web_decision["should_search"]),
             has_document=bool(message.document_text),
         )
+        current_ai_level.set(_level_after_quota(requested_mode, text_reservation))
         if text_reservation["stage"] == "blocked":
             await _fail_chat_request(request_record)
             raise HTTPException(status_code=429, detail={
@@ -7289,12 +7343,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
         from neura_engine import LlmChat, UserMessage
         request_record = None
         selected_model = _normalize_model_key(message.model)
-        requested_mode = (
-            _normalize_intelligence_mode(message.intelligence_mode)
-            if _has_plus_capabilities(user)
-            else "auto"
-        )
-        current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
+        requested_mode = _allowed_reasoning_level(user, message.intelligence_mode)
+        current_ai_level.set(requested_mode)  # reasoning level of the Neura engine
         web_decision = _web_search_decision(
             message.content, message.web_mode, bool(message.web_search)
         )
@@ -7425,6 +7475,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 message.content,
                 has_tools=bool(web_decision["should_search"]),
             )
+            current_ai_level.set(_level_after_quota(requested_mode, text_reservation))
             if text_reservation["stage"] == "blocked":
                 await _fail_chat_request(request_record)
                 yield sse({
@@ -7461,7 +7512,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 levels_available=(text_reservation.get("quota") or {}).get("levels_available"),
                 reset_at=(text_reservation.get("quota") or {}).get("reset_at"),
             )
-            yield sse({"type": "model", "model": routed_model})
+            yield sse({"type": "model", "model": routed_model, "reasoning_level": current_ai_level.get()})
             memory_result = await _save_ai_memory_from_text(user, message.content)
             memory_context = await _ai_memory_context(user, message.content)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
@@ -7621,8 +7672,8 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
             yield work_sse({"type": "phase", "phase": "analyzing", "label": "Analyse de la tâche"})
 
             selected_model = _normalize_model_key(message.model)
-            requested_mode = _normalize_intelligence_mode(message.intelligence_mode)
-            current_ai_level.set(requested_mode)  # reasoning effort of the Neura engine
+            requested_mode = _allowed_reasoning_level(user, message.intelligence_mode)
+            current_ai_level.set(requested_mode)  # reasoning level of the Neura engine
             web_decision = _web_search_decision(
                 message.content, message.web_mode, bool(message.web_search)
             )
@@ -7815,6 +7866,7 @@ async def run_work_task(message: WorkMessageCreate, user: dict = Depends(get_cur
                 system_prompt += web_results_context(sources)
 
             stage = {
+                "very_high": "advanced",
                 "high": "advanced",
                 "medium": "medium",
                 "instant": "economic",
@@ -8044,12 +8096,7 @@ async def get_chat_models(
     return {
         "options": _model_options_public(user),
         "active_model": active_model,
-        "intelligence_modes": [
-            {"key": "auto", "label": "Auto"},
-            {"key": "high", "label": "Élevée"},
-            {"key": "medium", "label": "Moyenne"},
-            {"key": "instant", "label": "Instantanée"},
-        ] if _has_plus_capabilities(user) else [],
+        "intelligence_modes": _reasoning_mode_options(user),
         "work_available": _has_plus_capabilities(user),
         "conversation_type": (conversation or {}).get("conversation_type", "chat"),
     }

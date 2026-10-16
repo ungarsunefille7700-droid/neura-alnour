@@ -106,6 +106,16 @@ _EXPLANATION = re.compile(
 )
 
 
+# « Je développe une application », « je code en python depuis 2 ans » : the user talks about
+# what they do, they do not ask for code. A conversation, not a development task.
+_STATEMENT = re.compile(r"^\W*(je|j'|moi|on|nous|perso)\b")
+_REQUEST = re.compile(
+    r"\?|\b(aide\w*|peux|pourrais|pourrait|veux|voudrais|voudrait|besoin|faut|donne\w*|montre\w*|"
+    r"envoie\w*|explique\w*|cree|creer|crees|ecris|ecrire|genere\w*|corrige\w*|ajoute\w*|modifie\w*|"
+    r"implemente\w*|fais[- ]moi|fais[- ]le|aidez|stp|svp|s'il te plait)\b"
+)
+
+
 def _plain(text: str) -> str:
     plain = unicodedata.normalize("NFKD", text or "")
     return "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
@@ -122,6 +132,8 @@ def looks_like_code_request(text: str) -> bool:
     plain = _plain(text)
     if not _CODE_WORDS.search(plain) and not _CODE_TROUBLE.search(plain):
         return False
+    if _STATEMENT.search(plain) and not _REQUEST.search(plain) and not _CODE_TROUBLE.search(plain):
+        return False
     if _CODE_ACTIONS.search(plain) or _CODE_TROUBLE.search(plain):
         return True
     return not _EXPLANATION.search(plain)
@@ -137,7 +149,20 @@ _COMPLEXITY = re.compile(
     r"framework|react|fastapi|module|modules|avance|avancee|avancees)\b"
 )
 _SMALL = re.compile(r"\b(petit|petite|simple|rapide|court|courte|basique|exemple)\b")
-EFFORT_BY_LEVEL = {"instant": "low", "medium": "medium", "high": "high"}
+EFFORT_BY_LEVEL = {"instant": "low", "medium": "medium", "high": "high", "very_high": "high"}
+
+# The 4 reasoning levels the user picks (Instantané, Moyenne, Élevée, Très élevée). Each one
+# is a different real configuration of the engine, kept even for "Salut, ça va ?": only the
+# reasoning model's effort and its token budget change, never an artificial wait.
+REASONING_LEVELS = ("instant", "medium", "high", "very_high")
+# Conversation: Instantané = the fast chat model (no reasoning step); the others = the
+# reasoning model (gpt-oss-120b) with its native effort low / medium / high.
+CHAT_LEVEL_EFFORT = {"medium": "low", "high": "medium", "very_high": "high"}
+CHAT_LEVEL_TOKENS = {"medium": 2500, "high": 5000, "very_high": 10000}
+# Code is always written by the reasoning model; the level sets how much it thinks. gpt-oss
+# has 3 native efforts: Très élevée is "high" with the largest budget (room to think longer).
+CODE_LEVEL_EFFORT = {"instant": "low", "medium": "medium", "high": "high", "very_high": "high"}
+CODE_LEVEL_TOKENS = {"instant": 6000, "medium": 6000, "high": 8000, "very_high": 12000}
 # Models whose reasoning effort can be set (others ignore it, so it is not sent to them).
 REASONING_EFFORT_MODELS = {"@cf/openai/gpt-oss-120b", "@cf/openai/gpt-oss-20b"}
 
@@ -263,6 +288,8 @@ class NeuraRuntime:
         self.code_model = (env.get("NEURA_ENGINE_CODE_MODEL", "@cf/openai/gpt-oss-120b") or "").strip() or self.model
         self.code_model_free = (env.get("NEURA_ENGINE_CODE_MODEL_FREE", "@cf/google/gemma-4-26b-a4b-it") or "").strip()             or self.code_model
         self.code_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_CODE_MAX_OUTPUT_TOKENS", 6000))
+        # The model that reasons for the Moyenne / Élevée / Très élevée conversation levels.
+        self.reasoning_model = env.get("NEURA_ENGINE_REASONING_MODEL") or self.code_model
         self.public_model = env.get("NEURA_PUBLIC_MODEL_NAME", "neura-al-noor")
         self.legacy_allowed = env.get("NEURA_LEGACY_AI", "on").strip().lower() != "off"
         self.max_output_tokens = int(_env_float(env, "NEURA_ENGINE_MAX_OUTPUT_TOKENS", 700))
@@ -406,44 +433,71 @@ class NeuraRuntime:
             return EngineRefused("Neura Al Noor reçoit trop de demandes. Réessaie dans une minute.", "saturated")
         raise exc
 
-    def _plan(self, task: str, max_tokens, subject=None):
-        """(model, max output tokens) for a task: code gets the code model and room for whole files."""
+    def _plan(self, task: str, max_tokens, subject=None, level=None, prepared=None):
+        """(model, max output tokens, reasoning effort) for a request.
+
+        level: the reasoning level the user picked for a conversation (None = Auto, the effort
+        then follows the difficulty of the request). Free accounts only have Instantané."""
+        free = (subject or {}).get("kind") == "user" and (subject or {}).get("plan", "free") == "free"
+        level = level if level in REASONING_LEVELS and not free else None
         if task == "code":
-            free = (subject or {}).get("kind") == "user" and (subject or {}).get("plan", "free") == "free"
-            return (self.code_model_free if free else self.code_model), self.code_max_output_tokens
+            if free:
+                return self.code_model_free, self.code_max_output_tokens, None
+            if level:
+                return (self.code_model, max(self.code_max_output_tokens, CODE_LEVEL_TOKENS[level]),
+                        self._native(self.code_model, CODE_LEVEL_EFFORT[level]))
+            last = next((m["content"] for m in reversed(prepared or []) if m["role"] == "user"), "")
+            return self.code_model, self.code_max_output_tokens, self._native(self.code_model, reasoning_effort_for(last))
         if task == "generation":
-            return self.model, min(int(max_tokens or self.max_output_tokens), self.code_max_output_tokens)
-        return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens)
+            return self.model, min(int(max_tokens or self.max_output_tokens), self.code_max_output_tokens), None
+        if level in CHAT_LEVEL_EFFORT:
+            return (self.reasoning_model, CHAT_LEVEL_TOKENS[level],
+                    self._native(self.reasoning_model, CHAT_LEVEL_EFFORT[level]))
+        return self.model, min(int(max_tokens or self.max_output_tokens), self.max_output_tokens), None
+
+    async def _fit(self, subject, model: str, prompt_tokens: int, max_tokens: int, effort) -> int:
+        """The worst case is reserved before answering. When what is left today does not cover
+        it, the answer may use only what is left (never less than a useful minimum) instead of
+        being refused while the real cost of most answers is far lower."""
+        worst = self.provider.max_neurons(model, prompt_tokens, max_tokens)
+        try:
+            left = await self.budget.headroom(subject)
+        except Exception:
+            return max_tokens
+        if left is None or worst <= left:
+            return max_tokens
+        per_token = self.provider.neurons(model, 0, 1000) / 1000
+        affordable = int((left - self.provider.neurons(model, prompt_tokens, 0)) / per_token) if per_token else max_tokens
+        floor = 1500 if effort else 300
+        return min(max_tokens, affordable) if affordable >= floor else max_tokens
 
     @staticmethod
-    def _effort(model: str, task: str, prepared: List[dict]) -> Optional[str]:
-        """Reasoning effort proportional to the request (or the level the user chose)."""
-        if model not in REASONING_EFFORT_MODELS or task != "code":
-            return None
-        last = next((m["content"] for m in reversed(prepared) if m["role"] == "user"), "")
-        return reasoning_effort_for(last, current_ai_level.get())
+    def _native(model: str, effort: Optional[str]) -> Optional[str]:
+        """Only sent to a model that really supports a reasoning effort."""
+        return effort if model in REASONING_EFFORT_MODELS else None
 
     # ---------- inference ----------
     async def complete(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app",
-                       task="chat") -> tuple:
+                       task="chat", level=None) -> tuple:
         """Returns (text, info) where info has tokens, neurons, cached, latency_ms."""
         if not self.provider:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        model, max_tokens = self._plan(task, max_tokens, subject)
+        model, max_tokens, effort = self._plan(task, max_tokens, subject, level, prepared)
         key = self._cache_key(prepared, model)
-        cached = await self._cache_get(key)
+        # A reasoning level always really reasons: never a stored answer instead.
+        cached = None if effort else await self._cache_get(key)
         if cached is not None:
             await self._log(source=source, subject=subject, status="ok", cached=True)
             return cached, {"cached": True, "neurons": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "latency_ms": 0}
+        max_tokens = await self._fit(subject, model, estimate_messages_tokens(prepared), max_tokens, effort)
         worst = self.provider.max_neurons(model, estimate_messages_tokens(prepared), max_tokens)
         try:
             reservation = await self.budget.reserve(subject, worst)
         except BudgetExceeded as exc:
             await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope, model=model)
             raise self._refusal(exc)
-        effort = self._effort(model, task, prepared)
         try:
             async with self.gate.slot():
                 result = await self.provider.chat(
@@ -467,21 +521,23 @@ class NeuraRuntime:
             "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
         }
 
-    async def stream(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app", task="chat"):
+    async def stream(self, messages, *, max_tokens=None, temperature=0.6, subject=None, source="app", task="chat",
+                     level=None):
         """Yields ("delta", str) then ("done", info)."""
         if not self.provider:
             raise RuntimeError("No inference provider configured.")
         subject = subject if subject is not None else current_ai_subject.get()
         prepared = self.prepare(messages)
-        model, max_tokens = self._plan(task, max_tokens, subject)
+        model, max_tokens, effort = self._plan(task, max_tokens, subject, level, prepared)
         key = self._cache_key(prepared, model)
-        cached = await self._cache_get(key)
+        cached = None if effort else await self._cache_get(key)
         if cached is not None:
             await self._log(source=source, subject=subject, status="ok", cached=True)
             yield ("delta", cached)
             yield ("done", {"cached": True, "neurons": 0.0, "prompt_tokens": 0, "completion_tokens": 0,
                             "latency_ms": 0, "text": cached})
             return
+        max_tokens = await self._fit(subject, model, estimate_messages_tokens(prepared), max_tokens, effort)
         worst = self.provider.max_neurons(model, estimate_messages_tokens(prepared), max_tokens)
         try:
             reservation = await self.budget.reserve(subject, worst)
@@ -490,7 +546,7 @@ class NeuraRuntime:
             raise self._refusal(exc)
         result = None
         pieces: List[str] = []
-        effort = self._effort(model, task, prepared)
+        thought: List[str] = []
         try:
             async with self.gate.slot():
                 async for kind, value in self.provider.stream_chat(
@@ -501,6 +557,7 @@ class NeuraRuntime:
                         pieces.append(value)
                         yield ("delta", value)
                     elif kind == "reasoning":
+                        thought.append(value)
                         yield ("reasoning", value)
                     else:
                         result = value
@@ -511,12 +568,15 @@ class NeuraRuntime:
             await self.budget.release(reservation)
             raise self._refusal(exc)
         finally:
-            if result is None and reservation.neurons and pieces:
-                # Client went away mid-answer: charge what was generated.
+            if result is None and reservation.neurons and (pieces or thought):
+                # Stopped (Stop button, client gone): the request to the provider is closed here;
+                # what was already generated, reasoning included, is charged and logged.
                 partial = self.provider.neurons(
-                    model, estimate_messages_tokens(prepared), estimate_tokens("".join(pieces))
+                    model, estimate_messages_tokens(prepared), estimate_tokens("".join(thought + pieces))
                 )
                 await self.budget.settle(reservation, partial)
+                await self._log(source=source, subject=subject, status="cancelled", neurons=partial,
+                                model=model, effort=effort)
             elif result is None and reservation.neurons:
                 await self.budget.release(reservation)
         if result is None:
@@ -697,6 +757,13 @@ class LlmChat(_LegacyLlmChat):
     def _params(self):
         return self.extra_params.get("max_tokens"), self.extra_params.get("temperature", 0.6)
 
+    def _level(self) -> Optional[str]:
+        """The level chosen in the conversation applies to the conversation only (never to the
+        app's own background requests: memory, quiz, titles…)."""
+        if str(self.session_id or "").startswith(CONVERSATION_SESSIONS):
+            return current_ai_level.get()
+        return None
+
     def _task(self, user_message) -> str:
         """code: the Developer workspace, and a conversation message about programming.
         generation: the app's own requests (quiz…) — never mistaken for code because their
@@ -718,7 +785,8 @@ class LlmChat(_LegacyLlmChat):
         max_tokens, temperature = self._params()
         task = self._task(user_message)
         messages = self._engine_messages(user_message, task)
-        text, _info = await runtime.complete(messages, max_tokens=max_tokens, temperature=temperature, task=task)
+        text, _info = await runtime.complete(messages, max_tokens=max_tokens, temperature=temperature, task=task,
+                                             level=self._level())
         self.messages = self._history_entry(messages, user_message) + [{"role": "assistant", "content": text}]
         return text
 
@@ -733,7 +801,8 @@ class LlmChat(_LegacyLlmChat):
         messages = self._engine_messages(user_message, task)
         full = []
         info = {}
-        async for kind, value in runtime.stream(messages, max_tokens=max_tokens, temperature=temperature, task=task):
+        async for kind, value in runtime.stream(messages, max_tokens=max_tokens, temperature=temperature, task=task,
+                                                level=self._level()):
             if kind == "delta":
                 full.append(value)
                 yield TextDelta(content=value)

@@ -134,6 +134,18 @@ class NeuronBudget:
                 )
         return Reservation(id=str(uuid.uuid4()), day=day, subject_key=key, neurons=amount)
 
+    async def headroom(self, subject: Optional[dict]) -> Optional[float]:
+        """What can still be spent today for this subject (None: no limit at all)."""
+        day = utc_day(self.clock())
+        doc = await self.db.ai_budget_days.find_one({"_id": day}) or {}
+        left = self.global_cap(subject) - float(doc.get("committed", 0.0))
+        key = self.subject_key(subject, day)
+        limit = self.subject_limit(subject) if key else None
+        if key and limit is not None:
+            mine = await self.db.ai_budget_subjects.find_one({"_id": key}) or {}
+            left = min(left, limit - float(mine.get("committed", 0.0)))
+        return max(0.0, left)
+
     async def settle(self, reservation: Reservation, actual_neurons: float):
         """Replace the reserved worst case by the real cost."""
         delta = round(float(actual_neurons) - reservation.neurons, 3)
