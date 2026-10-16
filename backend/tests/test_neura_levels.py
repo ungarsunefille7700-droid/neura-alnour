@@ -169,6 +169,7 @@ def test_each_paid_offer_has_a_higher_daily_ai_limit():
     limits = [server._ai_subject({"id": "u", "subscription": plan}).get("limit")
               for plan in ("mongo", "pro", "neura_plus", "neura_ultra")]
     assert limits == sorted(limits) and len(set(limits)) == 4
+    assert limits == [500.0, 1000.0, 2000.0, 5000.0]  # 2x, 4x, 8x, 20x the free plan (250)
     assert "limit" not in server._ai_subject({"id": "u", "subscription": "free"})
 
 
@@ -183,3 +184,28 @@ def test_a_conversation_that_had_picked_a_catalogue_name_goes_back_to_its_style(
     user = {"id": "u", "email": "u@neura-test.fr", "subscription": "neura_ultra"}
     public = server._resolved_model_public(user, "model:gpt-5.6-sol", "advanced")
     assert public["selection_key"] == "chatgpt" and public["label"].startswith("Neura Al Noor · style ChatGPT")
+
+
+def test_quran_memorization_is_kept_per_account(monkeypatch):
+    db = AsyncMongoMockClient()["hifz"]
+    monkeypatch.setattr(server, "db", db)
+    alice, bob = {"id": "a"}, {"id": "b"}
+
+    async def scenario():
+        await server.update_quran_memorization(112, server.QuranMemorizationUpdate(status="learned"), alice)
+        await server.update_quran_memorization(112, server.QuranMemorizationUpdate(reviewed=True), alice)
+        await server.update_quran_memorization(2, server.QuranMemorizationUpdate(status="learning"), alice)
+        await server.update_quran_memorization(2, server.QuranMemorizationUpdate(status="none"), alice)
+        mine = await server.get_quran_memorization(alice)
+        other = await server.get_quran_memorization(bob)
+        try:
+            await server.update_quran_memorization(115, server.QuranMemorizationUpdate(status="learned"), alice)
+            refused = False
+        except server.HTTPException as exc:
+            refused = exc.status_code == 400
+        return mine, other, refused
+
+    mine, other, refused = asyncio.run(scenario())
+    assert [(row["surah"], row["status"], row.get("reviews")) for row in mine["surahs"]] == [(112, "learned", 1)]
+    assert other["surahs"] == [] and refused
+    assert "quran_memorization" in server.ACCOUNT_CLOUD_DATA_COLLECTIONS  # exported and erased with the account

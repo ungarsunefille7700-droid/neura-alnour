@@ -1282,8 +1282,10 @@ def _ai_subject(user: dict) -> dict:
 
 PAID_PLAN_NEURONS = {
     plan: float(os.environ.get(f"NEURA_AI_USER_NEURONS_{plan.upper()}", default))
-    for plan, default in (("mongo", 600), ("pro", 1200), ("developer", 1200), ("neura_plus", 2000),
-                          ("neura_ultra", 3000))
+    # Multiples of the free plan (250 a day): Mongo 2x, Plus 4x, Neura+ 8x, Ultra 20x. Raised
+    # later by changing these settings only (NEURA_AI_USER_NEURONS_<PLAN>, NEURA_AI_DAILY_NEURONS).
+    for plan, default in (("mongo", 500), ("pro", 1000), ("developer", 1000), ("neura_plus", 2000),
+                          ("neura_ultra", 5000))
 }
 
 
@@ -5888,6 +5890,9 @@ async def get_me(user: dict = Depends(get_current_user)):
         "subscription_cancel_at_period_end": bool(user.get("subscription_cancel_at_period_end")),
         "has_recurring_subscription": bool(user.get("stripe_subscription_id")),
         "has_password": bool(user.get("password")),
+        # Ultra: new features before everyone; Neura+ / Ultra: priority support.
+        "early_access": bool(user.get("is_vip") or user.get("subscription") == "neura_ultra"),
+        "priority_support": bool(user.get("is_vip") or user.get("subscription") in ("neura_plus", "neura_ultra")),
     }
 
 
@@ -6205,6 +6210,7 @@ async def record_neuraco_technical_telemetry(
 
 ACCOUNT_CLOUD_DATA_COLLECTIONS = (
     "ai_memories",
+    "quran_memorization",
     "auth_action_tokens",
     "auth_sessions",
     "chat_request_results",
@@ -9638,6 +9644,46 @@ QURAN_SURAHS = [
     {"number": 113, "name": "الفلق", "englishName": "Al-Falaq", "frenchName": "L'Aube Naissante", "ayahs": 5},
     {"number": 114, "name": "الناس", "englishName": "An-Nas", "frenchName": "Les Hommes", "ayahs": 6}
 ]
+
+QURAN_MEMORIZATION_STATUSES = ("none", "learning", "learned")
+
+
+class QuranMemorizationUpdate(BaseModel):
+    status: Optional[Literal["none", "learning", "learned"]] = None
+    reviewed: bool = False
+
+
+@api_router.get("/quran/memorization")
+async def get_quran_memorization(user: dict = Depends(get_current_user)):
+    """The surahs the user is learning or knows, with their last revision (free for everyone)."""
+    rows = await db.quran_memorization.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(200)
+    return {"surahs": rows}
+
+
+@api_router.put("/quran/memorization/{surah}")
+async def update_quran_memorization(surah: int, data: QuranMemorizationUpdate, user: dict = Depends(get_current_user)):
+    if not 1 <= surah <= 114:
+        raise HTTPException(status_code=400, detail="Sourate inconnue.")
+    now = datetime.now(timezone.utc).isoformat()
+    update: Dict[str, Any] = {"updated_at": now}
+    if data.status is not None:
+        update["status"] = data.status
+        if data.status == "learned":
+            update.setdefault("last_reviewed_at", now)
+    if data.reviewed:
+        update["last_reviewed_at"] = now
+    changes: Dict[str, Any] = {"$set": update, "$setOnInsert": {"user_id": user["id"], "surah": surah, "created_at": now}}
+    if data.reviewed:
+        changes["$inc"] = {"reviews": 1}
+    if data.status is None:
+        changes["$setOnInsert"]["status"] = "learning"
+    await db.quran_memorization.update_one({"user_id": user["id"], "surah": surah}, changes, upsert=True)
+    row = await db.quran_memorization.find_one({"user_id": user["id"], "surah": surah}, {"_id": 0, "user_id": 0})
+    if row and row.get("status") == "none":
+        await db.quran_memorization.delete_one({"user_id": user["id"], "surah": surah})
+        return {"surah": surah, "status": "none"}
+    return row
+
 
 @api_router.get("/quran/surahs")
 async def get_surahs():
