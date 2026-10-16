@@ -116,6 +116,14 @@ _REQUEST = re.compile(
 )
 
 
+# Things one asks to BUILD: only with a verb of creation (« fais-moi un site », « crée une appli »),
+# never alone (« quelle application pour apprendre le Coran ? » is a question).
+_BUILD_WORDS = re.compile(
+    r"\b(site|sites|page web|landing page|application|applications|appli|app|apps|jeu|jeux|bot|bots|"
+    r"logiciel|extension|plugin|outil en ligne|formulaire|tableau de bord|dashboard|portfolio|boutique en ligne)\b"
+)
+
+
 def _plain(text: str) -> str:
     plain = unicodedata.normalize("NFKD", text or "")
     return "".join(ch for ch in plain if not unicodedata.combining(ch)).lower()
@@ -130,6 +138,9 @@ def looks_like_code_request(text: str) -> bool:
     if "```" in text:
         return True
     plain = _plain(text)
+    if _BUILD_WORDS.search(plain) and _CODE_ACTIONS.search(plain) and not (
+            _STATEMENT.search(plain) and not _REQUEST.search(plain)):
+        return True
     if not _CODE_WORDS.search(plain) and not _CODE_TROUBLE.search(plain):
         return False
     if _STATEMENT.search(plain) and not _REQUEST.search(plain) and not _CODE_TROUBLE.search(plain):

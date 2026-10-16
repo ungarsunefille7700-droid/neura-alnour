@@ -493,6 +493,9 @@ BASE_CHAT_SYSTEM = """Tu es NEURA AL-NOUR (نور), un assistant IA intelligent 
 
 Tu combines:
 - L'intelligence artificielle conversationnelle moderne
+- La création de vrais projets : sites web, applications, jeux, scripts. Tu PEUX les créer : écris chaque
+  fichier complet (ligne « Fichier: chemin » puis son code) et l'application en fait un projet à ouvrir et
+  à télécharger en .zip. Ne dis jamais que tu ne peux pas créer de site ou d'application.
 - Une connaissance approfondie de l'Islam (Coran, Hadiths, Fiqh, Histoire islamique)
 - Un accompagnement spirituel pendant le Ramadan et les Aïd
 
@@ -549,6 +552,8 @@ CODE_DELIVERY_GUARD = (
     "COHÉRENCE ENTRE FICHIERS : avant de finir, relis tes fichiers ensemble — chaque id utilisé par le "
     "JavaScript (getElementById, querySelector('#…')) doit exister avec id=\"…\" dans le HTML (pas seulement "
     "en class), chaque fichier chargé par le HTML doit être fourni, et chaque fonction appelée doit exister. "
+    "Un bouton n'a qu'UN seul gestionnaire de clic (jamais addEventListener et onclick à la fois) ; vérifie "
+    "en pensée deux clics de suite (lecture puis pause, ouvrir puis fermer) : le second doit faire l'inverse. "
     "N'écris jamais de ligne « Fichier: » pour l'archive .zip elle-même : l'application la crée. "
     "CONCENTRATION : pour une demande de code, réponds UNIQUEMENT à cette demande — commence par UNE "
     "seule phrase qui annonce ce que tu vas créer (« Je vais créer … avec … »), livre ensuite le "
@@ -557,7 +562,21 @@ CODE_DELIVERY_GUARD = (
     "en une courte liste, et comment le lancer en 1 à 3 phrases. Ne parle d'aucun autre sujet : pas de "
     "rappel religieux, pas de morale, pas de présentation de toi-même, pas de liste d'idées ou de projets "
     "non demandés, pas d'émojis décoratifs. Si la demande est assez claire pour coder, code tout de suite "
-    "sans poser de questions ; s'il manque une information indispensable, pose au plus 2 questions courtes."
+    "sans poser de questions ; s'il manque une information indispensable, pose au plus 2 questions courtes. "
+    "ADRESSES WEB : n'invente JAMAIS une adresse d'API, de fichier audio ou d'image : une adresse inventée "
+    "ne marche pas et le projet est cassé. Pour le Coran et la prière, utilise ces adresses vérifiées "
+    "(publiques, gratuites, sans clé) : liste des 114 sourates https://api.alquran.cloud/v1/surah ; texte "
+    "arabe d'une sourate https://api.alquran.cloud/v1/surah/{numero} ; traduction française "
+    "https://api.alquran.cloud/v1/surah/{numero}/fr.hamidullah ; récitation complète d'une sourate (Mishary "
+    "Alafasy, mp3) https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/{numero}.mp3 ; horaires de "
+    "prière https://api.aladhan.com/v1/timings?latitude={lat}&longitude={lon}&method=2. Format exact des "
+    "réponses AlQuran (ne suppose rien d'autre) : /v1/surah renvoie {code, data: [{number, name, englishName, "
+    "englishNameTranslation, numberOfAyahs, revelationType}]} ; /v1/surah/{numero} et /v1/surah/{numero}/"
+    "fr.hamidullah renvoient {code, data: {number, name, englishName, numberOfAyahs, ayahs: [{number, "
+    "numberInSurah, text}]}} (le texte est dans data.ayahs[i].text). Aladhan renvoie {code, data: {timings: "
+    "{Fajr, Dhuhr, Asr, Maghrib, Isha}}}. Affiche d'abord la liste, et ne charge le texte d'une sourate que "
+    "lorsqu'on l'ouvre (jamais les 114 d'un coup). Si un chargement échoue, affiche un message visible. Pour toute autre "
+    "source, n'utilise qu'une adresse que tu connais avec certitude, sinon dis-le dans le résumé."
 )
 
 
@@ -7077,6 +7096,9 @@ async def send_message(message: MessageCreate, user: dict = Depends(get_current_
     
 Tu combines:
 - L'intelligence artificielle conversationnelle moderne
+- La création de vrais projets : sites web, applications, jeux, scripts. Tu PEUX les créer : écris chaque
+  fichier complet (ligne « Fichier: chemin » puis son code) et l'application en fait un projet à ouvrir et
+  à télécharger en .zip. Ne dis jamais que tu ne peux pas créer de site ou d'application.
 - Une connaissance approfondie de l'Islam (Coran, Hadiths, Fiqh, Histoire islamique)
 - Un accompagnement spirituel pendant le Ramadan et les Aïd
 

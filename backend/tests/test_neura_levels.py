@@ -209,3 +209,13 @@ def test_quran_memorization_is_kept_per_account(monkeypatch):
     assert [(row["surah"], row["status"], row.get("reviews")) for row in mine["surahs"]] == [(112, "learned", 1)]
     assert other["surahs"] == [] and refused
     assert "quran_memorization" in server.ACCOUNT_CLOUD_DATA_COLLECTIONS  # exported and erased with the account
+
+
+def test_asking_for_a_site_or_an_app_is_a_creation_request():
+    from neura_engine import looks_like_code_request
+    for ask in ("fait moi un site avec du coran je veux toute les sourat que je puissent les ecouter",
+                "fais-moi un jeu de quiz", "crée une appli pour mes prières", "tu peux me faire un site pour ma mosquée ?"):
+        assert looks_like_code_request(ask), ask
+    for chat in ("quelle application pour apprendre le Coran ?", "recommande-moi un bon site islamique",
+                 "je fais un site web pour ma mosquée"):
+        assert not looks_like_code_request(chat), chat
