@@ -14,8 +14,8 @@ import time
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://noor-dev.preview.emergentagent.com')
 
 # VIP Admin credentials
-VIP_ADMIN_EMAIL = "kaddanwalidpro@gmail.com"
-VIP_ADMIN_PASSWORD = "Hassan156"
+VIP_ADMIN_EMAIL = os.environ.get("TEST_VIP_ADMIN_EMAIL", "")
+VIP_ADMIN_PASSWORD = os.environ.get("TEST_VIP_ADMIN_PASSWORD", "")
 
 # Test user credentials
 TEST_USER_EMAIL = "test_stripe_user@example.com"

@@ -15,8 +15,8 @@ import time
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
 
 # Test credentials
-VIP_ADMIN_EMAIL = "kaddanwalidpro@gmail.com"
-VIP_ADMIN_PASSWORD = "Hassan156"
+VIP_ADMIN_EMAIL = os.environ.get("TEST_VIP_ADMIN_EMAIL", "")
+VIP_ADMIN_PASSWORD = os.environ.get("TEST_VIP_ADMIN_PASSWORD", "")
 
 
 class TestQuizCategories:

@@ -83,7 +83,7 @@ class NeuronBudget:
     def global_cap(self, subject: Optional[dict]) -> float:
         # Free accounts can only use part of the day's budget: paid/VIP users and
         # API keys keep the rest when the app is saturated.
-        if subject and subject.get("kind") == "user" and (subject.get("plan") or "free") == "free":
+        if subject and subject.get("kind") in ("user", "anon") and (subject.get("plan") or "free") == "free":
             return self.daily_limit * self.free_share
         return self.daily_limit
 

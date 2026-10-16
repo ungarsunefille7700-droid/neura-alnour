@@ -57,7 +57,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # JWT Settings
-JWT_SECRET = os.environ.get('JWT_SECRET', 'neura_alnour_secret')
+JWT_SECRET = (os.environ.get('JWT_SECRET') or '').strip()
+if len(JWT_SECRET) < 32:
+    # A known default would let anyone forge a login token. Without a real secret the server
+    # still starts, with a random one: sessions simply end at each restart.
+    logging.getLogger(__name__).critical(
+        "JWT_SECRET is missing or shorter than 32 characters: using a random secret. "
+        "Set a long random JWT_SECRET in the environment.")
+    JWT_SECRET = secrets.token_urlsafe(48)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
@@ -957,6 +964,7 @@ MODEL_PROFILES = {
 }
 
 SELECTABLE_MODEL_KEYS = ("chatgpt", "claude", "gemini")
+ROUTER_STYLE_NAMES = {"chatgpt": "ChatGPT", "claude": "Claude", "gemini": "Gemini"}
 MODEL_DISPLAY_NAMES = {
     "gpt-4o": "GPT-4o",
     "gpt-4o-mini": "GPT-4o mini",
@@ -1088,6 +1096,44 @@ def _normalize_model_key(requested_model: Optional[str]) -> str:
     if requested_model == "grok":
         return "gemini"
     return DEFAULT_MODEL
+
+
+# Admin views never return a user's secrets.
+ADMIN_USER_PROJECTION = {"_id": 0, "password": 0, "two_factor_secret": 0, "two_factor_pending_secret": 0,
+                         "two_factor_recovery_hashes": 0}
+
+# ---------- Rate limits (login, register, password reset) ----------
+_RATE_BUCKETS: Dict[str, Any] = {}
+
+
+def _client_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return ""
+    # The host's proxy appends the real address last; earlier entries can be forged.
+    forwarded = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
+    if forwarded:
+        return forwarded[-1]
+    return request.client.host if request.client else ""
+
+
+def _rate_exceeded(key: str, limit: int, window_seconds: int, *, record: bool = True) -> bool:
+    now = time.monotonic()
+    hits = [moment for moment in _RATE_BUCKETS.get(key, []) if now - moment < window_seconds]
+    blocked = len(hits) >= limit
+    if record and not blocked:
+        hits.append(now)
+    if hits:
+        _RATE_BUCKETS[key] = hits
+    else:
+        _RATE_BUCKETS.pop(key, None)
+    if len(_RATE_BUCKETS) > 50_000:  # never grows without bound
+        for stale in list(_RATE_BUCKETS)[:10_000]:
+            _RATE_BUCKETS.pop(stale, None)
+    return blocked
+
+
+def _too_many(detail: str = "Trop de tentatives. Réessaie dans quelques minutes."):
+    return HTTPException(status_code=429, detail=detail)
 
 
 # VIP Admin accounts - loaded from environment variables
@@ -2732,11 +2778,19 @@ def _model_public(
     display_name = MODEL_DISPLAY_NAMES.get(model_id, model_id)
     level_label = (PLUS_MODEL_STAGE_LABELS if profile.get("plus_labels") else MODEL_STAGE_LABELS)[stage]
     provider = profile.get("provider", "gemini")
+    provider_label = PROVIDER_DISPLAY_NAMES.get(provider, provider)
+    runtime = neura_engine.get_runtime()
+    if runtime and runtime.enabled:
+        # The Neura engine answers every text message, whatever is picked: the choice is a
+        # response style, never shown as another company's model.
+        style = ROUTER_STYLE_NAMES.get(profile.get("selection_key"), display_name)
+        display_name = f"Neura Al Noor · style {style}"
+        provider_label = "Neura Al Noor"
     return {
         "selection_key": profile.get("selection_key", DEFAULT_MODEL),
         "requested_provider": MODEL_PROFILES.get(profile.get("selection_key"), {}).get("provider", provider),
         "provider": provider,
-        "provider_display_name": PROVIDER_DISPLAY_NAMES.get(provider, provider),
+        "provider_display_name": provider_label,
         "model_id": model_id,
         "display_name": display_name,
         "stage": stage,
@@ -2746,7 +2800,8 @@ def _model_public(
         "levels_available": levels_available,
         "reset_at": reset_at if isinstance(reset_at, str) else _iso_utc(reset_at),
         "label": (
-            f"{display_name} — {PROVIDER_DISPLAY_NAMES.get(provider, provider)} — {level_label}"
+            (f"{display_name} — {level_label}" if provider_label == "Neura Al Noor"
+             else f"{display_name} — {provider_label} — {level_label}")
             + (" · Auto" if requested_mode == "auto" else "")
             if profile.get("plus_labels")
             else f"{display_name} — {level_label}"
@@ -2779,7 +2834,9 @@ def _model_options_public(user: dict) -> list[dict]:
         options.extend(
             {
                 "key": key,
-                "group": PROVIDER_DISPLAY_NAMES.get(entry["provider"], entry["provider"]),
+                "group": (f"Styles {PROVIDER_DISPLAY_NAMES.get(entry['provider'], entry['provider'])}"
+                          if neura_engine.get_runtime() and neura_engine.get_runtime().enabled
+                          else PROVIDER_DISPLAY_NAMES.get(entry["provider"], entry["provider"])),
                 "model": _resolved_model_public(user, key, "advanced"),
             }
             for key, entry in CATALOG_MODELS_BY_KEY.items()
@@ -4545,8 +4602,8 @@ async def system_safety_middleware(request: Request, call_next):
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    name: str
+    password: str = Field(..., min_length=8, max_length=256)
+    name: str = Field(..., min_length=1, max_length=80)
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -5586,12 +5643,20 @@ async def google_auth_two_factor(data: GoogleTwoFactorRequest, request: Request)
 @api_router.post("/auth/register")
 async def register(user_data: UserCreate, request: Request):
     # Check if email exists
+    if _rate_exceeded(f"register:{_client_ip(request)}", 10, 3600):
+        raise _too_many("Trop de comptes créés depuis cette connexion. Réessaie plus tard.")
     existing = await db.users.find_one(_email_query(user_data.email))
     if existing:
         raise HTTPException(status_code=400, detail="Email déjà utilisé")
-    
-    # Check if VIP admin / founder -> top tier (Neura Ultra)
-    is_vip = is_vip_email(user_data.email)
+
+    # A founder / VIP address gets every right: it must be proven, not just typed. Those
+    # accounts sign in with Google (verified address) or with their administrator password.
+    if is_vip_email(user_data.email):
+        raise HTTPException(
+            status_code=403,
+            detail="Cette adresse est réservée. Connecte-toi avec Google pour ce compte.",
+        )
+    is_vip = False
     
     user_id = str(uuid.uuid4())
     user = {
@@ -5641,14 +5706,34 @@ async def register(user_data: UserCreate, request: Request):
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin, request: Request):
+    login_key = f"login:{credentials.email.strip().lower()}"
+    ip_key = f"login-ip:{_client_ip(request)}"
+    if _rate_exceeded(login_key, 8, 900, record=False) or _rate_exceeded(ip_key, 40, 900, record=False):
+        raise _too_many("Trop de tentatives de connexion. Réessaie dans 15 minutes.")
+    try:
+        return await _login(credentials, request)
+    except HTTPException as exc:
+        if exc.status_code == 401 and not (isinstance(exc.detail, dict) and exc.detail.get("code") == "two_factor_required"):
+            _rate_exceeded(login_key, 8, 900)
+            _rate_exceeded(ip_key, 40, 900)
+        raise
+
+
+def _vip_admin_password_ok(vip_admin: Optional[dict], password: str) -> bool:
+    expected = (vip_admin or {}).get("password") or ""
+    return bool(expected) and hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8"))
+
+
+async def _login(credentials: "UserLogin", request: Request):
     user = await db.users.find_one(_email_query(credentials.email), {"_id": 0})
-    
+
     # Check VIP admin login
-    vip_admin = next((admin for admin in VIP_ADMINS if admin["email"] == credentials.email), None)
-    
+    vip_admin = next((admin for admin in VIP_ADMINS
+                      if admin["email"] and admin["email"].strip().lower() == credentials.email.strip().lower()), None)
+
     if not user:
         # Auto-create VIP admin account if doesn't exist
-        if vip_admin and credentials.password == vip_admin["password"]:
+        if _vip_admin_password_ok(vip_admin, credentials.password):
             user_id = str(uuid.uuid4())
             user = {
                 "id": user_id,
@@ -5668,7 +5753,7 @@ async def login(credentials: UserLogin, request: Request):
             raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
     else:
         # Verify password
-        if vip_admin and credentials.password == vip_admin["password"]:
+        if _vip_admin_password_ok(vip_admin, credentials.password):
             # VIP admin with predefined password
             if user.get("subscription") != "neura_ultra" or not user.get("is_vip"):
                 await db.users.update_one(
@@ -5727,6 +5812,7 @@ async def get_me(user: dict = Depends(get_current_user)):
         "gifted_until": user.get("gifted_until") if user.get("gifted_subscription") else None,
         "subscription_cancel_at_period_end": bool(user.get("subscription_cancel_at_period_end")),
         "has_recurring_subscription": bool(user.get("stripe_subscription_id")),
+        "has_password": bool(user.get("password")),
     }
 
 
@@ -5848,7 +5934,9 @@ async def confirm_email_verification(
 
 
 @api_router.post("/auth/password-reset/request")
-async def request_password_reset(request: PasswordResetRequest):
+async def request_password_reset(request: PasswordResetRequest, http_request: Request):
+    if _rate_exceeded(f"reset:{_client_ip(http_request)}", 10, 3600):
+        raise _too_many()
     user = await db.users.find_one(
         _email_query(request.email),
         {"_id": 0},
@@ -6161,6 +6249,51 @@ async def _delete_account_cloud_data(user_id: str) -> Dict[str, int]:
     return deleted
 
 
+# Never in an export: login secrets and one-time codes.
+ACCOUNT_EXPORT_SKIPPED = {"auth_action_tokens", "neuraco_auth_codes", "neuraco_download_tickets",
+                          "multiplayer_ws_tickets", "dev_diff_approvals"}
+ACCOUNT_EXPORT_HIDDEN_FIELDS = {"password", "two_factor_secret", "two_factor_pending_secret",
+                                "two_factor_recovery_hashes", "token_hash", "jti_hash", "refresh_hash", "hash"}
+
+
+def _export_clean(value):
+    if isinstance(value, dict):
+        return {key: _export_clean(item) for key, item in value.items()
+                if key != "_id" and key not in ACCOUNT_EXPORT_HIDDEN_FIELDS}
+    if isinstance(value, list):
+        return [_export_clean(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return f"<{len(value)} octets>"
+    return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+
+
+@api_router.get("/auth/account/export")
+async def export_account_data(user: dict = Depends(get_current_user)):
+    """Every piece of data kept about the user, in one JSON file (right of access and portability)."""
+    if _rate_exceeded(f"export:{user['id']}", 5, 3600):
+        raise _too_many("Export déjà demandé plusieurs fois. Réessaie dans une heure.")
+    profile = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    data = {"exported_at": datetime.now(timezone.utc).isoformat(), "profile": _export_clean(profile or {})}
+    for name in ACCOUNT_CLOUD_DATA_COLLECTIONS:
+        if name in ACCOUNT_EXPORT_SKIPPED:
+            continue
+        rows = await db[name].find({"$or": [{"user_id": user["id"]}, {"_id": user["id"]}]}).to_list(5000)
+        if rows:
+            data[name] = _export_clean(rows)
+    payments = await db.payment_transactions.find({"user_id": user["id"]}).to_list(1000)
+    if payments:
+        data["payment_transactions"] = _export_clean(payments)
+    body = json.dumps(data, ensure_ascii=False, indent=1, default=str)
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="mes-donnees-neura-al-noor.json"',
+                 "Cache-Control": "no-store"},
+    )
+
+
 @api_router.post("/auth/account/delete")
 async def delete_account_and_cloud_data(
     request: AccountDeletionRequest,
@@ -6197,6 +6330,18 @@ async def delete_account_and_cloud_data(
             request.two_factor_code,
         ):
             raise HTTPException(status_code=400, detail="Code 2FA invalide")
+
+    # A running subscription is stopped first: a deleted account is never charged again.
+    if fresh_user.get("stripe_subscription_id") and fresh_user.get("subscription_status") in {
+            "active", "trialing", "past_due", "incomplete"}:
+        try:
+            await _stripe_client().v1.subscriptions.cancel_async(fresh_user["stripe_subscription_id"])
+        except Exception as exc:
+            logger.error("Subscription cancel before account deletion failed: %s", str(exc)[:200])
+            raise HTTPException(
+                status_code=409,
+                detail="Ton abonnement n'a pas pu être résilié. Résilie-le d'abord, puis supprime ton compte.",
+            )
 
     deleted = await _delete_account_cloud_data(user["id"])
     result = await db.users.delete_one({"id": user["id"]})
@@ -6329,6 +6474,27 @@ async def create_ai_memory(data: AiMemoryCreate, user: dict = Depends(get_curren
     await db.ai_memories.insert_one(memory)
     return {k: v for k, v in memory.items() if k != "_id"}
 
+class MemorySettings(BaseModel):
+    enabled: bool
+
+
+def _memory_enabled(user: dict) -> bool:
+    return user.get("memory_enabled", True) is not False
+
+
+@api_router.get("/ai/memory/settings")
+async def get_memory_settings(user: dict = Depends(get_current_user)):
+    return {"enabled": _memory_enabled(user)}
+
+
+@api_router.put("/ai/memory/settings")
+async def update_memory_settings(data: MemorySettings, user: dict = Depends(get_current_user)):
+    """Off: nothing new is remembered and the saved memories are no longer used (they stay
+    visible and can be erased)."""
+    await db.users.update_one({"id": user["id"]}, {"$set": {"memory_enabled": data.enabled}})
+    return {"enabled": data.enabled}
+
+
 @api_router.delete("/ai/memory")
 async def delete_all_ai_memory(user: dict = Depends(get_current_user)):
     result = await db.ai_memories.delete_many({"user_id": user["id"]})
@@ -6370,6 +6536,8 @@ def _is_safe_memory_value(value: str) -> bool:
 
 
 async def _save_ai_memory_from_text(user: dict, text: str) -> Optional[dict]:
+    if not _memory_enabled(user):
+        return None
     value = _extract_explicit_memory_request(text)
     if not value:
         # Nothing asked explicitly: what is worth keeping is picked out in the background,
@@ -6546,6 +6714,8 @@ async def _past_conversations_context(user: dict, query: str) -> str:
 
 
 async def _ai_memory_context(user: dict, query: str = "") -> str:
+    if not _memory_enabled(user):
+        return ""
     memory_limit = 60 if _has_plus_capabilities(user) else 30
     memories = await db.ai_memories.find(
         {"user_id": user["id"]}, {"_id": 0, "label": 1, "value": 1, "created_at": 1, "updated_at": 1}
@@ -7306,7 +7476,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             web_performed = False
             user_text = message.content
             if web_decision["should_search"]:
-                yield sse({"type": "phase", "phase": "searching"})
+                if os.environ.get("TAVILY_API_KEY"):  # never "searching…" when no search can run
+                    yield sse({"type": "phase", "phase": "searching"})
                 try:
                     if os.environ.get("TAVILY_API_KEY"):
                         sources = await tavily_search(message.content, max_results=5)
@@ -8604,6 +8775,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
         raise HTTPException(status_code=400, detail="Le prompt ne peut pas être vide")
 
     mongo_generation_reserved = False
+    free_generation_reserved = False
     plus_generation_reserved = False
     neura_plus_generation_reserved = 0
     if subscription == "mongo" and not is_vip:
@@ -8645,13 +8817,18 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
     # VIP and pro/developer keep their existing unlimited entitlement.
     if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus", "neura_ultra"):
         # Plans without unlimited image entitlement: 3 total free generations
-        used = user.get("image_generations_count", 0)
-        if used >= 3:
+        reserved = await db.users.update_one(
+            {"id": user["id"], "$or": [{"image_generations_count": {"$lt": 3}},
+                                        {"image_generations_count": {"$exists": False}}]},
+            {"$inc": {"image_generations_count": 1}},
+        )
+        if not reserved.modified_count:
             raise HTTPException(
-                status_code=403, 
+                status_code=403,
                 detail="Vous avez utilisé vos 3 générations gratuites. Le plan Mongo propose un quota étendu."
             )
-    
+        free_generation_reserved = True
+
     try:
         # Image generation via OpenRouter (chat completions with an image-output model)
         image_model = "google/gemini-2.5-flash-image"
@@ -8679,12 +8856,7 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
         if images and len(images) > 0:
             image_base64 = images[0]
             
-            # Increment the legacy free counter. Mongo was reserved atomically above.
-            if not is_vip and subscription not in ("mongo", "pro", "developer", "neura_plus", "neura_ultra"):
-                await db.users.update_one(
-                    {"id": user["id"]},
-                    {"$inc": {"image_generations_count": 1}}
-                )
+            # The free counter was reserved atomically above (parallel requests cannot pass it).
             
             result = {"image_base64": image_base64}
             if subscription == "mongo" and not is_vip:
@@ -8709,6 +8881,8 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
             await _release_plus_generation(user["id"])
         if neura_plus_generation_reserved:
             await _release_neura_plus_generation(user["id"], neura_plus_generation_reserved)
+        if free_generation_reserved:
+            await db.users.update_one({"id": user["id"]}, {"$inc": {"image_generations_count": -1}})
         raise
     except Exception as e:
         if mongo_generation_reserved:
@@ -8717,8 +8891,10 @@ async def generate_image(request: ImageGenerateRequest, user: dict = Depends(get
             await _release_plus_generation(user["id"])
         if neura_plus_generation_reserved:
             await _release_neura_plus_generation(user["id"], neura_plus_generation_reserved)
+        if free_generation_reserved:
+            await db.users.update_one({"id": user["id"]}, {"$inc": {"image_generations_count": -1}})
         logger.error(f"Image generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
+        raise HTTPException(status_code=503, detail="Génération d'images temporairement indisponible. Réessaie plus tard.")
 
 # ============== PRAYER TIMES ==============
 
@@ -8858,11 +9034,12 @@ async def get_nearby_mosques(latitude: float, longitude: float, radius: int = 50
     page) or an empty/unexpected payload, we log it and degrade gracefully
     by returning an empty list with HTTP 200.
     """
+    radius = max(100, min(int(radius), 50_000))
     # Overpass API query for mosques (unchanged business logic).
     # The main instance is often overloaded (HTTP 504): public mirrors follow.
     overpass_urls = [
         "https://overpass-api.de/api/interpreter",
-        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
     ]
     query = f"""
     [out:json][timeout:25];
@@ -9919,11 +10096,19 @@ QUIZ_GENERATION_TIMEOUT_SECONDS = float(os.environ.get(
 ))
 QUIZ_GENERATION_MODEL = os.environ.get("QUIZ_GENERATION_MODEL", "gpt-4.1-mini")
 
-@api_router.post("/quiz/start")
-async def start_quiz(category: Optional[str] = None):
-    """Generate 10 new quiz questions using AI and start a quiz session"""
+def _valid_quiz_batch(questions) -> bool:
+    try:
+        return len(questions) == 10 and all(
+            isinstance(q.get("question"), str) and isinstance(q.get("options"), list) and len(q["options"]) == 4
+            and isinstance(q.get("correct_answer"), int) and 0 <= q["correct_answer"] < 4 for q in questions)
+    except (AttributeError, TypeError):
+        return False
+
+
+async def _generate_quiz_questions(category: Optional[str]) -> Optional[list]:
+    """10 new questions written by the AI (None when it fails: the built-in questions are used)."""
     from neura_engine import LlmChat, UserMessage
-    
+
     category_hint = ""
     if category:
         category_names = {
@@ -9994,6 +10179,53 @@ Règles:
         logger.warning("AI quiz generation timed out, using the built-in questions")
     except Exception as e:
         logger.error(f"AI quiz generation error: {e}")
+    return questions if questions and _valid_quiz_batch(questions) else None
+
+
+QUIZ_READY_PER_CATEGORY = 2
+
+
+async def _refill_quiz_pool(category: Optional[str]) -> None:
+    """Prepares the next series in the background, so the next player starts at once."""
+    key = category or "all"
+    try:
+        if await db.quiz_ready.count_documents({"category": key}) >= QUIZ_READY_PER_CATEGORY:
+            return
+        questions = await _generate_quiz_questions(category)
+        if questions:
+            await db.quiz_ready.insert_one({"id": str(uuid.uuid4()), "category": key, "questions": questions,
+                                           "created_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as exc:  # never breaks a quiz
+        logger.warning("Quiz pool refill skipped: %s", str(exc)[:200])
+
+
+_QUIZ_REFILLS: set = set()
+
+
+QUIZ_CATEGORIES = ("piliers", "coran", "priere", "ramadan", "prophetes", "croyance")
+QUIZ_ANONYMOUS_NEURONS = float(os.environ.get("QUIZ_ANONYMOUS_NEURONS", "40"))
+
+
+@api_router.post("/quiz/start")
+async def start_quiz(request: Request, category: Optional[str] = None,
+                     user: Optional[dict] = Depends(get_optional_user)):
+    """Generate 10 new quiz questions using AI and start a quiz session"""
+    from neura_engine import LlmChat, UserMessage
+
+    if category not in QUIZ_CATEGORIES:
+        category = None  # free text never reaches the prompt
+    if not user:
+        # Without an account: a small daily AI allowance per connection, counted in the free share.
+        if _rate_exceeded(f"quiz-anon:{_client_ip(request)}", 20, 3600):
+            raise _too_many("Trop de quiz lancés. Connecte-toi ou réessaie plus tard.")
+        current_ai_subject.set({"kind": "anon", "id": f"ip:{_client_ip(request)}", "plan": "free",
+                                "limit": QUIZ_ANONYMOUS_NEURONS})
+
+    ready = await db.quiz_ready.find_one_and_delete({"category": category or "all"}, sort=[("created_at", 1)])
+    questions = (ready or {}).get("questions") or await _generate_quiz_questions(category)
+    refill = asyncio.create_task(_refill_quiz_pool(category))  # each prepared series is used once
+    _QUIZ_REFILLS.add(refill)
+    refill.add_done_callback(_QUIZ_REFILLS.discard)
     
     # Fallback to static questions if AI fails
     if not questions or len(questions) < 10:
@@ -11500,7 +11732,7 @@ async def founder_admin_users(search: str = "", limit: int = 50, user: dict = De
             {"email": {"$regex": re.escape(term), "$options": "i"}},
             {"id": {"$regex": re.escape(term), "$options": "i"}},
         ]}
-    users = await db.users.find(query, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(max(1, min(limit, 100)))
+    users = await db.users.find(query, ADMIN_USER_PROJECTION).sort("created_at", -1).to_list(max(1, min(limit, 100)))
     user_ids = [item["id"] for item in users]
     history = await db.multiplayer_history.aggregate([
         {"$match": {"user_id": {"$in": user_ids}}},
@@ -11525,7 +11757,7 @@ async def founder_admin_users(search: str = "", limit: int = 50, user: dict = De
 @api_router.get("/founder-admin/users/{target_user_id}")
 async def founder_admin_user_detail(target_user_id: str, user: dict = Depends(get_current_user)):
     await _require_founder_admin(user)
-    target = await db.users.find_one({"id": target_user_id}, {"_id": 0, "password": 0})
+    target = await db.users.find_one({"id": target_user_id}, ADMIN_USER_PROJECTION)
     if not target:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
     history = await db.multiplayer_history.find({"user_id": target_user_id}, {"_id": 0}).sort("played_at", -1).to_list(100)
@@ -16997,15 +17229,21 @@ async def _apply_subscription_checkout(session, transaction):
     )
 
 
-@api_router.post("/subscriptions/checkout")
-async def create_checkout_session(request: SubscriptionRequest, user: dict = Depends(get_current_user)):
-    if request.plan not in SUBSCRIPTION_PLANS or request.plan == "free" or request.plan in RETIRED_PLANS:
-        raise HTTPException(status_code=400, detail="Plan invalide")
-    origin = request.origin_url.rstrip("/")
+def _payment_origin(origin_url: str) -> str:
+    """Stripe only sends the user back to the app's own address, never to another site."""
+    origin = (origin_url or "").rstrip("/")
     allowed = {"https://neura-alnour.vercel.app"}
     allowed.update(value.strip().rstrip("/") for value in os.environ.get("CORS_ORIGINS", "").split(",") if value.strip() != "*")
     if origin not in allowed:
         raise HTTPException(status_code=400, detail="Origine de paiement non autorisée")
+    return origin
+
+
+@api_router.post("/subscriptions/checkout")
+async def create_checkout_session(request: SubscriptionRequest, user: dict = Depends(get_current_user)):
+    if request.plan not in SUBSCRIPTION_PLANS or request.plan == "free" or request.plan in RETIRED_PLANS:
+        raise HTTPException(status_code=400, detail="Plan invalide")
+    origin = _payment_origin(request.origin_url)
     backend = os.environ.get("PUBLIC_BACKEND_URL", "").rstrip("/")
     if not backend or not os.environ.get("STRIPE_WEBHOOK_SECRET"):
         raise HTTPException(status_code=503, detail="Configurer PUBLIC_BACKEND_URL et STRIPE_WEBHOOK_SECRET sur le backend")
@@ -17017,7 +17255,9 @@ async def create_checkout_session(request: SubscriptionRequest, user: dict = Dep
     session = await _stripe_client().v1.checkout.sessions.create_async({
         "mode": "subscription",
         "client_reference_id": user["id"],
-        "customer_email": user["email"],
+        # The same Stripe customer is reused: one billing history, cards kept, one portal.
+        **({"customer": user["stripe_customer_id"]} if user.get("stripe_customer_id")
+           else {"customer_email": user["email"]}),
         "success_url": origin + "/subscription?session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": origin + "/subscription",
         "metadata": {**metadata, "webhook_url": backend + "/api/webhook/stripe"},
@@ -17062,6 +17302,35 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
     await _stripe_client().v1.subscriptions.update_async(subscription_id, {"cancel_at_period_end": True})
     await _sync_stripe_subscription(subscription_id)
     return {"ok": True, "cancel_at_period_end": True}
+
+
+class BillingPortalRequest(BaseModel):
+    origin_url: str = Field(..., max_length=300)
+
+
+@api_router.post("/subscriptions/portal")
+async def billing_portal(request: BillingPortalRequest, user: dict = Depends(get_current_user)):
+    """Stripe's own page: change card, see invoices, cancel or resume. The page is hosted by
+    Stripe, so no card data ever goes through Neura Al Noor."""
+    customer = user.get("stripe_customer_id")
+    if not customer:
+        raise HTTPException(status_code=404, detail="Aucun abonnement payant à gérer.")
+    origin = _payment_origin(request.origin_url)
+    session = await _stripe_client().v1.billing_portal.sessions.create_async(
+        {"customer": customer, "return_url": origin + "/subscription"}
+    )
+    return {"url": session["url"]}
+
+
+@api_router.post("/subscriptions/resume")
+async def resume_subscription(user: dict = Depends(get_current_user)):
+    """Undo a cancellation that has not taken effect yet."""
+    subscription_id = user.get("stripe_subscription_id")
+    if not subscription_id or not user.get("subscription_cancel_at_period_end"):
+        raise HTTPException(status_code=404, detail="Aucune résiliation en attente.")
+    await _stripe_client().v1.subscriptions.update_async(subscription_id, {"cancel_at_period_end": False})
+    await _sync_stripe_subscription(subscription_id)
+    return {"ok": True, "cancel_at_period_end": False}
 
 
 @api_router.post("/webhook/stripe")
@@ -17211,14 +17480,44 @@ async def asset_links_api():
         headers={"Cache-Control": "public, max-age=86400", "Access-Control-Allow-Origin": "*"}
     )
 
+MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", str(16 * 1024 * 1024)))
+
+
+@app.middleware("http")
+async def security_headers_and_size(request: Request, call_next):
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "Requête trop volumineuse."})
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 # CORS middleware
+_CORS_ORIGINS = [origin.strip() for origin in os.environ.get('CORS_ORIGINS', '').split(',') if origin.strip()]
+if not _CORS_ORIGINS or "*" in _CORS_ORIGINS:
+    logger.warning("CORS_ORIGINS is not set to the site's address: only localhost is allowed.")
+    _CORS_ORIGINS = [origin for origin in _CORS_ORIGINS if origin != "*"] or [
+        "http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def prepare_first_quiz():
+    # The first player after a restart does not wait for the AI either.
+    task = asyncio.create_task(_refill_quiz_pool(None))
+    _QUIZ_REFILLS.add(task)
+    task.add_done_callback(_QUIZ_REFILLS.discard)
+
 
 @app.on_event("startup")
 async def resume_neuraco_cloud_tasks():
@@ -17241,7 +17540,13 @@ async def resume_neuraco_cloud_tasks():
         ),
         db.neuraco_incidents.create_index([("status", 1), ("created_at", -1)]),
         db.founder_admin_logs.create_index("created_at"),
+        db.ai_memories.create_index([("user_id", 1), ("updated_at", -1)]),
+        db.messages.create_index([("user_id", 1), ("role", 1), ("created_at", -1)]),
     )
+    try:
+        await db.users.create_index("email", unique=True)
+    except Exception as exc:  # existing duplicates: logged, never blocks the start
+        logger.warning("users.email unique index not created: %s", str(exc)[:200])
     queued = await db.neuraco_cloud_tasks.find(
         {"status": "queued"},
         {"_id": 0, "id": 1},
