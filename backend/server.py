@@ -606,6 +606,35 @@ CODE_DELIVERY_GUARD = (
 )
 
 
+# FiveM: how a player is really identified (no blind rule: depends on the framework of the project).
+FIVEM_CODE_GUARD = (
+    "\n\nIDENTIFIER UN JOUEUR FIVEM : côté serveur, `source` n'est que le numéro du joueur pendant SA "
+    "session : il change à chaque connexion et peut être redonné à un autre joueur. Utilise-le pour agir "
+    "sur le joueur connecté (lui envoyer un événement, récupérer son objet joueur), mais ne l'enregistre "
+    "JAMAIS en base comme propriétaire ou clé durable. Pour une donnée persistante (véhicule, inventaire, "
+    "argent, logement…), prends l'identifiant permanent du framework réellement utilisé par le projet : "
+    "ESX → ESX.GetPlayerFromId(source).identifier ; QBCore → QBCore.Functions.GetPlayer(source)."
+    "PlayerData.citizenid ; Qbox → exports.qbx_core:GetPlayer(source).PlayerData.citizenid ; standalone → "
+    "GetPlayerIdentifierByType(source, 'license'). Si le framework n'est pas indiqué, déduis-le du code "
+    "fourni (fxmanifest, dépendances, appels existants) ; s'il reste inconnu et que c'est indispensable, "
+    "demande-le. Dans un événement serveur, prends toujours le joueur depuis `source`, jamais un "
+    "identifiant envoyé par le client, et vérifie côté serveur droits, montants et distances. Avant de modifier, "
+    "supprimer ou réattribuer une ligne existante (véhicule, objet, logement), vérifie dans la requête qu'elle "
+    "appartient déjà à ce joueur (par exemple WHERE … AND owner = son identifiant, avec les colonnes du projet) : sinon un joueur pourrait prendre le bien "
+    "d'un autre. Respecte les "
+    "tables, colonnes et conventions du projet existant, et ne réécris pas un script qui fonctionne déjà "
+    "simplement pour appliquer ces règles."
+)
+
+_FIVEM_HINT = re.compile(r"\bfive\s*m\b|fxmanifest|\besx\b|qb-?core|\bqbox\b|qbx_core|oxmysql", re.IGNORECASE)
+
+
+def _code_delivery_guard(message) -> str:
+    """The code rules, plus the FiveM identification rules when the request is about FiveM."""
+    text = f"{message.content or ''}\n{(getattr(message, 'project_context', None) or '')[:200000]}"
+    return CODE_DELIVERY_GUARD + (FIVEM_CODE_GUARD if _FIVEM_HINT.search(text) else "")
+
+
 VOICE_REPLY_GUARD = (
     "\n\nMODE APPEL VOCAL : ta réponse sera lue à voix haute pendant un appel. Réponds en 2 à 4 "
     "phrases courtes et naturelles (au maximum environ 60 mots), comme dans une vraie conversation : "
@@ -7426,7 +7455,7 @@ Règles importantes:
                 if message.voice:
                     persona_system += VOICE_REPLY_GUARD
                 elif looks_like_code_request(message.content):
-                    persona_system += CODE_DELIVERY_GUARD
+                    persona_system += _code_delivery_guard(message)
                 persona_system += _reply_language_instruction(message.lang)
                 # Build the conversation history as initial_messages so the model
                 # receives the full context in a SINGLE request. (Previously the
@@ -7832,7 +7861,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             if message.voice:
                 system_prompt += VOICE_REPLY_GUARD
             elif looks_like_code_request(message.content):
-                system_prompt += CODE_DELIVERY_GUARD
+                system_prompt += _code_delivery_guard(message)
 
             # initial_messages must include the system prompt first (the library does NOT
             # auto-add it when initial_messages is provided).
