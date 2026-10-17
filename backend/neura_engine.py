@@ -57,6 +57,8 @@ QUOTA_PREFIX = "NEURA_QUOTA:"
 
 # The reflection level chosen in the app (auto | instant | medium | high), set per request.
 current_ai_level: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("neura_ai_level", default=None)
+# Extra input room for one request (the project workshop's context), on top of the usual limit.
+current_ai_extra_input: contextvars.ContextVar[int] = contextvars.ContextVar("neura_ai_extra_input", default=0)
 
 # A request about programming: it goes to the code model with room for whole files.
 _CODE_WORDS = re.compile(
@@ -375,7 +377,7 @@ class NeuraRuntime:
         flat = [m for m in flat if m["role"] in ("system", "user", "assistant") and m["content"]]
         return compact_messages(
             flat, keep_last=self.keep_last, older_chars=self.older_chars, older_items=self.older_items,
-            max_input_tokens=self.max_input_tokens,
+            max_input_tokens=self.max_input_tokens + max(0, int(current_ai_extra_input.get() or 0)),
         )
 
     def _cache_key(self, messages: List[dict], model: Optional[str] = None) -> Optional[str]:

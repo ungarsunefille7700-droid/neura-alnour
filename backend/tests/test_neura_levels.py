@@ -219,3 +219,21 @@ def test_asking_for_a_site_or_an_app_is_a_creation_request():
     for chat in ("quelle application pour apprendre le Coran ?", "recommande-moi un bon site islamique",
                  "je fais un site web pour ma mosquée"):
         assert not looks_like_code_request(chat), chat
+
+
+def test_workshop_context_respects_the_ceiling_of_the_level():
+    big = "x" * 400_000
+    for level, ceiling in (("instant", 6000), ("medium", 12000), ("high", 24000), ("very_high", 48000)):
+        text = server._workshop_context(big, level)
+        assert len(text) <= len(server.WORKSHOP_GUARD) + ceiling * 3.5
+        assert neura_engine.current_ai_extra_input.get() == ceiling
+    assert server._workshop_context(None, "high") == "" and neura_engine.current_ai_extra_input.get() == 0
+    engine()
+    runtime = neura_engine.get_runtime()
+    many = [{"role": "system", "content": "s" * 60_000}] + [{"role": "user", "content": f"m{i} " * 50} for i in range(12)]
+    token = neura_engine.current_ai_extra_input.set(24000)
+    try:
+        kept = runtime.prepare(many)
+    finally:
+        neura_engine.current_ai_extra_input.reset(token)
+    assert kept[0]["content"].startswith("s") and len(kept) > 2  # the project and the recent messages both fit

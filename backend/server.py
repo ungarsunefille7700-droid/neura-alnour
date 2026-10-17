@@ -39,6 +39,7 @@ import unicodedata
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 import neura_engine
 from neura_engine import current_ai_level, current_ai_subject, looks_like_code_request, user_facing_ai_error
+from neura_engine import current_ai_extra_input
 from neura_gateway import create_gateway_routers
 
 ROOT_DIR = Path(__file__).parent
@@ -474,6 +475,31 @@ MODERATION_GUARD = (
 # Identity guard — appended to every system prompt. The assistant must present itself as
 # NEURA AL-NOUR and NEVER reveal the underlying provider/model (Google/Gemini today,
 # OpenAI/Anthropic/xAI later). Universal, model-independent.
+# Project workshop: ceilings per reasoning level, validated on 2026-10-17 (a ceiling, not a
+# target: the browser only sends the files the question needs).
+WORKSHOP_CONTEXT_TOKENS = {"instant": 6000, "medium": 12000, "high": 24000, "very_high": 48000, "auto": 12000}
+WORKSHOP_GUARD = (
+    "\n\nATELIER DE PROJET : l'utilisateur a ouvert une archive de son projet ; voici ce que l'application en a "
+    "lu dans le périmètre qu'il a choisi. Règles : appuie-toi uniquement sur ces fichiers et cite leurs chemins ; "
+    "un fichier donné « en extraits » ou seulement dans le plan n'a PAS été lu en entier : ne prétends pas le "
+    "connaître et dis quels fichiers il faudrait ouvrir ; pour modifier le projet, renvoie chaque fichier modifié "
+    "COMPLET avec sa ligne « Fichier: » et son chemin exact d'origine, et ne touche à aucun autre fichier que ceux "
+    "demandés ; respecte le framework, la base de données et les fichiers de configuration existants.\n"
+)
+
+
+def _workshop_context(context: Optional[str], level: Optional[str]) -> str:
+    """The workshop's context, cut at the ceiling of the level really applied, and the room it needs
+    in the engine for this request only."""
+    if not context or not context.strip():
+        current_ai_extra_input.set(0)
+        return ""
+    ceiling = WORKSHOP_CONTEXT_TOKENS.get(level or "auto", WORKSHOP_CONTEXT_TOKENS["auto"])
+    text = context[: int(ceiling * 3.5)]
+    current_ai_extra_input.set(ceiling)
+    return WORKSHOP_GUARD + text
+
+
 IDENTITY_GUARD = (
     "\n\nIDENTITÉ (RÈGLE STRICTE) : Tu es l'intelligence artificielle de l'application "
     "NEURA AL-NOUR (نور). Présente-toi TOUJOURS comme « NEURA AL-NOUR » (ou « NEURA »). "
@@ -4787,6 +4813,9 @@ class MessageCreate(BaseModel):
     web_search: Optional[bool] = False
     web_mode: Optional[str] = "auto"
     voice: Optional[bool] = False  # sent from a voice call: short spoken answer
+    # Project workshop (ZIP read in the browser): the context built for this question.
+    project_context: Optional[str] = Field(default=None, max_length=200_000)
+    project_summary: Optional[str] = Field(default=None, max_length=300)  # shown under the message
 
 
 class WorkMessageCreate(BaseModel):
@@ -7543,6 +7572,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "request_id": request_record.get("request_id"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
+            if message.project_context and message.project_summary:
+                user_doc["workshop"] = message.project_summary  # what the workshop really gave the AI
             await db.messages.update_one({"id": user_doc["id"]}, {"$setOnInsert": user_doc}, upsert=True)
 
             # Conversation history (exclude the message we just saved)
@@ -7562,6 +7593,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             memory_result = await _save_ai_memory_from_text(user, message.content)
             memory_context = await _ai_memory_context(user, message.content)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
+            system_prompt += _workshop_context(message.project_context, requested_mode)
             if memory_result and memory_result.get("blocked"):
                 system_prompt += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
             elif memory_result:
