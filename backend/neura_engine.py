@@ -89,6 +89,44 @@ def asks_for_zip(text: str) -> bool:
     return bool(_ZIP_WORDS.search(plain))
 
 
+# Image analysis on the free engine (step 4). Measured 2026-10-17 on 13 images x 2-3 rounds
+# (Quran with and without tashkeel, hadith, invoice, dashboard, code error, FiveM console,
+# real app screenshot, degraded and composite images, a weak hadith and an altered verse):
+# Gemma 4 found every expected fact, read the Arabic exactly, ~5 s median, 6 to 27 Neurons
+# per image. Without this rule it silently "corrected" an altered verse while copying it.
+VISION_READING_RULE = (
+    "\n\nLECTURE D'IMAGE : quand tu recopies ou cites le texte d'une image, écris EXACTEMENT les caractères "
+    "visibles, même s'ils diffèrent d'un texte que tu connais (verset, hadith, code) : ne corrige jamais pendant "
+    "la recopie et n'ajoute pas de voyelles (tashkeel) absentes de l'image. Ensuite seulement, signale clairement "
+    "chaque différence avec le texte authentique ou correct. Si un passage est illisible, dis-le au lieu de deviner."
+)
+
+# First, a plain reading of the Arabic text of the image (measured: faithful 12/12), checked by
+# the application against the authentic Quran text (neura_quran) before the answer is written.
+VISION_OCR_PROMPT = (
+    "Recopie EXACTEMENT tout le texte arabe visible dans cette image, ligne par ligne, tel qu'il est écrit : "
+    "sans rien corriger, sans ajouter de voyelles, sans traduction ni commentaire. "
+    "S'il n'y a aucun texte arabe dans l'image, réponds seulement : AUCUN"
+)
+
+
+def image_mime(data: str) -> str:
+    """The real type of a base64 image (the site sends WebP; uploads may be PNG / JPEG / GIF)."""
+    head = (data or "")[:16]
+    if head.startswith("iVBOR"):
+        return "image/png"
+    if head.startswith("/9j/"):
+        return "image/jpeg"
+    if head.startswith("R0lGOD"):
+        return "image/gif"
+    return "image/webp"
+
+
+def _image_data(file_content) -> str:
+    data = getattr(file_content, "file_content_base64", "") or ""
+    return data.split(",", 1)[1] if data.startswith("data:") else data
+
+
 # Conversations where the user may ask for code (chat, Work); the app's own generations.
 CONVERSATION_SESSIONS = ("neura_stream_", "neura_", "work_")
 GENERATION_SESSIONS = ("quiz_gen_",)
@@ -317,6 +355,11 @@ class NeuraRuntime:
         self.tts_enabled = bool(provider and provider.supports_tts
                                 and env.get("NEURA_VOICE_TTS_PROVIDER", "legacy").lower() == "engine")
         self.translate_enabled = bool(provider and getattr(provider, "supports_translate", False))
+        # Images: Emergent stays the default until Gemma 4 is validated (NEURA_VISION_PROVIDER=engine).
+        self.vision_enabled = bool(provider and env.get("NEURA_VISION_PROVIDER", "legacy").strip().lower() == "engine")
+        self.vision_model = (env.get("NEURA_ENGINE_VISION_MODEL", "@cf/google/gemma-4-26b-a4b-it") or "").strip() or self.model
+        self.vision_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_VISION_MAX_OUTPUT_TOKENS", 1536))
+        self.vision_image_tokens = int(_env_float(env, "NEURA_ENGINE_VISION_IMAGE_TOKENS", 300))
         self._translations: "OrderedDict[str, str]" = OrderedDict()
 
         def plan_limit(name, default):
@@ -361,6 +404,7 @@ class NeuraRuntime:
             "cache": self.cache_enabled,
             "voice_stt": "engine" if self.stt_enabled else "legacy",
             "voice_tts": "engine" if self.tts_enabled else "legacy",
+            "vision": self.vision_model if self.vision_enabled else "legacy",
         }
 
     async def ensure_indexes(self):
@@ -602,6 +646,81 @@ class NeuraRuntime:
                         "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
                         "text": result.text})
 
+    @staticmethod
+    def _image_parts(images: List[str]) -> List[dict]:
+        return [{"type": "image_url", "image_url": {"url": f"data:{image_mime(data)};base64,{data}"}} for data in images]
+
+    async def _quran_check(self, images: List[str], subject) -> Optional[dict]:
+        """Reads the Arabic text of the images and checks it against the Quran. Never blocks the
+        answer: any failure only means no verification note."""
+        messages = [{"role": "user", "content": [{"type": "text", "text": VISION_OCR_PROMPT}] + self._image_parts(images)}]
+        prompt_tokens = estimate_tokens(VISION_OCR_PROMPT) + self.vision_image_tokens * len(images)
+        try:
+            reservation = await self.budget.reserve(subject, self.provider.max_neurons(self.vision_model, prompt_tokens, 800))
+        except BudgetExceeded:
+            return None
+        try:
+            async with self.gate.slot():
+                result = await self.provider.chat(messages, model=self.vision_model, max_tokens=800, temperature=0)
+        except Exception:
+            await self.budget.release(reservation)
+            await self._log(source="vision_ocr", subject=subject, status="error", error="exception", model=self.vision_model)
+            return None
+        await self.budget.settle(reservation, result.neurons)
+        await self._log(source="vision_ocr", subject=subject, status="ok", result=result, neurons=result.neurons,
+                        model=self.vision_model)
+        try:
+            import neura_quran
+            return neura_quran.check(result.text)
+        except Exception as exc:
+            logger.warning("Quran check skipped: %s", str(exc)[:150])
+            return None
+
+    async def vision(self, messages, images: List[str], *, max_tokens=None, temperature=0.3, subject=None) -> tuple:
+        """An answer about one or more images (base64), with the conversation before it.
+        Same budget, queue and log as the text answers. Returns (text, info)."""
+        subject = subject if subject is not None else current_ai_subject.get()
+        prepared = self.prepare(messages)
+        quran = await self._quran_check(images, subject)
+        rule = VISION_READING_RULE
+        if quran:
+            import neura_quran
+            rule += neura_quran.verification_note(quran)
+        if prepared and prepared[0]["role"] == "system":
+            prepared[0] = {"role": "system", "content": prepared[0]["content"] + rule}
+        else:
+            prepared.insert(0, {"role": "system", "content": rule.strip()})
+        if not prepared or prepared[-1]["role"] != "user":
+            prepared.append({"role": "user", "content": "Analyse cette image."})
+        prepared[-1] = {"role": "user", "content": [{"type": "text", "text": prepared[-1]["content"]}] + self._image_parts(images)}
+        model = self.vision_model
+        max_tokens = max(int(max_tokens or 0), self.vision_max_output_tokens)
+        prompt_tokens = estimate_messages_tokens(prepared[:-1]) + estimate_tokens(prepared[-1]["content"][0]["text"]) \
+            + self.vision_image_tokens * len(images)
+        max_tokens = await self._fit(subject, model, prompt_tokens, max_tokens, None)
+        worst = self.provider.max_neurons(model, prompt_tokens, max_tokens)
+        try:
+            reservation = await self.budget.reserve(subject, worst)
+        except BudgetExceeded as exc:
+            await self._log(source="vision", subject=subject, status="refused_budget", error=exc.scope, model=model)
+            raise self._refusal(exc)
+        try:
+            async with self.gate.slot():
+                result = await self.provider.chat(prepared, model=model, max_tokens=max_tokens, temperature=temperature)
+        except (Saturated, ProviderError) as exc:
+            await self.budget.release(reservation)
+            await self._log(source="vision", subject=subject, status="error", error=getattr(exc, "code", "saturated"), model=model)
+            raise self._refusal(exc)
+        except BaseException:
+            await self.budget.release(reservation)
+            await self._log(source="vision", subject=subject, status="error", error="exception", model=model)
+            raise
+        await self.budget.settle(reservation, result.neurons)
+        await self._log(source="vision", subject=subject, status="ok", result=result, neurons=result.neurons, model=model)
+        return result.text, {"neurons": result.neurons, "prompt_tokens": result.prompt_tokens,
+                             "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
+                             "quran_check": quran}
+
     async def transcribe(self, audio: bytes, *, language=None, prompt=None, subject=None) -> str:
         subject = subject if subject is not None else current_ai_subject.get()
         worst = self.provider.stt_neurons(self.provider.audio_seconds_estimate(audio) * 1.5)
@@ -744,6 +863,8 @@ class LlmChat(_LegacyLlmChat):
         runtime = get_runtime()
         if not runtime or not runtime.enabled:
             return None
+        if self._vision_for(user_message, runtime):
+            return runtime
         if self.tools or (user_message is not None and user_message.file_contents):
             if runtime.legacy_allowed:
                 return None
@@ -751,6 +872,27 @@ class LlmChat(_LegacyLlmChat):
                 "Cette fonction (images ou outils) n'est pas disponible en mode IA gratuit.", "unsupported"
             )
         return runtime
+
+    def _vision_for(self, user_message, runtime) -> bool:
+        """Images only (no tool, no other file), and the engine's image analysis switched on."""
+        files = (user_message.file_contents if user_message is not None else None) or []
+        return bool(files and not self.tools and runtime.vision_enabled
+                    and all(getattr(item, "content_type", "") == "image" for item in files))
+
+    async def _send_vision(self, runtime, user_message) -> str:
+        images = [_image_data(item) for item in user_message.file_contents]
+        messages = self._engine_messages(user_message, "chat")
+        max_tokens, _temperature = self._params()
+        try:
+            text, _info = await runtime.vision(messages, images, max_tokens=max_tokens)
+        except (EngineRefused, ProviderError) as exc:
+            # Emergent stays the safety net while it is allowed (never for a quota already used up).
+            if runtime.legacy_allowed and getattr(exc, "code", "") != "quota":
+                logger.warning("Vision engine failed (%s), Emergent used instead", exc.code)
+                return await super().send_message(user_message)
+            raise
+        self.messages = self._history_entry(messages, user_message) + [{"role": "assistant", "content": text}]
+        return text
 
     def _engine_messages(self, user_message, task: str = "chat") -> List[dict]:
         messages = [dict(m) for m in self.messages]
@@ -795,6 +937,8 @@ class LlmChat(_LegacyLlmChat):
         runtime = self._engine_for(user_message)
         if runtime is None:
             return await super().send_message(user_message)
+        if self._vision_for(user_message, runtime):
+            return await self._send_vision(runtime, user_message)
         max_tokens, temperature = self._params()
         task = self._task(user_message)
         messages = self._engine_messages(user_message, task)
@@ -808,6 +952,12 @@ class LlmChat(_LegacyLlmChat):
         if runtime is None:
             async for event in super().stream_message(user_message):
                 yield event
+            return
+        if self._vision_for(user_message, runtime):
+            text = await self._send_vision(runtime, user_message)
+            yield TextDelta(content=text)
+            yield StreamDone(content=text, tool_calls=None, finish_reason="stop",
+                             usage=Usage(input_tokens=0, output_tokens=0, total_tokens=0), raw=None)
             return
         max_tokens, temperature = self._params()
         task = self._task(user_message)
