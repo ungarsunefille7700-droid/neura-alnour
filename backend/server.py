@@ -6259,6 +6259,7 @@ async def record_neuraco_technical_telemetry(
 ACCOUNT_CLOUD_DATA_COLLECTIONS = (
     "ai_memories",
     "quran_memorization",
+    "project_memories",
     "auth_action_tokens",
     "auth_sessions",
     "chat_request_results",
@@ -6873,6 +6874,215 @@ async def _ai_memory_context(user: dict, query: str = "") -> str:
         "Pour voir, ajouter ou effacer ses souvenirs, il peut aller dans Paramètres, rubrique Mémoire."
         + past
     )
+
+
+
+# ---------- Project memory (step 2, validated 2026-10-17) ----------
+# One per conversation: objective, constraints, decisions, files studied (with their version),
+# files Neura modified, open errors, remaining steps. Kept with references to the real files
+# (path + size + content hash), not only a summary, and given back to the AI on each message.
+PROJECT_MEMORY_MAX_FILES = 3000
+PROJECT_MEMORY_PROMPT_TOKENS = 1500
+
+
+class ProjectFileRef(BaseModel):
+    path: str = Field(..., max_length=500)
+    size: int = Field(default=0, ge=0)
+    hash: Optional[str] = Field(default=None, max_length=40)
+    state: Optional[str] = Field(default=None, max_length=40)  # lu, inventorié, refusé…
+
+
+class ProjectSnapshot(BaseModel):
+    conversation_id: str = Field(..., max_length=100)
+    archive_name: str = Field(..., max_length=300)
+    archive_size: int = Field(default=0, ge=0)
+    fingerprint: Optional[str] = Field(default=None, max_length=80)
+    total_files: int = Field(default=0, ge=0)
+    files: List[ProjectFileRef] = Field(default_factory=list, max_length=PROJECT_MEMORY_MAX_FILES)
+
+
+class ProjectChecks(BaseModel):
+    conversation_id: str = Field(..., max_length=100)
+    issues: List[str] = Field(default_factory=list, max_length=50)  # result of the automatic checks
+
+
+async def _owned_conversation(user: dict, conversation_id: str) -> None:
+    if not await db.conversations.find_one({"id": conversation_id, "user_id": user["id"]}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Conversation non trouvée")
+
+
+def _project_public(doc: Optional[dict]) -> Optional[dict]:
+    if not doc:
+        return None
+    return {key: value for key, value in doc.items() if key not in ("_id", "user_id")}
+
+
+@api_router.get("/projects/memory")
+async def get_project_memory(conversation_id: str, user: dict = Depends(get_current_user)):
+    doc = await db.project_memories.find_one({"user_id": user["id"], "conversation_id": conversation_id}, {"_id": 0})
+    return {"memory": _project_public(doc)}
+
+
+@api_router.put("/projects/memory")
+async def save_project_snapshot(data: ProjectSnapshot, user: dict = Depends(get_current_user)):
+    """The archive of the conversation and the files really studied (sent by the workshop)."""
+    await _owned_conversation(user, data.conversation_id)
+    now = datetime.now(timezone.utc).isoformat()
+    previous = await db.project_memories.find_one({"user_id": user["id"], "conversation_id": data.conversation_id}, {"_id": 0}) or {}
+    known = {row["path"]: row for row in previous.get("files_studied", [])}
+    changed = []
+    for ref in data.files:
+        old = known.get(ref.path)
+        if old and old.get("hash") and ref.hash and old["hash"] != ref.hash:
+            changed.append(ref.path)  # the user's file changed since it was studied
+        known[ref.path] = {**(old or {}), **ref.model_dump(), "seen_at": now}
+    files = sorted(known.values(), key=lambda row: row["path"])[:PROJECT_MEMORY_MAX_FILES]
+    await db.project_memories.update_one(
+        {"user_id": user["id"], "conversation_id": data.conversation_id},
+        {"$set": {"archive": {"name": data.archive_name, "size": data.archive_size, "fingerprint": data.fingerprint,
+                              "total_files": data.total_files},
+                  "files_studied": files, "changed_since_studied": changed, "updated_at": now},
+         "$setOnInsert": {"id": str(uuid.uuid4()), "user_id": user["id"], "conversation_id": data.conversation_id,
+                          "created_at": now, "objective": "", "constraints": [], "decisions": [],
+                          "modified_files": [], "open_errors": [], "remaining_steps": []}},
+        upsert=True,
+    )
+    return {"ok": True, "files": len(files), "changed_since_studied": changed}
+
+
+@api_router.post("/projects/memory/checks")
+async def save_project_checks(data: ProjectChecks, user: dict = Depends(get_current_user)):
+    """The automatic checks of the last delivered project become the open errors (or none)."""
+    await _owned_conversation(user, data.conversation_id)
+    await db.project_memories.update_one(
+        {"user_id": user["id"], "conversation_id": data.conversation_id},
+        {"$set": {"open_errors": [issue[:300] for issue in data.issues], "checks_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"ok": True}
+
+
+@api_router.delete("/projects/memory")
+async def delete_project_memory(conversation_id: str, user: dict = Depends(get_current_user)):
+    result = await db.project_memories.delete_one({"user_id": user["id"], "conversation_id": conversation_id})
+    return {"ok": True, "deleted": result.deleted_count}
+
+
+_DELIVERED_FILE = re.compile(r"(?:^|\n)\s*\**\s*(?:Fichier|File)\s*:\s*`?([^\n`*]+?)`?\**\s*\n+```[\w+#.-]*\n(.*?)```", re.S | re.I)
+
+
+def _delivered_files(answer: str) -> List[dict]:
+    """The files Neura delivered in an answer, with their version (hash) and size."""
+    out = []
+    for path, code in _DELIVERED_FILE.findall(answer or ""):
+        path = path.strip()
+        if path.lower().endswith(".zip"):
+            continue
+        out.append({"path": path, "lines": len(code.rstrip("\n").split("\n")),
+                    "hash": hashlib.sha1(code.encode("utf-8")).hexdigest()[:16]})
+    return out
+
+
+PROJECT_MEMORY_EXTRACTION = """Tu tiens la mémoire d'un projet logiciel mené dans une conversation.
+Mémoire actuelle (JSON) :
+{memory}
+
+Dernier échange :
+UTILISATEUR : {question}
+ASSISTANT : {answer}
+
+Mets la mémoire à jour. Garde seulement ce qui est durable pour la suite du projet :
+- "objectif" : le but du projet en une phrase (garde l'actuel s'il est toujours vrai) ;
+- "contraintes" : les exigences de l'utilisateur à respecter (framework, base de données à garder, fichiers à ne pas toucher, design à conserver…) ;
+- "decisions" : les choix techniques faits ou validés ;
+- "etapes_restantes" : ce qui reste à faire, d'après l'échange.
+Phrases courtes en français. N'invente rien qui n'est pas dans l'échange. Réponds uniquement avec ce JSON :
+{{"objectif": "...", "contraintes": ["..."], "decisions": ["..."], "etapes_restantes": ["..."]}}"""
+
+
+async def _update_project_memory(user: dict, conversation_id: str, question: str, answer: str) -> None:
+    from neura_engine import LlmChat, UserMessage
+    try:
+        doc = await db.project_memories.find_one({"user_id": user["id"], "conversation_id": conversation_id}, {"_id": 0})
+        if not doc:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        delivered = _delivered_files(answer)
+        if delivered:
+            known = {row["path"]: row for row in doc.get("modified_files", [])}
+            for row in delivered:
+                known[row["path"]] = {**row, "at": now}
+            await db.project_memories.update_one({"user_id": user["id"], "conversation_id": conversation_id},
+                                                 {"$set": {"modified_files": list(known.values())[:500]}})
+        current = {"objectif": doc.get("objective", ""), "contraintes": doc.get("constraints", []),
+                   "decisions": doc.get("decisions", []), "etapes_restantes": doc.get("remaining_steps", [])}
+        chat = LlmChat(api_key=AI_LLM_KEY, session_id=f"memory_project_{uuid.uuid4()}",
+                       system_message="Tu réponds uniquement avec du JSON valide, sans markdown.") \
+            .with_model("openai", "gpt-4.1-mini").with_params(max_tokens=500, temperature=0.1)
+        raw = await asyncio.wait_for(chat.send_message(UserMessage(text=PROJECT_MEMORY_EXTRACTION.format(
+            memory=json.dumps(current, ensure_ascii=False), question=question[:3000],
+            answer=re.sub(r"```.*?```", "[code]", answer or "", flags=re.S)[:4000]))), timeout=45)
+        data = _memory_json(raw)
+        if not data:
+            return
+        clean = lambda items: [str(item).strip()[:300] for item in (items or []) if str(item).strip()][:20]
+        await db.project_memories.update_one(
+            {"user_id": user["id"], "conversation_id": conversation_id},
+            {"$set": {"objective": str(data.get("objectif") or current["objectif"])[:400],
+                      "constraints": clean(data.get("contraintes")) or current["contraintes"],
+                      "decisions": clean(data.get("decisions")) or current["decisions"],
+                      "remaining_steps": clean(data.get("etapes_restantes")),
+                      "updated_at": now}},
+        )
+    except Exception as exc:  # the memory must never break a conversation
+        logger.warning("Project memory update skipped: %s", str(exc)[:200])
+
+
+_PROJECT_TASKS: set = set()
+
+
+def _schedule_project_memory_update(user: dict, conversation_id: str, question: str, answer: str) -> None:
+    task = asyncio.create_task(_update_project_memory(user, conversation_id, question, answer))
+    _PROJECT_TASKS.add(task)
+    task.add_done_callback(_PROJECT_TASKS.discard)
+
+
+async def _ensure_project_memory(user: dict, conversation_id: str) -> None:
+    """Created with the first message sent with an archive (so the first answer is remembered)."""
+    now = datetime.now(timezone.utc).isoformat()
+    await db.project_memories.update_one(
+        {"user_id": user["id"], "conversation_id": conversation_id},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "user_id": user["id"], "conversation_id": conversation_id,
+                          "created_at": now, "updated_at": now, "archive": {}, "files_studied": [], "objective": "",
+                          "constraints": [], "decisions": [], "modified_files": [], "open_errors": [], "remaining_steps": []}},
+        upsert=True,
+    )
+
+
+async def _project_memory_context(user: dict, conversation_id: Optional[str]) -> str:
+    """The project memory given back to the AI on each message of the conversation."""
+    if not conversation_id:
+        return ""
+    doc = await db.project_memories.find_one({"user_id": user["id"], "conversation_id": conversation_id}, {"_id": 0})
+    if not doc:
+        return ""
+    archive = doc.get("archive") or {}
+    studied = doc.get("files_studied", [])
+    lines = ["\n\nMÉMOIRE DU PROJET DE CETTE CONVERSATION (à respecter et à tenir à jour) :",
+             f"- Archive : {archive.get('name', '?')} ({archive.get('total_files', len(studied))} fichiers ; "
+             f"{sum(1 for row in studied if row.get('state') == 'lu')} lus en entier)"]
+    if doc.get("objective"):
+        lines.append(f"- Objectif : {doc['objective']}")
+    for label, key in (("Contraintes", "constraints"), ("Décisions", "decisions"), ("Étapes restantes", "remaining_steps"),
+                       ("Erreurs encore ouvertes", "open_errors")):
+        if doc.get(key):
+            lines.append(f"- {label} : " + " ; ".join(doc[key][:12]))
+    if doc.get("modified_files"):
+        lines.append("- Fichiers déjà livrés par toi : " + ", ".join(f"{row['path']} (v{row.get('hash', '')[:6]})" for row in doc["modified_files"][-30:]))
+    if doc.get("changed_since_studied"):
+        lines.append("- Modifiés par l'utilisateur depuis leur étude : " + ", ".join(doc["changed_since_studied"][:20]))
+    lines.append("Ne refais pas ce qui est déjà livré sans demande ; reprends le travail là où il s'est arrêté.")
+    text = "\n".join(lines)
+    return text[: PROJECT_MEMORY_PROMPT_TOKENS * 4]
 
 
 @api_router.post("/chat/message")
@@ -7594,6 +7804,9 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             memory_context = await _ai_memory_context(user, message.content)
             system_prompt = BASE_CHAT_SYSTEM + current_ai_context() + memory_context + "\n\n" + profile["persona"] + "\n\n" + STYLE_PRECEDENCE + MODERATION_GUARD + IDENTITY_GUARD
             system_prompt += _workshop_context(message.project_context, requested_mode)
+            if message.project_context:
+                await _ensure_project_memory(user, conversation_id)
+            system_prompt += await _project_memory_context(user, conversation_id)
             if memory_result and memory_result.get("blocked"):
                 system_prompt += "\n\nL'utilisateur a demande d'enregistrer une memoire sensible. Refuse de memoriser des secrets et explique que les cles, tokens et mots de passe ne doivent pas etre stockes."
             elif memory_result:
@@ -7675,6 +7888,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             await db.messages.update_one({"id": assistant_doc["id"]}, {"$setOnInsert": assistant_doc}, upsert=True)
+            _schedule_project_memory_update(user, conversation_id, message.content, answer)
             actual_units = _weighted_text_units(
                 system_prompt,
                 message.content,
@@ -8295,6 +8509,7 @@ async def delete_conversation(conversation_id: str, user: dict = Depends(get_cur
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Conversation non trouvée")
     await db.messages.delete_many({"conversation_id": conversation_id})
+    await db.project_memories.delete_many({"user_id": user["id"], "conversation_id": conversation_id})
     return {"success": True}
 
 # ============== IMAGE GENERATION ==============
