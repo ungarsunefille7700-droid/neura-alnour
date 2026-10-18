@@ -355,11 +355,15 @@ class NeuraRuntime:
         self.tts_enabled = bool(provider and provider.supports_tts
                                 and env.get("NEURA_VOICE_TTS_PROVIDER", "legacy").lower() == "engine")
         self.translate_enabled = bool(provider and getattr(provider, "supports_translate", False))
-        # Images: Emergent stays the default until Gemma 4 is validated (NEURA_VISION_PROVIDER=engine).
-        self.vision_enabled = bool(provider and env.get("NEURA_VISION_PROVIDER", "legacy").strip().lower() == "engine")
+        # Images: Gemma 4 on the free engine (validated 2026-10-18); NEURA_VISION_PROVIDER=legacy gives them back to Emergent.
+        self.vision_enabled = bool(provider and env.get("NEURA_VISION_PROVIDER", "engine").strip().lower() == "engine")
         self.vision_model = (env.get("NEURA_ENGINE_VISION_MODEL", "@cf/google/gemma-4-26b-a4b-it") or "").strip() or self.model
         self.vision_max_output_tokens = int(_env_float(env, "NEURA_ENGINE_VISION_MAX_OUTPUT_TOKENS", 1536))
         self.vision_image_tokens = int(_env_float(env, "NEURA_ENGINE_VISION_IMAGE_TOKENS", 300))
+        # Images have their own reserve, shared by the whole app (validated 2026-10-18: 30 % of
+        # the day): they never use the users' own text budget; how many images each person may
+        # send stays the capture quota of the subscription.
+        self.image_share = min(1.0, max(0.0, _env_float(env, "NEURA_AI_IMAGE_SHARE", 0.3)))
         self._translations: "OrderedDict[str, str]" = OrderedDict()
 
         def plan_limit(name, default):
@@ -405,7 +409,13 @@ class NeuraRuntime:
             "voice_stt": "engine" if self.stt_enabled else "legacy",
             "voice_tts": "engine" if self.tts_enabled else "legacy",
             "vision": self.vision_model if self.vision_enabled else "legacy",
+            "image_share": self.image_share,
         }
+
+    @property
+    def image_pool(self) -> dict:
+        """The budget subject of every image analysis."""
+        return {"kind": "pool", "id": "images", "plan": "images", "limit": round(self.budget.daily_limit * self.image_share, 3)}
 
     async def ensure_indexes(self):
         try:
@@ -656,7 +666,7 @@ class NeuraRuntime:
         messages = [{"role": "user", "content": [{"type": "text", "text": VISION_OCR_PROMPT}] + self._image_parts(images)}]
         prompt_tokens = estimate_tokens(VISION_OCR_PROMPT) + self.vision_image_tokens * len(images)
         try:
-            reservation = await self.budget.reserve(subject, self.provider.max_neurons(self.vision_model, prompt_tokens, 800))
+            reservation = await self.budget.reserve(self.image_pool, self.provider.max_neurons(self.vision_model, prompt_tokens, 800))
         except BudgetExceeded:
             return None
         try:
@@ -697,12 +707,16 @@ class NeuraRuntime:
         max_tokens = max(int(max_tokens or 0), self.vision_max_output_tokens)
         prompt_tokens = estimate_messages_tokens(prepared[:-1]) + estimate_tokens(prepared[-1]["content"][0]["text"]) \
             + self.vision_image_tokens * len(images)
-        max_tokens = await self._fit(subject, model, prompt_tokens, max_tokens, None)
+        max_tokens = await self._fit(self.image_pool, model, prompt_tokens, max_tokens, None)
         worst = self.provider.max_neurons(model, prompt_tokens, max_tokens)
         try:
-            reservation = await self.budget.reserve(subject, worst)
+            reservation = await self.budget.reserve(self.image_pool, worst)
         except BudgetExceeded as exc:
             await self._log(source="vision", subject=subject, status="refused_budget", error=exc.scope, model=model)
+            if exc.scope == "subject":  # the images' reserve of the day is used up
+                raise EngineRefused(
+                    "L'analyse d'images gratuite est terminée pour aujourd'hui. Elle revient à minuit UTC "
+                    "(1 h ou 2 h du matin en France). Tu peux continuer à discuter avec Neura normalement.", "quota")
             raise self._refusal(exc)
         try:
             async with self.gate.slot():

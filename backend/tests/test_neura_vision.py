@@ -1,5 +1,5 @@
-"""Image analysis on the free engine (step 4): off by default (Emergent keeps the images), and
-when switched on: Gemma 4 receives the real image, the faithful-reading rule, the budget is
+"""Image analysis on the free engine (step 4): on by default (NEURA_VISION_PROVIDER=legacy gives
+the images back to Emergent), and: Gemma 4 receives the real image, the faithful-reading rule, the budget is
 charged and logged, and Emergent stays the safety net if the engine fails."""
 import asyncio
 import json
@@ -73,8 +73,9 @@ def ask(image=WEBP, history=None, plan="free"):
         neura_engine.current_ai_subject.reset(subject)
 
 
-def test_off_by_default_images_stay_on_emergent(monkeypatch):
-    fake, runtime, _db = engine({})
+def test_on_by_default_and_legacy_setting_gives_images_back_to_emergent(monkeypatch):
+    assert engine({})[1].status()["vision"] == GEMMA
+    fake, runtime, _db = engine({"NEURA_VISION_PROVIDER": "legacy"})
     called = []
 
     async def legacy(self, message):
@@ -166,3 +167,41 @@ def test_the_reading_failing_never_blocks_the_answer():
     neura_engine.configure(db, provider, {"NEURA_VISION_PROVIDER": "engine"}, from_env=False)
     assert ask() == "Il s'agit de la sourate Al-Ikhlas (112)."
     assert asyncio.run(db.ai_usage_log.find_one({"source": "vision_ocr"}))["status"] == "error"
+
+
+def test_images_use_their_own_reserve_never_the_users_text_budget():
+    fake, runtime, db = engine({})
+    assert runtime.image_pool["limit"] == 2700.0  # 30 % of the 9,000 Neurons of the day
+    ask(plan="free")
+    day = asyncio.run(db.ai_budget_days.find_one({}))
+    pool = asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^pool:images:"}}))
+    user = asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^user:u1:"}}))
+    assert pool["committed"] > 0 and round(day["committed"], 3) == round(pool["committed"], 3)  # still in the day's total
+    assert user is None or user["committed"] == 0  # the user's own 250 Neurons are untouched
+    log = asyncio.run(db.ai_usage_log.find_one({"source": "vision"}))
+    assert log["subject_id"] == "u1"  # but the usage is still logged for this user
+
+
+def test_when_the_reserve_is_used_up_a_clear_message_and_no_paid_fallback(monkeypatch):
+    fake, runtime, db = engine({"NEURA_AI_IMAGE_SHARE": "0.001"})  # a 9-Neuron reserve: used up at once
+    called = []
+
+    async def legacy(self, message):
+        called.append(1)
+        return "Emergent"
+    monkeypatch.setattr(_LegacyLlmChat, "send_message", legacy)
+    try:
+        ask()
+        raise AssertionError("refusal expected")
+    except neura_engine.EngineRefused as exc:
+        assert exc.code == "quota"
+        assert exc.user_message.startswith("L'analyse d'images gratuite est terminée pour aujourd'hui. Elle revient à minuit")
+        assert "continuer à discuter" in exc.user_message
+    assert called == [] and fake.answers() == []  # neither Emergent nor Gemma was called for the answer
+    # the text conversation of the same user still works
+    subject = neura_engine.current_ai_subject.set({"kind": "user", "id": "u1", "plan": "free"})
+    try:
+        chat = LlmChat(api_key="k", session_id="neura_c1", system_message="Tu es Neura.")
+        assert asyncio.run(chat.send_message(UserMessage(text="Salam, ça va ?")))
+    finally:
+        neura_engine.current_ai_subject.reset(subject)

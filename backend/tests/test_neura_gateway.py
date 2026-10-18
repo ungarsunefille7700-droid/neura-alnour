@@ -469,7 +469,9 @@ def test_llmchat_keeps_the_legacy_path_when_no_engine_is_configured(monkeypatch)
 
 
 def test_strict_free_mode_refuses_what_the_engine_cannot_do():
-    runtime_with(FakeCloudflare(), {"NEURA_LEGACY_AI": "off"})
+    # Images are handled by the engine since step 4 (Gemma 4); with the images given back to
+    # Emergent (legacy) and Emergent off, they are still refused.
+    runtime_with(FakeCloudflare(), {"NEURA_LEGACY_AI": "off", "NEURA_VISION_PROVIDER": "legacy"})
     chat = LlmChat(api_key="k", session_id="s", system_message="sys")
     image = neura_engine.FileContent(content_type="image", file_content_base64="aGk=")
     with pytest.raises(EngineRefused) as info:
