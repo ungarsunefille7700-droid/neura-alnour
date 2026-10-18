@@ -312,6 +312,24 @@ class CloudflareProvider(OpenAICompatibleProvider):
         seconds = seconds or self.audio_seconds_estimate(audio)
         return (result.get("text") or "").strip(), self.stt_neurons(seconds)
 
+    async def transcribe_segments(self, audio: bytes, *, language: Optional[str] = None) -> Tuple[List[dict], float]:
+        """Whisper with the time of each sentence: ([{start, end, text}], Neurons charged).
+        Cloudflare charges the whole audio length, silences included (measured 2026-10-18)."""
+        payload = {"audio": base64.b64encode(audio).decode("ascii"), "vad_filter": True}
+        if language:
+            payload["language"] = language
+        response = await self._run(CLOUDFLARE_STT_MODEL, payload)
+        result = response.json().get("result") or {}
+        segments = [{"start": round(float(s.get("start") or 0), 2), "end": round(float(s.get("end") or 0), 2),
+                     "text": (s.get("text") or "").strip()}
+                    for s in result.get("segments") or [] if (s.get("text") or "").strip()]
+        neurons = (result.get("usage") or {}).get("neurons")
+        if not isinstance(neurons, (int, float)):
+            info = result.get("transcription_info") or {}
+            seconds = info.get("duration") if isinstance(info.get("duration"), (int, float)) else None
+            neurons = self.stt_neurons(seconds or self.audio_seconds_estimate(audio))
+        return segments, round(float(neurons), 3)
+
     def translate_neurons(self, text: str) -> float:
         tokens = max(1, len(text) // 3)  # worst case: ~3 characters per token, as many out as in
         return self.neurons(CLOUDFLARE_TRANSLATE_MODEL, tokens, tokens)
