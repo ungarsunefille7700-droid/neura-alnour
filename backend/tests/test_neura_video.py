@@ -1,5 +1,5 @@
-"""Video analysis (step 5): off until a reserve is chosen; speech pieces keep their place in the
-video; frames are described with the faithful-reading rule; everything is charged to the video
+"""Video analysis (step 5): on with a 10 % reserve and a daily limit per person (0 % = off);
+speech pieces keep their place in the video; frames are described with the faithful-reading rule; everything is charged to the video
 reserve, never to the user's own budget; the timeline reaches the AI within the ceilings."""
 import asyncio
 import base64
@@ -68,13 +68,14 @@ def speech(offset=60.0, seconds=30):
     return server.VideoSpeechRequest(audio_base64=base64.b64encode(wav(seconds)).decode(), offset=offset, language="fr")
 
 
-def test_off_until_a_reserve_is_chosen():
-    fake, runtime, _db = engine({})
-    assert runtime.video_share == 0 and not runtime.video_enabled
+def test_on_by_default_with_10_percent_and_off_with_0():
+    assert engine({})[1].video_share == 0.1
+    fake, runtime, _db = engine({"NEURA_AI_VIDEO_SHARE": "0"})
+    assert not runtime.video_enabled
     with pytest.raises(HTTPException) as info:
         call(server.video_speech(speech(), USER))
     assert info.value.status_code == 503 and "pas encore activée" in info.value.detail
-    assert call(server.video_status(USER)) == {"enabled": False, "neurons_left_today": 0}
+    assert call(server.video_status(USER))["enabled"] is False
     assert fake.calls == []
 
 
@@ -89,7 +90,11 @@ def test_speech_keeps_its_place_in_the_video_and_uses_the_video_reserve():
     assert pool["committed"] == 23.3
     assert asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^user:u1:"}})) is None
     status = call(server.video_status(USER))
-    assert status["enabled"] and status["neurons_left_today"] == round(9000 * 0.2 - 23.3, 1)
+    # the person's own limit (free: 100 Neurons a day, about 2 min of spoken video) is the tighter one
+    assert status == {"enabled": True, "neurons_left_today": round(100 - 23.3, 1),
+                      "minutes_left_today": round((100 - 23.3) / 50, 1), "unlimited": False}
+    mine = asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^video_user:u1:"}}))
+    assert mine["committed"] == 23.3
 
 
 def test_frames_are_described_with_the_faithful_reading_rule():
@@ -135,3 +140,22 @@ def test_the_timeline_reaches_the_ai_within_the_ceiling():
         assert server._video_context("", "high") == ""
     finally:
         neura_engine.current_ai_extra_input.reset(token)
+
+
+def test_each_person_has_a_daily_video_limit_by_subscription():
+    fake, runtime, db = engine({})
+    for _ in range(4):  # 4 x 23.3 Neurons = 93.2: still under the free 100
+        call(server.video_speech(speech(), USER))
+    with pytest.raises(HTTPException) as info:  # a 5th piece would go over (its worst case is reserved first)
+        call(server.video_speech(speech(), USER))
+    assert info.value.status_code == 429 and info.value.detail.startswith("Tu as utilisé ta limite d'analyse vidéo pour aujourd'hui")
+    whisper_calls = [c for c in fake.calls if "whisper" in c[0]]
+    assert len(whisper_calls) == 4  # the refused piece never reached Cloudflare (never charged)
+    mine = asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^video_user:u1:"}}))
+    pool = asyncio.run(db.ai_budget_subjects.find_one({"_id": {"$regex": "^pool:videos:"}}))
+    assert round(mine["committed"], 3) == round(pool["committed"], 3) == 93.2  # the refusal was given back
+    # another person still has their own allowance; an Ultra subscriber has 1,000 a day
+    other = {"id": "u2", "email": "u2@neura-test.fr", "subscription": "neura_ultra"}
+    assert call(server.video_speech(speech(), other))["segments"]
+    assert server._video_user_limit(other) == 1000
+    assert server._video_user_limit({"id": "v", "email": "v@neura-test.fr", "subscription": "free", "is_vip": True}) is None

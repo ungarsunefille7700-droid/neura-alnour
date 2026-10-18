@@ -14517,6 +14517,22 @@ class VideoFramesRequest(BaseModel):
     timestamps: List[float] = Field(..., min_length=1, max_length=9)
 
 
+# Daily video allowance per person (chosen 2026-10-18 from the measured costs: ~46.6 Neurons per
+# minute of speech + ~2.2 per frame, i.e. ~50 Neurons per minute of spoken video). VIP: no limit.
+VIDEO_USER_NEURONS = {
+    plan: float(os.environ.get(f"NEURA_AI_VIDEO_NEURONS_{plan.upper()}", default))
+    for plan, default in (("free", 100), ("mongo", 250), ("pro", 250), ("developer", 250),
+                          ("neura_plus", 500), ("neura_ultra", 1000))
+}
+VIDEO_NEURONS_PER_MINUTE = 50
+
+
+def _video_user_limit(user: dict) -> Optional[float]:
+    if _ai_subject(user).get("plan") == "vip":
+        return None
+    return VIDEO_USER_NEURONS.get(user.get("subscription") or "free", VIDEO_USER_NEURONS["free"])
+
+
 def _video_runtime():
     runtime = neura_engine.get_runtime()
     if not (runtime and runtime.enabled and runtime.video_enabled):
@@ -14534,7 +14550,13 @@ async def video_status(user: dict = Depends(get_current_user)):
     runtime = neura_engine.get_runtime()
     enabled = bool(runtime and runtime.enabled and runtime.video_enabled)
     left = await runtime.budget.headroom(runtime.video_pool) if enabled else 0
-    return {"enabled": enabled, "neurons_left_today": round(left or 0, 1)}
+    limit = _video_user_limit(user)
+    mine = None
+    if enabled and limit is not None:
+        mine = max(0.0, limit - await runtime.video_user_used(current_ai_subject.get() or _ai_subject(user)))
+        left = min(left or 0, mine)
+    return {"enabled": enabled, "neurons_left_today": round(left or 0, 1),
+            "minutes_left_today": round((left or 0) / VIDEO_NEURONS_PER_MINUTE, 1), "unlimited": enabled and limit is None}
 
 
 @api_router.post("/video/speech")
@@ -14549,7 +14571,7 @@ async def video_speech(request: VideoSpeechRequest, user: dict = Depends(get_cur
     language = (request.language or "").strip().lower()
     language = language if re.fullmatch(r"[a-z]{2}", language) else None
     try:
-        segments, neurons = await runtime.video_transcribe(audio, language=language)
+        segments, neurons = await runtime.video_transcribe(audio, language=language, user_limit=_video_user_limit(user))
     except Exception as exc:
         refusal = user_facing_ai_error(exc)
         logger.error("Video speech error: %s", str(exc)[:200])
@@ -14567,7 +14589,8 @@ async def video_frames(request: VideoFramesRequest, user: dict = Depends(get_cur
     except (ValueError, binascii.Error):
         raise HTTPException(status_code=400, detail="Image invalide.")
     try:
-        text, neurons = await runtime.video_frames(image, [_mmss(t) for t in request.timestamps])
+        text, neurons = await runtime.video_frames(image, [_mmss(t) for t in request.timestamps],
+                                                   user_limit=_video_user_limit(user))
     except Exception as exc:
         refusal = user_facing_ai_error(exc)
         logger.error("Video frames error: %s", str(exc)[:200])

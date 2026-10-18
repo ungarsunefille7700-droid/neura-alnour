@@ -364,9 +364,9 @@ class NeuraRuntime:
         # the day): they never use the users' own text budget; how many images each person may
         # send stays the capture quota of the subscription.
         self.image_share = min(1.0, max(0.0, _env_float(env, "NEURA_AI_IMAGE_SHARE", 0.3)))
-        # Videos (step 5): their own reserve too. 0 until the user has chosen it from the measured
-        # costs — the video analysis stays off meanwhile (never a quota decided for him).
-        self.video_share = min(1.0, max(0.0, _env_float(env, "NEURA_AI_VIDEO_SHARE", 0.0)))
+        # Videos (step 5): their own reserve too, 10 % of the day (chosen 2026-10-18 from the
+        # measured costs), and a daily limit per person given by the server for each request.
+        self.video_share = min(1.0, max(0.0, _env_float(env, "NEURA_AI_VIDEO_SHARE", 0.1)))
         self._translations: "OrderedDict[str, str]" = OrderedDict()
 
         def plan_limit(name, default):
@@ -748,11 +748,22 @@ class NeuraRuntime:
                              "completion_tokens": result.completion_tokens, "latency_ms": result.latency_ms,
                              "quran_check": quran}
 
-    async def _video_reserve(self, worst: float, subject, source: str, model: Optional[str] = None):
+    @staticmethod
+    def video_user_key(subject, day: str) -> Optional[str]:
+        return f"video_user:{subject['id']}:{day}" if subject and subject.get("id") else None
+
+    async def video_user_used(self, subject) -> float:
+        key = self.video_user_key(subject, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        doc = await self.db.ai_budget_subjects.find_one({"_id": key}) if key else None
+        return float((doc or {}).get("committed", 0.0))
+
+    async def _video_reserve(self, worst: float, subject, source: str, model: Optional[str] = None,
+                             user_limit: Optional[float] = None):
+        """Reserves in the video reserve of the day AND in the person's own daily video limit."""
         if not self.video_enabled:
             raise EngineRefused("L'analyse vidéo n'est pas encore activée.", "disabled")
         try:
-            return await self.budget.reserve(self.video_pool, worst)
+            reservation = await self.budget.reserve(self.video_pool, worst)
         except BudgetExceeded as exc:
             await self._log(source=source, subject=subject, status="refused_budget", error=exc.scope, model=model)
             if exc.scope == "subject":
@@ -760,27 +771,50 @@ class NeuraRuntime:
                     "L'analyse vidéo gratuite est terminée pour aujourd'hui. Elle revient à minuit UTC "
                     "(1 h ou 2 h du matin en France). Tu peux continuer à discuter avec Neura normalement.", "quota")
             raise self._refusal(exc)
+        reservation.user_key = self.video_user_key(subject, reservation.day) if user_limit is not None else None
+        if reservation.user_key and not await self.budget._take(
+                self.db.ai_budget_subjects, reservation.user_key, reservation.neurons, user_limit):
+            reservation.user_key = None
+            await self.budget.release(reservation)
+            await self._log(source=source, subject=subject, status="refused_budget", error="video_user", model=model)
+            raise EngineRefused(
+                "Tu as utilisé ta limite d'analyse vidéo pour aujourd'hui. Elle revient à minuit UTC (1 h ou 2 h "
+                "du matin en France). Tu peux continuer à discuter avec Neura normalement.", "quota")
+        return reservation
 
-    async def video_transcribe(self, audio: bytes, *, language=None, subject=None) -> tuple:
+    async def _video_settle(self, reservation, neurons: float):
+        delta = round(float(neurons) - reservation.neurons, 3)
+        await self.budget.settle(reservation, neurons)
+        if getattr(reservation, "user_key", None) and delta:
+            await self.db.ai_budget_subjects.update_one({"_id": reservation.user_key}, {"$inc": {"committed": delta}})
+
+    async def _video_release(self, reservation):
+        if getattr(reservation, "user_key", None):
+            await self.db.ai_budget_subjects.update_one(
+                {"_id": reservation.user_key}, {"$inc": {"committed": -reservation.neurons, "requests": -1}})
+        await self.budget.release(reservation)
+
+    async def video_transcribe(self, audio: bytes, *, language=None, subject=None, user_limit=None) -> tuple:
         """The speech of a piece of video (WAV 16 kHz mono): ([{start, end, text}], neurons)."""
         subject = subject if subject is not None else current_ai_subject.get()
         seconds = max(1.0, (len(audio) - 44) / 32000)  # 16 kHz, 16 bit, mono
-        reservation = await self._video_reserve(self.provider.stt_neurons(seconds) * 1.05 + 1, subject, "video_speech")
+        reservation = await self._video_reserve(self.provider.stt_neurons(seconds) * 1.05 + 1, subject, "video_speech",
+                                                user_limit=user_limit)
         try:
             async with self.gate.slot():
                 segments, neurons = await self.provider.transcribe_segments(audio, language=language)
         except (Saturated, ProviderError) as exc:
-            await self.budget.release(reservation)
+            await self._video_release(reservation)
             await self._log(source="video_speech", subject=subject, status="error", error=getattr(exc, "code", "saturated"))
             raise self._refusal(exc)
         except BaseException:
-            await self.budget.release(reservation)
+            await self._video_release(reservation)
             raise
-        await self.budget.settle(reservation, neurons)
+        await self._video_settle(reservation, neurons)
         await self._log(source="video_speech", subject=subject, status="ok", neurons=neurons)
         return segments, neurons
 
-    async def video_frames(self, image: str, labels: List[str], *, subject=None) -> tuple:
+    async def video_frames(self, image: str, labels: List[str], *, subject=None, user_limit=None) -> tuple:
         """What several frames of a video show (one grid image, each frame labelled with its time):
         a line per frame "mm:ss | what is seen | texte : exact visible text"."""
         subject = subject if subject is not None else current_ai_subject.get()
@@ -796,18 +830,18 @@ class NeuraRuntime:
         prompt_tokens = estimate_tokens(prompt) + estimate_tokens(VISION_READING_RULE) + self.vision_image_tokens
         max_tokens = 120 + 110 * len(labels)
         reservation = await self._video_reserve(self.provider.max_neurons(model, prompt_tokens, max_tokens), subject,
-                                                "video_frames", model)
+                                                "video_frames", model, user_limit=user_limit)
         try:
             async with self.gate.slot():
                 result = await self.provider.chat(messages, model=model, max_tokens=max_tokens, temperature=0.2)
         except (Saturated, ProviderError) as exc:
-            await self.budget.release(reservation)
+            await self._video_release(reservation)
             await self._log(source="video_frames", subject=subject, status="error", error=getattr(exc, "code", "saturated"), model=model)
             raise self._refusal(exc)
         except BaseException:
-            await self.budget.release(reservation)
+            await self._video_release(reservation)
             raise
-        await self.budget.settle(reservation, result.neurons)
+        await self._video_settle(reservation, result.neurons)
         await self._log(source="video_frames", subject=subject, status="ok", result=result, neurons=result.neurons, model=model)
         return result.text, result.neurons
 
