@@ -341,6 +341,8 @@ def hadith_refs(text: str) -> List[HadithRef]:
         marked = m.group(1) is not None
         if re.search(r"(?:\bm\.|\bmort|\bd[ée]c[ée]d[ée]|\ben|\bvers|\bl'an|\bann[ée]e|\bsi[eè]cle)\s*\(?\s*$", fold(clean[max(0, m.start() - 12):m.start()])):
             continue  # a date (« al-Bukhârî, mort en 870 »), not a hadith number
+        if not marked and re.search(r"(?:^|\n)[ \t]*$", clean[:m.start()]) and clean[m.end():m.end() + 1] in (".", ")"):
+            continue
         numbers.append((m.start(), m.end(), m.group(1) or m.group(2), marked))
     refs, used_books = [], set()
     for start, end, value, marked in numbers:
@@ -648,6 +650,19 @@ def _claims(text: str, start: int, question: str = "", previous_end: int = 0) ->
     para_end = len(text) if para_end < 0 else para_end
     floor = max(para_start, previous_end)
     out = []
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", start)
+    line = text[line_start: len(text) if line_end < 0 else line_end]
+    if "|" in line and not _QUOTE_RE.search(line):
+        table_start = line_start
+        while table_start > 0:
+            previous_line = text.rfind("\n", 0, table_start - 1) + 1
+            if "|" not in text[previous_line:table_start]:
+                break
+            table_start = previous_line
+        before_table = list(_QUOTE_RE.finditer(text[max(0, table_start - 1500):table_start]))
+        if before_table:
+            out.append(next(g for g in before_table[-1].groups() if g))
     before = list(_QUOTE_RE.finditer(text[floor:start]))
     if before:
         out.append(next(g for g in before[-1].groups() if g))
@@ -714,8 +729,14 @@ def _sentence(text: str, start: int, end: int) -> str:
     return text[head: (min(tails) + 1) if tails else len(text)]
 
 
+def _quote_core(text: str) -> str:
+    """A quotation without what is in brackets (« (as-sabru 'inda as-sadmatil-ûlâ) », « (Al-Hayâ') »): a
+    transliteration or an explanation, not the words of the hadith."""
+    return re.sub(r"\([^()]{0,120}\)|\[[^\[\]]{0,120}\]", " ", text or "")
+
+
 def _latin_words(text: str) -> List[str]:
-    return [w for w in content_words(text) if re.fullmatch(r"[a-z]+", w)]
+    return [w for w in content_words(_quote_core(text)) if re.fullmatch(r"[a-z]+", w)]
 
 
 _HEDGE_RE = re.compile(r"a verifier|non verifi|non confirm|pas pu (?:etre )?verifi|incertain|pas certain|sans certitude|"
@@ -784,6 +805,7 @@ def _weighted(words: List[str], haystack: str) -> float:
 @lru_cache(maxsize=256)
 def _search_cached(text: str, limit: int, minimum: float, books: Tuple[str, ...] = ()) -> Tuple:
     """The hadiths that contain the words of a quotation, scored by the rare words they share with it."""
+    text = _quote_core(text)
     words = _latin_words(text) or content_words(text)
     found = search_hadith(text, max(limit, 8), minimum, prefer=("bukhari", "muslim"), books=books)
     def score(plain: float, row: dict) -> float:
@@ -815,6 +837,68 @@ def _outer_quotes(text: str) -> List[Tuple[int, int, str]]:
     return sorted(out)
 
 
+REMOVED_SAYING = "[parole retirée : aucune source suffisante ne confirme son attribution au Prophète ﷺ]"
+# The answer itself says that the text is not an authentic saying: it is quoted to be corrected, not attributed.
+_NOT_AUTHENTIC_RE = re.compile(r"n'est pas (?:un hadith|authentique|une parole|etabli)|pas authentique|non authentique|faible|da'?if|forg|"
+                               r"invent|mawdu|n'existe pas|aucune source|sans fondement|aucun hadith|pas (?:de|une) parole du proph|"
+                               r"faussement attribu|n'a jamais dit|pas un hadith|introuvable")
+
+
+@lru_cache(maxsize=1)
+def _other_languages(book: str) -> Dict[str, List[Tuple[str, str]]]:
+    """{number: [(English words, Arabic words)]} of one collection, read only when an attribution needs it (two
+    one collection at a time in memory): the same hadith is recognised in another translation or in Arabic."""
+    with gzip.open(DATA / "hadiths" / f"{book}.json.gz", "rt", encoding="utf-8") as handle:
+        doc = json.load(handle)
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for row in doc["hadiths"]:
+        arabic = " " + " ".join(neura_quran.words(row.get("ar") or "")) + " "
+        out.setdefault(row["n"], []).append((_words_text(row.get("en") or ""), arabic))
+    return out
+
+
+def _arabic_words(text: str) -> List[str]:
+    return list(dict.fromkeys(neura_quran.words(text)))
+
+
+def _other_language_match(text: str, book: str) -> Optional[Tuple[float, str]]:
+    """(score, number): the quotation found in the English or Arabic text of the collection. Arabic: the words of the
+    quotation, in order of the hadith, at least 5 of them; English: the usual equivalents of the French words."""
+    arabic = _arabic_words(text)
+    latin = list(dict.fromkeys(_latin_words(text)))
+    rarest = max(latin, key=_rarity) if latin else ""
+    span = max(160, int(2.5 * len(text)))
+    best: Optional[Tuple[float, str]] = None
+    for number, versions in _other_languages(book).items():
+        for english, ar in versions:
+            score = 0.0
+            if len(arabic) >= 5 and ar.strip():
+                score = sum(1 for w in arabic if f" {w} " in ar) / len(arabic)
+            elif len(latin) >= 4 and english.strip():
+                hits = sum(1 for w in latin if _present(w, english))
+                if hits >= 3 and hits / len(latin) >= 0.75 and _present(rarest, english) and _local(latin, english, span):
+                    score = hits / len(latin)
+            if score and (best is None or score > best[0]):
+                best = (round(score, 2), number)
+    return best
+
+
+def _removal_span(clean: str, quote: Tuple[int, int], mention: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+    """The quotation, with the collection written right next to it (« « … » (Muslim) » goes with it)."""
+    start, end = quote
+    intro = re.search(r"(?:\b[Ll]e |\b[Ll]')?(?:[Pp]roph[eè]te|[Mm]essager(?: d['’]Allah)?)[^.\n«»]{0,60}?(?:a dit|disait|a déclaré|"
+                      r"a affirmé|a enseigné|a recommandé|dit)\s*:?\s*$", clean[max(0, start - 120):start])
+    if intro:
+        start = max(0, start - 120) + intro.start()
+    if mention:
+        if 0 <= mention[0] - end <= 40 and not re.search(r"[«»\n]", clean[end:mention[0]]):
+            closing = re.match(r"[^\n.()]*\)", clean[mention[1]:mention[1] + 40])
+            end = mention[1] + (closing.end() if closing and "(" in clean[end:mention[0]] else 0)
+        elif 0 <= start - mention[1] <= 40 and not re.search(r"[«»\n]", clean[mention[1]:start]):
+            start = mention[0]
+    return start, end
+
+
 def _attributed_quote(clean: str, start: int, end: int, quotes: list, hrefs: List[HadithRef]):
     """The quotation a collection named without a number is about: « … » (Muslim), or « rapporté par Muslim : « … » »."""
     def free(a: int, b: int) -> bool:
@@ -834,12 +918,23 @@ def _attributed_quote(clean: str, start: int, end: int, quotes: list, hrefs: Lis
     return after[0] if after else None
 
 
+def _hadith_quote(text: str) -> bool:
+    """A quotation that can be a hadith: French words, or a long enough Arabic text that is not the Quran."""
+    if len(_latin_words(text)) >= 3:
+        return True
+    arabic = _arabic_words(text)
+    return len(arabic) >= 5 and not neura_quran.check(text)
+
+
 def _unnumbered(answer: str, hrefs: List[HadithRef], qrefs: List["QuranRef"], question: str) -> List[Finding]:
-    """« Le Prophète ﷺ a dit : « … » (rapporté par Muslim) »: the text is looked for in the collection named. Found
-    there -> confirmed; found only in another collection -> wrong collection; found nowhere -> not confirmed. A text
-    worded differently is accepted when its words, above all its rare words, are in the hadith (translations differ)."""
+    """« Le Prophète ﷺ a dit : « … » (rapporté par Muslim) »: the text is looked for in the collection named, in
+    French, then in English and Arabic. Six cases, from the least to the most serious:
+    1. found as it is -> confirmed;  2. found worded differently (another translation) -> confirmed, never rejected;
+    3. found in another collection only -> the reference is corrected when the match is reliable, otherwise flagged;
+    4. not enough to decide -> flagged « not confirmed »;  5. found nowhere -> an invented saying: it is removed
+    from the answer (never kept as a hadith, even with a warning);  6. graded weak and called authentic -> corrected."""
     clean = re.sub(r"[*_`>|]", " ", answer)
-    quotes = [q for q in _outer_quotes(clean) if len(_latin_words(q[2])) >= 3]
+    quotes = [q for q in _outer_quotes(clean) if _hadith_quote(q[2])]
     mentions = [(m.start(), m.end(), m.lastgroup) for m in _BOOK_RE.finditer(clean)]
     mentions += [(m.start(), m.end(), "autre") for m in OTHER_BOOKS_RE.finditer(clean)]
     out, done, attributed = [], set(), set()
@@ -872,67 +967,102 @@ def _unnumbered(answer: str, hrefs: List[HadithRef], qrefs: List["QuranRef"], qu
             continue
         done.add(key)
         words = _latin_words(text)
+        arabic = len(words) < 3  # an Arabic quotation
         name = BOOKS.get(book) or clean[start:end].strip()
         label = f"{name} (sans numéro) — « {_short(text, 50)} »"
         around = _sentence(clean, start, end) + (" " + clean[max(0, where[0] - 150):where[0]] + " " + clean[where[1]:where[1] + 150] if where else "")
         context = fold(around)
         hedged = bool(_HEDGE_RE.search(context))
+        corrected_by_answer = bool(_NOT_AUTHENTIC_RE.search(context))
         negative = bool(_NEG_ATTR_RE.search(clause))
         if book == "autre":
             if not negative:
-                out.append(Finding("warn", "attribution", f"{label} : recueil absent de la base de l'application, "
-                                   "attribution non vérifiable automatiquement.", (start, end)))
+                out.append(Finding("warn", "attribution", f"{label} : recueil absent de la base de l'application, attribution "
+                                   "non vérifiable automatiquement (non confirmée).", (start, end)))
             continue
-        named = _search_cached(text, 3, 0.3, (book,))
+        named = () if arabic else _search_cached(text, 3, 0.3, (book,))
         best_named = named[0][0] if named else 0.0
+        number = named[0][2]["n"] if named else None
+        other_language = None
+        if arabic or 0.3 <= best_named < 0.6 or (not named and _book(book)["fr_share"] < 0.5):
+            other_language = _other_language_match(text, book)  # one collection in memory at a time, only when useful
+            if other_language and other_language[0] >= (0.6 if arabic else 0.75) and other_language[0] > best_named:
+                best_named, number = other_language[0], other_language[1]  # the same hadith in English or Arabic
         if negative:
-            if best_named >= 0.85 and len(words) >= 4:
+            if best_named >= 0.85 and (len(words) >= 4 or arabic):
                 out.append(Finding("warn", "attribution", f"{label} : la réponse dit que ce texte n'est pas dans ce recueil, "
-                                   f"mais un texte très proche y figure (n°{named[0][2]['n']}) : à vérifier.", (start, end)))
+                                   f"mais un texte très proche y figure (n°{number}) : à vérifier.", (start, end)))
             continue
-        other = next((c for c in _search_cached(text, 4, 0.5) if c[1] != book), None)
+        other = None if arabic else next((c for c in _search_cached(text, 4, 0.5) if c[1] != book), None)
         short = len(set(words)) <= 5
         rare_named = _rare_found(words, named[0][2]["k"]) if named else 0
-        if best_named >= 0.6 and len(words) < 4 and best_named < 0.99:
-            level, message = "warn", f"texte trop court pour confirmer (le plus proche : n°{named[0][2]['n']}) : à vérifier"
+        fix, span, kind = None, (start, end), "attribution"
+        via = " (texte anglais ou arabe de la base)" if other_language and number == other_language[1] and best_named == other_language[0] else ""
+        if best_named >= 0.6 and not arabic and len(words) < 4 and best_named < 0.99:
+            level, message = "warn", f"texte trop court pour confirmer (le plus proche : n°{number}) : attribution non confirmée"
         elif best_named >= 0.6 and short and best_named < 0.85 and other and other[0] >= best_named + 0.25:
             level = "warn"  # a short text: one word missing may be another hadith, or another translation
-            message = (f"ce texte ne se trouve pas dans ce recueil sous cette forme ; il correspond à {BOOKS[other[1]]} "
-                       f"n°{other[2]['n']} (« {_short(other[2].get('fr') or other[2].get('en') or '', 90)} »)")
+            message = (f"attribution non confirmée : ce texte ne se trouve pas dans ce recueil sous cette forme ; il correspond à "
+                       f"{BOOKS[other[1]]} n°{other[2]['n']} (« {_short(other[2].get('fr') or other[2].get('en') or '', 90)} »)")
         elif best_named >= 0.6:
-            row = named[0][2]
-            level, message = "ok", f"trouvé dans ce recueil (n°{row['n']}), le texte correspond"
-            other_narrator = _narrator_ok(clean, start, [c[2] for c in named if c[0] >= best_named - 0.1])
+            rows = [c[2] for c in named if c[0] >= best_named - 0.1] or hadith(book, number)
+            level, message = "ok", (f"référence correcte, trouvé dans ce recueil (n°{number}){via}" if best_named >= 0.85 else
+                                    f"même hadith, formulation différente de la traduction de la base (n°{number}){via}")
+            other_narrator = _narrator_ok(clean, start, rows) if rows else None
             if other_narrator:
-                level, message = "warn", (f"trouvé dans ce recueil (n°{row['n']}), mais le rapporteur indiqué n'apparaît pas dans "
+                level, message = "warn", (f"trouvé dans ce recueil (n°{number}), mais le rapporteur indiqué n'apparaît pas dans "
                                           f"cette version (la base indique « {_short(other_narrator, 50)} ») : à vérifier")
+            row = rows[0] if rows else {}
             grades = [fold(g[1]) for g in row.get("g") or []]
             if grades and all(re.search(r"da'?if|daif|munkar|mawdu|fabricat", g) for g in grades) and \
                     re.search(r"authentique|sahih", context) and not _has_authentic_version(text, best_named):
-                level, message = "error", "présenté comme authentique alors que la base le classe faible : " + \
-                    "; ".join(f"{g[1]} ({g[0]})" for g in row["g"][:3])
+                level = "error"
+                graded = "; ".join(f"{g[1]} ({g[0]})" for g in row["g"][:3])
+                message = f"hadith faible présenté comme authentique (n°{number}) : la base le classe {graded}"
+                if where:
+                    span, fix = (where[1], where[1]), f" [ce hadith est classé faible dans la base : {graded}]"
         elif other and other[0] >= 0.6 and other[0] >= best_named + 0.25:
             real = _short(other[2].get("fr") or other[2].get("en") or "", 90)
-            # the translations of the base differ from one collection to another: an error only when the collection
-            # named has almost nothing of the text and the other one has nearly all of it
             rarest = max(dict.fromkeys(words), key=_rarity) if words else ""
             missing_key = bool(rarest) and (not named or not _present_loose(rarest, named[0][2]["k"])) \
                 and _present_loose(rarest, other[2]["k"])
-            # nearly nothing of it in the collection named, or not its most telling word (« sourire » is not in al-Bukhârî)
-            level = "error" if (not hedged and other[0] >= 0.75 and (best_named < 0.35 or (best_named < 0.55 and missing_key))) else "warn"
-            message = (f"ce texte ne se trouve pas dans ce recueil sous cette forme ; il correspond à {BOOKS[other[1]]} "
-                       f"n°{other[2]['n']} (« {real} »)"
-                       + (f" ; le plus proche dans ce recueil est le n°{named[0][2]['n']}, formulé autrement" if best_named >= 0.3 else ""))
-        elif (best_named >= 0.4 and len(set(words)) > 8) or (best_named >= 0.5 and rare_named >= 2):
-            level, message = "warn", f"correspondance partielle avec le n°{named[0][2]['n']} de ce recueil : formulation à vérifier"
+            # reliable only when the collection named has (nearly) nothing of it and the other one has nearly all of it:
+            # the translations of the base differ from one collection to another
+            reliable = other[0] >= 0.75 and (best_named < 0.35 or (best_named < 0.55 and missing_key))
+            if reliable:
+                level, fix = "error", f"{BOOKS[other[1]]} (n°{other[2]['n']}) [référence corrigée]"
+                prefix = re.search(r"(?:(?:sahih|sunan|l'imam|imam)\s+)?(?:al|an|at|as|el)[-‑\s]?$", clean[max(0, start - 14):start], re.I)
+                if prefix:
+                    span = (start - (len(clean[max(0, start - 14):start]) - prefix.start()), end)
+                message = (f"mauvais recueil : ce texte ne se trouve pas dans ce recueil ; il correspond à {BOOKS[other[1]]} "
+                           f"n°{other[2]['n']} (« {real} »)")
+            else:
+                level = "warn"
+                message = (f"attribution non confirmée : formulation absente de ce recueil, texte plus proche : {BOOKS[other[1]]} "
+                           f"n°{other[2]['n']} (« {real} »)"
+                           + (f" ; le plus proche dans ce recueil est le n°{named[0][2]['n']}, formulé autrement" if best_named >= 0.3 else ""))
+        elif (best_named >= 0.4 and len(set(words)) > 8) or (best_named >= 0.5 and rare_named >= 2) or \
+                (other_language and other_language[0] >= 0.5):
+            level, message = "warn", f"attribution non confirmée : correspondance partielle avec le n°{number or other_language[1]} de ce recueil"
             if other and other[0] > best_named:
                 message += f" (texte plus proche : {BOOKS[other[1]]} n°{other[2]['n']})"
-        elif len(words) >= 4 and _book(book)["fr_share"] >= 0.5 and not hedged and not (other and other[0] >= 0.6):
-            level, message = "error", "attribution non confirmée : ce texte n'a pas été retrouvé dans ce recueil"
+        elif not arabic and len(words) >= 4 and _book(book)["fr_share"] >= 0.5 and not (other and other[0] >= 0.6) \
+                and not corrected_by_answer and not _search_cached(text, 1, 0.5):
+            # found in none of the 8 collections, in French, English or Arabic: not kept as a saying of the Prophet ﷺ
+            level, kind = "error", "invention"
+            message = ("parole introuvable dans les 8 recueils de la base (français, anglais, arabe) : elle ne doit pas "
+                       "être présentée comme un hadith")
+            if where:
+                span, fix = _removal_span(clean, where, (start, end)), REMOVED_SAYING
+            else:
+                fix = answer[start:end] + " [attribution non confirmée : texte introuvable dans ce recueil]"
+        elif arabic and len(_arabic_words(text)) >= 6:
+            level, message = "warn", "attribution non confirmée : ce texte arabe n'a pas été retrouvé dans ce recueil"
         else:
-            level, message = "warn", "attribution non confirmée par la base (texte non retrouvé, ou recueil surtout en anglais) : à vérifier"
-        fix = answer[start:end] + " (attribution non confirmée)" if level == "error" else None
-        out.append(Finding(level, "attribution", f"{label} : {message}.", (start, end), fix=fix))
+            level, message = "warn", "attribution non confirmée par la base (texte non retrouvé, ou recueil surtout en anglais)"
+        if hedged and level == "error" and kind == "attribution" and "mauvais recueil" in message:
+            level = "warn"  # the answer already says the collection is to be checked
+        out.append(Finding(level, kind, f"{label} : {message}.", span, fix=fix))
 
     # « Le Prophète ﷺ a dit : « … » » with no collection at all
     for start, end, text in quotes:
@@ -950,15 +1080,17 @@ def _unnumbered(answer: str, hrefs: List[HadithRef], qrefs: List["QuranRef"], qu
         context = fold(clean[max(0, start - 200): end + 200])
         if found and found[0][0] >= 0.6:
             out.append(Finding("ok", "parole", f"{label} : trouvée dans {BOOKS[found[0][1]]} n°{found[0][2]['n']}.", (start, end)))
-        elif _HEDGE_RE.search(context) or re.search(r"faible|da'?if|forg|invent|n'est pas un hadith", context):
-            continue  # the answer already says it is not certain
+        elif _NOT_AUTHENTIC_RE.search(context):
+            continue  # the answer says it is not an authentic saying: quoted to be corrected
         elif (not found or found[0][0] < 0.5) and len(words) >= 5:
-            out.append(Finding("error", "parole", f"{label} : parole attribuée au Prophète ﷺ non retrouvée dans les 8 recueils de la "
-                               "base ; elle ne doit pas être présentée comme certaine (paraphrase, autre recueil ou parole non authentique).",
-                               (end, end), fix=" (source non confirmée)"))
+            # not in the 8 collections: removed, even if the answer adds « à vérifier »
+            out.append(Finding("error", "invention", f"{label} : parole introuvable dans les 8 recueils de la base ; elle ne doit pas "
+                               "être présentée comme une parole du Prophète ﷺ.", _removal_span(clean, (start, end), None),
+                               fix=REMOVED_SAYING))
         else:
-            out.append(Finding("warn", "parole", f"{label} : non retrouvée telle quelle dans les 8 recueils de la base "
-                               "(formulation à vérifier).", (start, end)))
+            near = f" (le plus proche : {BOOKS[found[0][1]]} n°{found[0][2]['n']})" if found else ""
+            out.append(Finding("warn", "parole", f"{label} : non retrouvée telle quelle dans les 8 recueils de la base, "
+                               f"attribution non confirmée{near}.", (start, end)))
     return out
 
 
@@ -1058,7 +1190,20 @@ def _fr_quotes(text: str) -> List[Tuple[int, int, str, List[str]]]:
     return out
 
 
-def _compare_translation(quote: str, words: List[str], ref: "QuranRef", original: str) -> Finding:
+_PARAPHRASE_RE = re.compile(r"en substance|autrement dit|le sens (?:general |global )?(?:est|de ce verset)|paraphras|resum|"
+                            r"approximativ|librement|ce qui signifie|c'est-a-dire|en d'autres termes|explication du sens")
+
+
+def _verbatim_translation(surah: int, first: int, last: int) -> Optional[str]:
+    """The published translation of the verses cited, unchanged, with its attribution (none if too long to show)."""
+    texts = [neura_quran_fr.translation(surah, a) for a in range(first, last + 1)]
+    if not all(texts) or sum(len(t) for t in texts) > 600:
+        return None
+    return f"« {' '.join(texts)} » ({neura_quran_fr.attribution()})"
+
+
+def _compare_translation(quote: str, words: List[str], ref: "QuranRef", original: str,
+                         quote_span: Optional[Tuple[int, int]] = None, context: str = "") -> Finding:
     label = f"Coran {_vref(ref.surah, ref.first, ref.last)} (traduction)"
     span = (ref.start, ref.end)
     if len(re.findall(r"\b(?:al|ad|an|ar|as|at|ash|wa|bi|li|fi|min|alayhi|yawm\w*|rabb\w*|allahu|ar-?rahman\w*)\b|\w-\w{1,3}-\w",
@@ -1082,8 +1227,20 @@ def _compare_translation(quote: str, words: List[str], ref: "QuranRef", original
         return Finding("error", "traduction", f"{label} : {shown} ne correspond pas à ce verset"
                        f"{_reference_text(ref.surah, ref.first)}.", span, fix=original + " [traduction non conforme à ce verset]")
     missing = _missing(words, ref.surah, ref.first, ref.last)
-    return Finding("warn", "traduction", f"{label} : {shown} ne correspond pas mot pour mot (autre traduction, paraphrase ou "
-                   f"modification ; mots absents des traductions de référence : {', '.join(missing[:6])})"
+    if _PARAPHRASE_RE.search(fold(context)):
+        return Finding("ok", "traduction", f"{label} : {shown} est présenté comme une explication du sens, pas comme une citation"
+                       f"{_reference_text(ref.surah, ref.first)}.", span)
+    # words that are in no form in the verse (« deveniez riches » for 2:183): the meaning is changed, not only the wording
+    cited_text = _cited_text(ref.surah, ref.first, ref.last)
+    absent = [w for w in missing if len(w) >= 4 and f" {w[:4]}" not in cited_text]
+    reference = _verbatim_translation(ref.surah, ref.first, ref.last)
+    if len(absent) >= 2 and cited < 0.6 and len(words) <= 10:
+        return Finding("error", "traduction", f"{label} : {shown} modifie le sens du verset (ces mots n'y figurent sous aucune forme : "
+                       f"{', '.join(absent[:6])}){_reference_text(ref.surah, ref.first)}.", quote_span if reference and quote_span else span,
+                       fix=(reference + f" ({_vref(ref.surah, ref.first, ref.last)})") if reference and quote_span else
+                       original + " [traduction non conforme à ce verset]")
+    return Finding("warn", "traduction", f"{label} : {shown} ne correspond pas mot pour mot (autre traduction ou paraphrase ; "
+                   f"mots absents des traductions de référence : {', '.join(missing[:6])})"
                    f"{_reference_text(ref.surah, ref.first)}.", span)
 
 
@@ -1182,7 +1339,8 @@ def _translation_findings(answer: str, qrefs: List["QuranRef"], hrefs: List[Hadi
             continue  # quoted to be corrected
         if any(abs(s - quote[0]) < 150 or abs(s - quote[1]) < 150 for s, _ in books):
             continue  # a hadith
-        out.append(_compare_translation(quote[2], quote[3], ref, answer[ref.start:ref.end]))
+        out.append(_compare_translation(quote[2], quote[3], ref, answer[ref.start:ref.end], (quote[0], quote[1]),
+                                        clean[max(0, quote[0] - 160): quote[1] + 120]))
     # « Allah dit : « … » » with no reference
     for start, end, quote, words in quotes:
         if start in used or len(words) < 4:
@@ -1271,6 +1429,60 @@ _COMPLEX_RE = re.compile(r"divorc|talaq|repudi|khul|heritage|succession|garde de
                          r"serment|kaffara|apostas|avortement|contracept|conversion|tutelle|wali|\bdot\b|mahr|polygam|iddah?|viduite|charia")
 
 
+SCHOOLS = {"hanafite": r"hanaf|hanef|ab[ou]+ han[iy]fa", "malikite": r"malikit|maliki\b|malikis|l'imam malik\b",
+           "chafeite": r"chaf[eiy]|shaf[iy]", "hanbalite": r"hanbal|l'imam ahmad\b"}
+
+
+def _school_positions(sentence: str, question: str) -> List[Finding]:
+    """« Selon les hanafites, toucher une femme annule les ablutions » : the position given to a school is compared
+    with the one written in the fiqh file, for the few yes/no questions where the file states it school by school."""
+    out = []
+    s = fold(sentence)
+    if not any(re.search(p, s) for p in SCHOOLS.values()):
+        return out
+    for topic in fiqh_topics(sentence, question):
+        positions = topic.get("positions")
+        if not positions or (positions.get("contexte") and not re.search(positions["contexte"], s + " " + fold(question))):
+            continue
+        # « les hanafites … ; les chaféites … », « … alors que les malikites … » : each part speaks of its schools
+        for part in re.split(r";|\balors que\b|\btandis que\b|, mais\b|\bpar contre\b|\bcontrairement\b|\bà l'inverse\b|\(|\)", s):
+            schools = [(name, m) for name, pattern in SCHOOLS.items() for m in re.finditer(pattern, part)]
+            # the subject itself must be named in this part (« les saignements (pour les hanafites), la viande de chameau
+            # (pour les hanbalites) » : each school goes with its own subject)
+            if not schools or not any(r.search(part) for r in topic["_mots"]):
+                continue
+            # schools listed together (« les écoles malikite, chaféite et hanbalite ») share what follows them, up to
+            # the next group (« …, l'école hanafite permet… »)
+            schools.sort(key=lambda item: item[1].start())
+            groups = []
+            for name, m in schools:
+                if groups and re.fullmatch(r"[\s,]*(?:et|ou)?[\s]*(?:les |l'|la )?(?:ecoles? )?", part[groups[-1][-1][1].end():m.start()]):
+                    groups[-1].append((name, m))
+                else:
+                    groups.append([(name, m)])
+            for index, group in enumerate(groups):
+                window = part[(group[0][1].start() if index else 0): (groups[index + 1][0][1].start() if index + 1 < len(groups) else len(part))]
+                clause_start = part.rfind(",", 0, group[0][1].start()) + 1
+                clause_end = part.find(",", group[-1][1].end())
+                clause = part[clause_start: len(part) if clause_end < 0 else clause_end]
+                said = None
+                for text in (clause, window):
+                    if re.search(positions["non"], text):
+                        said = "non"
+                    elif re.search(positions["oui"], text):
+                        said = "oui"
+                    if said:
+                        break
+                if not said:
+                    continue
+                for school, _ in group:
+                    expected = positions["ecoles"].get(school)
+                    if expected and expected != said:
+                        out.append(Finding("error", "fiqh", f"Position attribuée à l'école {school} sur « {positions['question']} » "
+                                           f"contraire à la fiche de l'application ({expected} pour cette école) : {topic['texte']}"))
+    return out
+
+
 def personal_case(question: str) -> bool:
     q = fold(question)
     return bool(_PERSONAL_RE.search(q) and _COMPLEX_RE.search(q))
@@ -1285,6 +1497,8 @@ def _fiqh_findings(answer: str, question: str) -> List[Finding]:
     for sentence in (s for s in re.split(r"(?<=[.!?\n])\s+", clean) if s.strip()):
         s = fold(sentence)
         topics = fiqh_topics(sentence, question)
+        out += [f for f in _school_positions(sentence, question) if f.message.split(" : ")[0] not in seen]
+        seen.update(f.message.split(" : ")[0] for f in out)
         if re.search(r"hadith|chaine|isnad|authenti|faible|sahih|da'?if|narrat|rapporteur", s):
             previous = sentence
             continue  # the grade of a hadith, compared with the base elsewhere
@@ -1294,10 +1508,16 @@ def _fiqh_findings(answer: str, question: str) -> List[Finding]:
                 seen.add("consensus?")
                 out.append(Finding("warn", "fiqh", f"Consensus affirmé (« {_short(sentence, 70)} ») : sujet absent des fiches de "
                                    "l'application, consensus non vérifiable automatiquement (à confirmer)."))
+            nuanced = bool(re.search(r"en general|majorit|plupart|minorit|discut|controvers|debat|nuanc|exception|sauf\b|avis different", s))
+            agreed = any(t["statut"] == "consensus" for t in subjects)
             for t in subjects:
                 if t["id"] in seen:
                     continue
                 seen.add(t["id"])
+                if t["statut"] != "consensus" and (nuanced or agreed):
+                    out.append(Finding("warn", "fiqh", f"Accord affirmé sur un point lié à {t['sujet']} : à vérifier, les écoles "
+                                       f"divergent sur ce sujet ({t['texte']})"))
+                    continue
                 if t["statut"] == "consensus":
                     out.append(Finding("ok", "fiqh", f"Consensus sur {t['sujet']} : confirmé par les fiches ({t['texte']})"))
                 elif re.search(r"sunna|recommand|valide|validit|pas obligatoire|non obligatoire|les deux|pilier", s):
@@ -1395,10 +1615,36 @@ def _grader_findings(answer: str, ref: HadithRef, rows: List[dict], label: str) 
     return out
 
 
+_PAGE_RE = re.compile(r"\b(?:tome|t\.|vol(?:ume)?\.?|juz['’]?|livre)\s*\d{1,3}\s*[,/]?\s*(?:p(?:age)?\.?|pp\.)\s*\d{1,4}"
+                      r"|\b(?:p(?:age)?\.|pp\.)\s*\d{1,4}\b", re.I)
+# Well-known works of fiqh, hadith, tafsir and creed: a work cited that is not one of them is « to be checked ».
+KNOWN_WORKS = ["majmu", "fatawa", "zad al-ma", "i'lam al-muwaqqi", "madarij", "fath al-bari", "riyad as-salih", "riyadh", "al-majmu",
+               "minhaj", "al-mughni", "bidayat al-mujtahid", "al-umm", "muwatta", "risala", "mukhtasar", "al-hidaya", "radd al-muhtar",
+               "silsila", "sahih al-jami", "da'if al-jami", "irwa", "sifat salat", "tafsir", "jami' al-bayan", "al-jami' li-ahkam",
+               "ihya", "bulugh al-maram", "nayl al-awtar", "subul as-salam", "al-adhkar", "kitab at-tawhid", "al-aqida", "sharh",
+               "talkhis", "al-muhalla", "al-istidhkar", "at-tamhid", "kashshaf", "mawsu'a", "fiqh as-sunna", "sahih", "sunan", "musnad",
+               "mustadrak", "al-kaba'ir", "madkhal", "al-furu", "al-insaf", "rawdat", "mughni al-muhtaj", "tuhfat", "bada'i",
+               "al-mabsut", "fatawa al-lajna", "fatawa nur", "liqa'", "al-sharh al-mumti", "ash-sharh al-mumti"]
+_WORK_RE = re.compile(r"(?:dans (?:son (?:livre|ouvrage|recueil|traite|commentaire)|l'ouvrage|le livre|ses|son)|ouvrage|livre)\s+"
+                      r"[«\"“]?\s*((?:al-|an-|ar-|as-|at-|ash-|adh-|az-)?[A-Z][^«»\"“”\n,;:()]{2,50})")
+
+
 def _scholar_findings(answer: str, question: str, documented: str = "") -> List[Finding]:
     """Opinions, quotations and fatwas attributed to scholars: never accepted as verified."""
     out, seen = [], set()
     clean = re.sub(r"[*_`>|]", " ", answer)
+    for m in _PAGE_RE.finditer(clean):
+        context = fold(clean[max(0, m.start() - 160): m.end() + 80])
+        if _HEDGE_RE.search(context) or not re.search(r"|".join(SCHOLARS.values()) + r"|fatwa|ouvrage|livre|tafsir|majmu|tome", context):
+            continue
+        out.append(Finding("error", "citation", f"Référence « {m.group(0).strip()} » : tome et page non vérifiables (l'application n'a pas "
+                           "les ouvrages) ; ils ne doivent pas être présentés comme exacts.", (m.start(), m.end()),
+                           fix="[tome et page non vérifiés]"))
+    for m in _WORK_RE.finditer(clean):
+        title = m.group(1).strip()
+        if not any(work in fold(title) for work in KNOWN_WORKS) and re.search(r"|".join(SCHOLARS.values()), fold(clean[max(0, m.start() - 160): m.end()])):
+            out.append(Finding("warn", "citation", f"Ouvrage cité « {_short(title, 50)} » : absent de la liste des ouvrages connus de "
+                               "l'application, son existence et la citation sont à vérifier."))
     for m in _FATWA_NUM_RE.finditer(clean):
         context = fold(clean[max(0, m.start() - 150): m.end() + 150])
         if _HEDGE_RE.search(context) or re.search(r"n'existe pas|pas trouv|introuvable|invent|ne peux pas|impossible|aucune base", context):
@@ -1474,6 +1720,11 @@ def verify(answer: str, grounding: Optional[Grounding] = None, question: str = "
         if not rows:
             findings.append(Finding("error", "hadith", f"{label} : ce numéro n'existe pas dans le recueil "
                                     f"({_book(ref.book)['numbering']}).", (ref.start, ref.end)))
+            # the text given with it: an authentic hadith under its real reference, or a saying found nowhere
+            claims = [c for c in _claims(answer, ref.start, "", previous_end)
+                      if any(c == next(g for g in m.groups() if g) for m in _QUOTE_RE.finditer(answer))]
+            if claims and len(_latin_words(claims[0])) >= 4 and not _NOT_AUTHENTIC_RE.search(around):
+                _wrong_number_text(answer, ref, label, claims[0], [], findings)
             continue
         best, words, best_claim = 0.0, [], ""
         for claim in _claims(answer, ref.start, question, previous_end):
@@ -1514,6 +1765,13 @@ def verify(answer: str, grounding: Optional[Grounding] = None, question: str = "
                 level, note = "error", "présenté comme authentique alors que la base le classe faible : " + \
                     "; ".join(f"{g[1]} ({g[0]})" for g in rows[0]["g"])
         findings.append(Finding(level, "hadith", f"{label} : {note}", (ref.start, ref.end)))
+        if level != "ok" and quoted and len(words) >= 4 and not _NOT_AUTHENTIC_RE.search(around):
+            if better and better[1] == ref.book and better[0] >= 0.9:
+                if level == "error":
+                    findings[-1].fix = f"n°{better[2]['n']} [numéro corrigé]"  # same collection, the right number
+            elif level == "error" or min(max(_weighted(_latin_words(best_claim), row["k"]) for row in rows) / 0.35,
+                                         max(_rare_found(_latin_words(best_claim), row["k"]) for row in rows) / 2) < 1:
+                _wrong_number_text(answer, ref, label, best_claim, rows, findings)
 
     findings += _weak_called_authentic(answer, grounding, {(f.message.split(" : ")[0]) for f in findings})
     qrefs = quran_refs(answer)
@@ -1578,6 +1836,26 @@ def _local(words: List[str], haystack: str, span: int = 160) -> bool:
     return False
 
 
+def _wrong_number_text(answer: str, ref: HadithRef, label: str, claim: str, rows: List[dict], findings: List[Finding]) -> None:
+    """The text given with a wrong number: an authentic hadith found elsewhere (reliably) gets its real reference
+    in place of the wrong number; a text found nowhere is an invented saying and is removed."""
+    found = _search_cached(claim, 1, 0.5)
+    if found and found[0][0] >= 0.85 and (found[0][1], found[0][2]["n"]) != (ref.book, ref.number):
+        if findings[-1].level == "error" and findings[-1].span == (ref.start, ref.end):
+            findings[-1].fix = f"[numéro faux — ce texte se trouve dans {BOOKS[found[0][1]]} n°{found[0][2]['n']}]"
+        return
+    if found:
+        return  # partly found: flagged, not removed
+    if rows and min(max(_weighted(_latin_words(claim), row["k"]) for row in rows) / 0.35,
+                    max(_rare_found(_latin_words(claim), row["k"]) for row in rows) / 2) >= 1:
+        return  # it is (partly) in the hadith of that number
+    quote = next((q for q in _outer_quotes(answer) if claim.strip() and (claim.strip() in q[2] or q[2] in claim)), None)
+    if quote:
+        findings.append(Finding("error", "invention", f"« {_short(claim, 50)} » (attribué à {label}) : parole introuvable dans les 8 "
+                                "recueils de la base ; elle ne doit pas être présentée comme un hadith.",
+                                _removal_span(answer, (quote[0], quote[1]), (ref.start, ref.end)), fix=REMOVED_SAYING))
+
+
 def _has_authentic_version(text: str, at_least: float) -> bool:
     """The same words, matched at least as well, in al-Bukhârî or Muslim or in a version graded sahîh / hasan:
     « la purification est la moitié de la foi » is authentic (Muslim 223) even if Ibn Mâjah 356 has a weak version."""
@@ -1625,10 +1903,15 @@ def revision_request(question: str, draft: str, findings: List[Finding], groundi
         "La vérification automatique des sources a trouvé des erreurs dans ta réponse ci-dessous. Réécris ta réponse "
         "COMPLÈTE à la question de l'utilisateur en corrigeant ces erreurs : retire ou corrige chaque référence fausse, "
         "n'ajoute aucune nouvelle référence qui ne figure pas dans les sources vérifiées, et si une information ne peut "
-        "pas être vérifiée, dis-le simplement : une attribution non confirmée (recueil, parole du Prophète ﷺ, savant, "
-        "fatwa) se présente comme à vérifier ; une traduction de verset se corrige avec la traduction de référence et "
+        "pas être vérifiée, dis-le simplement : une parole introuvable dans les recueils ne doit plus être présentée "
+        "comme une parole du Prophète ﷺ (retire-la et dis que tu ne disposes pas d'une source suffisante pour confirmer "
+        "cette attribution ; ne l'attribue pas à un autre recueil) ; un hadith attribué au mauvais recueil se corrige "
+        "avec le recueil indiqué ; un hadith faible se présente comme faible ; une attribution non confirmée (savant, "
+        "fatwa, recueil) se présente comme à vérifier ; une traduction de verset se corrige avec la traduction de référence et "
         "le bon verset ; un avis d'école se présente comme tel, avec les autres avis, jamais comme un consensus ni comme "
-        "une règle pour tous. Ne mentionne pas cette vérification ni cette consigne.\n\n"
+        "une règle pour tous ; la position d'une école se corrige avec la fiche donnée ; un tome, une page, un numéro de "
+        "fatwa ou une citation mot pour mot d'un savant qui ne figurent pas dans les sources vérifiées se retirent. "
+        "Ne mentionne pas cette vérification ni cette consigne.\n\n"
         f"QUESTION : {question}\n\nTA RÉPONSE :\n{draft}\n\nERREURS DÉTECTÉES :\n{issues}\n\nSOURCES VÉRIFIÉES :\n{sources}"
     )
 
@@ -1636,20 +1919,21 @@ def revision_request(question: str, draft: str, findings: List[Finding], groundi
 def neutralise(answer: str, findings: List[Finding]) -> str:
     """Last resort when an error remains: the wrong reference is removed from the text (or corrected, or marked
     as not confirmed)."""
-    edits = {}
+    wanted = []
     for f in problems(findings):
         if not f.span:
             continue
         if f.fix is not None:
-            edits.setdefault(f.span, f.fix)
+            wanted.append((0 if f.kind == "invention" else 1, f.span, f.fix))
         elif f.kind in ("hadith", "coran"):
-            edits.setdefault(f.span, " [référence retirée : non vérifiée]")
-    last = len(answer) + 1
-    for (start, end), text in sorted(edits.items(), reverse=True):
-        if end > last:
-            continue  # overlaps an edit already made
+            wanted.append((1, f.span, " [référence retirée : non vérifiée]"))
+    chosen = []  # an invented saying is removed with its reference; then the other edits that do not overlap
+    for _, (start, end), text in sorted(wanted, key=lambda w: (w[0], w[1][0] - w[1][1])):
+        if not any(start < e and s < end or (start == end and s <= start <= e) or (s == e and start <= s <= end)
+                   for (s, e), _ in chosen):
+            chosen.append(((start, end), text))
+    for (start, end), text in sorted(chosen, reverse=True):
         answer = answer[:start] + text + answer[end:]
-        last = start
     return answer
 
 
@@ -1665,6 +1949,9 @@ def note(findings: List[Finding]) -> str:
         if label not in kept or severity[f.level] > severity[kept[label].level]:
             kept[label] = f
     lines = [f"- {icons[f.level]} {f.message}" for f in kept.values()]
+    if any(f.kind == "invention" for f in findings):
+        lines = ["- ✘ Une parole introuvable dans les recueils vérifiés a été retirée : elle ne doit pas être attribuée au "
+                 "Prophète ﷺ sans source suffisante."] + lines
     if any(f.kind in ("fiqh", "avis", "citation", "fatwa", "relecture") for f in findings):
         lines = lines[:12] + ["- ℹ Ce contrôle automatique ne remplace pas l'avis d'un savant qualifié ; pour un cas personnel ou "
                               "complexe, une relecture par un imam ou un mufti est conseillée."]

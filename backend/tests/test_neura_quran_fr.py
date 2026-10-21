@@ -125,3 +125,22 @@ def test_the_database_is_opened_read_only():
     finally:
         con.close()
     assert not re.search(r"\bconnect\([^)]*mode=rw", (fr.DATA.parent.parent / "neura_quran_fr.py").read_text(encoding="utf-8"))
+
+
+def test_a_translation_that_changes_the_meaning_is_replaced_by_the_reference_translation():
+    answer = "Allah dit : « Le jeûne vous est prescrit afin que vous deveniez riches » (Coran 2:183)."
+    out = errors(answer)
+    fixed = r.neutralise(answer, out)
+    assert "riches" not in fixed and fr.translation(2, 183) in fixed and "Rachid Maach, QuranEnc.com, version 1.0.3" in fixed
+
+
+def test_the_two_reference_translations_of_the_same_verse_are_both_accepted():
+    for key in ("rashid", "montada"):
+        text = fr.for_comparison(fr.translation(2, 255, key))[:160].rsplit(" ", 1)[0]
+        found = kinds(f"« {text} » (Coran 2:255).")
+        assert found and found[0].level == "ok", (key, [f.message for f in found])
+
+
+def test_a_paraphrase_said_to_be_a_paraphrase_is_not_an_error():
+    answer = "En substance, le verset 2:183 dit : « le jeûne est prescrit pour devenir riche en piété »."
+    assert not [f for f in errors(answer) if f.kind == "traduction"]

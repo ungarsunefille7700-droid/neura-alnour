@@ -17,7 +17,7 @@ def errors(answer, question="", kind=None):
     return [f for f in found(answer, question, kind) if f.level == "error"]
 
 
-ATT = ("attribution", "parole")
+ATT = ("attribution", "parole", "invention")
 
 
 # ------------------------------------------------------------ hadiths without a number
@@ -45,10 +45,10 @@ def test_false_attribution_to_muslim_is_caught():
     # Muslim n°2626 is close (« rencontrer ton frère avec un visage souriant »), at-Tirmidhî has the text: to be checked
     out = [f for f in found("« Ton sourire face à ton frère est une aumône » (rapporté par Muslim).", kind=ATT) if f.level != "ok"]
     assert out and "at-Tirmidhî" in out[0].message
-    # nothing of it in al-Bukhârî: an error, and the attribution is marked if it stays
+    # nothing of it in al-Bukhârî, all of it in at-Tirmidhî: the reference is corrected (the saying is authentic)
     answer = "« Ton sourire face à ton frère est une aumône » (rapporté par al-Bukhârî)."
     out = errors(answer, kind=ATT)
-    assert out and "(attribution non confirmée)" in r.neutralise(answer, out)
+    assert out and r.neutralise(answer, out) == "« Ton sourire face à ton frère est une aumône » (rapporté par at-Tirmidhî (n°1970) [référence corrigée])."
 
 
 def test_a_hadith_of_muslim_translated_differently_is_not_an_error():
@@ -56,9 +56,13 @@ def test_a_hadith_of_muslim_translated_differently_is_not_an_error():
     assert not errors(answer, kind=ATT), [f.message for f in found(answer, kind=ATT)]
 
 
-def test_false_attribution_to_bukhari_is_caught():
+def test_false_attribution_to_bukhari_is_caught_and_the_reference_corrected():
     answer = "Le Prophète ﷺ a dit : « Ton sourire face à ton frère est une aumône. » (Bukhârî)"
-    assert errors(answer, kind=ATT)
+    out = errors(answer, kind=ATT)
+    assert out and out[0].kind == "attribution"
+    fixed = r.neutralise(answer, out)
+    # the authentic saying is kept, with the collection where it really is
+    assert "Ton sourire face à ton frère est une aumône" in fixed and "at-Tirmidhî (n°19" in fixed and "Bukhârî" not in fixed
 
 
 def test_the_long_version_of_another_collection_is_not_confirmed():
@@ -68,17 +72,51 @@ def test_the_long_version_of_another_collection_is_not_confirmed():
     assert not [f for f in found(answer, kind=ATT) if f.level == "ok"]
 
 
-def test_invented_text_attributed_to_a_collection_is_caught():
-    answer = "Le Prophète ﷺ a dit : « Celui qui plante un palmier chaque vendredi aura un palais en or au paradis. » (Muslim)"
-    assert errors(answer, kind=ATT)
+def test_invented_text_attributed_to_a_collection_is_removed():
+    answer = ("Voici un hadith : Le Prophète ﷺ a dit : « Celui qui plante un palmier chaque vendredi aura un palais en or au "
+              "paradis. » (Muslim)\n\nPlantez des arbres, c'est une bonne action.")
+    out = errors(answer, kind=ATT)
+    assert out and out[0].kind == "invention"
+    fixed = r.neutralise(answer, out)
+    assert "palmier" not in fixed and "(Muslim)" not in fixed and "Le Prophète ﷺ a dit" not in fixed
+    assert r.REMOVED_SAYING in fixed and "Plantez des arbres" in fixed  # the rest of the answer is kept
 
 
-def test_invented_saying_without_collection_is_not_presented_as_certain():
+def test_invented_saying_without_collection_is_removed_even_with_a_warning():
     answer = "Le Prophète ﷺ a dit : « La maladie est un trésor caché du paradis pour le croyant patient et reconnaissant. »"
     out = errors(answer, kind=ATT)
-    assert out and "(source non confirmée)" in r.neutralise(answer, out)
+    assert out and "trésor caché" not in r.neutralise(answer, out)
+    # « à vérifier » is not enough: an invented saying is not kept as a saying of the Prophet ﷺ
     hedged = answer + " Cette parole est souvent citée, mais sa source reste à vérifier."
-    assert not errors(hedged, kind=ATT)
+    assert "trésor caché" not in r.neutralise(hedged, errors(hedged, kind=ATT))
+    # quoted to say that it is not authentic: kept, nothing is attributed
+    corrected = ("On entend souvent : « La maladie est un trésor caché du paradis pour le croyant patient et reconnaissant. » "
+                 "Ce n'est pas un hadith authentique : aucune source ne le rapporte.")
+    assert not errors(corrected, kind=ATT)
+
+
+def test_invented_text_given_with_a_number_is_removed_too():
+    answer = "Le Prophète ﷺ a dit : « Celui qui plante un palmier chaque vendredi aura un palais en or au paradis. » (Muslim n°2432)"
+    out = errors(answer)
+    fixed = r.neutralise(answer, out)
+    assert any(f.kind == "invention" for f in out) and "palmier" not in fixed and "2432" not in fixed
+
+
+def test_several_hadiths_in_one_answer_are_each_judged():
+    answer = ("1. « Les actions ne valent que par les intentions et chacun n'aura que ce qu'il a eu l'intention de faire. » "
+              "(al-Bukhârî n°1)\n\n2. Le Prophète ﷺ a dit : « Celui qui plante un palmier chaque vendredi aura un palais en or "
+              "au paradis. » (Muslim)\n\n3. « Le fort n'est pas celui qui terrasse les autres, mais celui qui se maîtrise dans la "
+              "colère. » (al-Bukhârî n°6114)")
+    out = found(answer)
+    fixed = r.neutralise(answer, errors(answer))
+    assert [f.level for f in out if f.kind == "hadith"] == ["ok", "ok"]
+    assert "intentions" in fixed and "se maîtrise dans la colère" in fixed and "palmier" not in fixed
+
+
+def test_an_arabic_hadith_is_found_in_arabic():
+    answer = "Rapporté par Muslim : « إنما الأعمال بالنيات وإنما لكل امرئ ما نوى »"
+    out = found(answer, kind=ATT)
+    assert out and out[0].level == "ok", [f.message for f in out]
 
 
 def test_weak_hadith_called_authentic_without_number_is_caught():
@@ -186,3 +224,58 @@ def test_personal_cases_are_sent_to_a_qualified_person():
 def test_requests_without_religion_are_not_touched():
     assert not r.prepare("Écris une fonction Python qui inverse une chaîne de caractères.").active
     assert not r.prepare("Combien font 25 % de 360 ?").active
+
+
+def test_an_authentic_text_under_a_wrong_number_gets_its_real_reference():
+    answer = "Texte du hadith n°4521 de Muslim :\n\n> « Celui qui croit en Allah et au Jour dernier, qu'il dise du bien ou qu'il se taise. »"
+    fixed = r.neutralise(answer, errors(answer))
+    assert "4521" not in fixed and "qu'il dise du bien ou qu'il se taise" in fixed and "ce texte se trouve dans" in fixed
+
+
+def test_an_invented_text_under_a_nonexistent_number_is_removed():
+    answer = "Le hadith n°4521 de Muslim dit : « Celui qui plante un palmier chaque vendredi aura un palais en or au paradis. »"
+    fixed = r.neutralise(answer, errors(answer))
+    assert "palmier" not in fixed and r.REMOVED_SAYING in fixed
+
+
+def test_the_position_given_to_a_school_is_compared_with_the_fiqh_file():
+    wrong = "Selon les hanafites, toucher une femme annule les ablutions."
+    assert errors(wrong, kind=("fiqh",))
+    right = ("Pour les chaféites, toucher une femme annule les ablutions ; pour les hanafites, cela ne les annule pas ; "
+             "les malikites et les hanbalites posent la condition du désir.")
+    assert not errors(right, kind=("fiqh",))
+    assert errors("Les hanafites ne permettent pas de donner la zakat al-fitr en argent.", kind=("fiqh",))
+    assert not errors("L'école hanafite permet de donner la zakat al-fitr en argent ; les trois autres écoles demandent de la "
+                      "nourriture.", kind=("fiqh",))
+    assert not errors("Au Fajr, les hanafites ne font le qunût qu'en cas de calamité.", kind=("fiqh",))
+
+
+def test_a_complex_question_answered_with_the_schools_is_not_rejected():
+    answer = ("La question du witr est discutée : l'école hanafite le considère comme obligatoire (wâjib), alors que les "
+              "malikites, les chaféites et les hanbalites le considèrent comme une sunna fortement recommandée. Dans tous les "
+              "cas, il ne faut pas le délaisser.")
+    assert not errors(answer)
+
+
+def test_volume_and_page_of_a_work_are_not_presented_as_exact():
+    answer = "Ibn Taymiyya l'explique dans Majmû' al-Fatâwâ, tome 11, p. 576."
+    out = errors(answer, kind=("citation",))
+    assert out and "[tome et page non vérifiés]" in r.neutralise(answer, out)
+    assert not errors("Ibn Taymiyya en parle dans Majmû' al-Fatâwâ (le tome et la page restent à vérifier : tome 11, p. 576).",
+                      kind=("citation",))
+
+
+def test_an_unknown_work_attributed_to_a_scholar_is_flagged():
+    out = found("Ibn Bâz l'a écrit dans son livre Les Secrets de la Prière Lumineuse.", kind=("citation",))
+    assert out and out[0].level == "warn"
+    assert not [f for f in found("An-Nawawî le rapporte dans son livre Riyâd as-Sâlihîn.", kind=("citation",)) if f.level != "ok"]
+
+
+def test_the_fiqh_file_is_consistent_with_the_checker():
+    data = r.fiqh()
+    assert len(data["sujets"]) == 29  # 18 divergences, 11 consensus
+    for item in data["sujets"] + r.fiches()["fiches"]:
+        assert not [f for f in r._fiqh_findings(item["texte"], "") if f.level == "error"], item["id"]
+    for item in data["sujets"]:
+        for school, said in (item.get("positions") or {}).get("ecoles", {}).items():
+            assert school.rstrip("e")[:5] in r.fold(item["texte"]) and said in ("oui", "non"), item["id"]
