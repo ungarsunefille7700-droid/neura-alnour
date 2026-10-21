@@ -1,0 +1,188 @@
+"""Hadiths attributed without a number, opinions of scholars, fatwas, consensus and the schools of fiqh.
+Each case comes from the errors seen in the answers of the app (series 1 to 4) or from the authorised list of tests."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import neura_religion as r  # noqa: E402
+
+
+def found(answer, question="", kind=None):
+    out = r.verify(answer, r.prepare(question or answer, force=True), question)
+    return [f for f in out if kind is None or f.kind in kind]
+
+
+def errors(answer, question="", kind=None):
+    return [f for f in found(answer, question, kind) if f.level == "error"]
+
+
+ATT = ("attribution", "parole")
+
+
+# ------------------------------------------------------------ hadiths without a number
+def test_authentic_hadith_without_number_is_confirmed_in_both_collections():
+    answer = "« Les actions ne valent que par les intentions et chacun n'aura que ce qu'il a eu l'intention de faire. » (rapporté par al-Bukhârî et Muslim)"
+    out = found(answer, kind=ATT)
+    assert len([f for f in out if f.level == "ok"]) == 2, [f.message for f in out]
+
+
+def test_authentic_hadith_worded_differently_is_not_rejected():
+    for answer in [
+        "Le Prophète ﷺ a dit : « Que celui qui croit en Allah et au Jour dernier dise du bien ou se taise. » (Rapporté par al-Bukhârî et Muslim)",
+        "Dans un hadith rapporté par al-Bukhârî et Muslim : « Celui qui ment contre moi délibérément, qu'il prépare sa place en Enfer. »",
+        "Le Prophète ﷺ a dit : « L'affaire du croyant est étonnante ! Tout ce qui lui arrive est un bien pour lui, et cela n'appartient "
+        "qu'au croyant. Si un malheur l'atteint, il patiente et c'est un bien pour lui. » Source : rapporté par Muslim.",
+    ]:
+        assert not errors(answer, kind=ATT), [f.message for f in found(answer, kind=ATT)]
+
+
+def test_false_attribution_to_muslim_is_caught():
+    # Muslim has other hadiths with « meilleur » and « Coran »: flagged with the right collection, to be checked
+    answer = "« Le meilleur d'entre vous est celui qui apprend le Coran et l'enseigne » (rapporté par Muslim)."
+    out = [f for f in found(answer, kind=ATT) if f.level != "ok"]
+    assert out and "al-Bukhârî n°5027" in out[0].message
+    # Muslim n°2626 is close (« rencontrer ton frère avec un visage souriant »), at-Tirmidhî has the text: to be checked
+    out = [f for f in found("« Ton sourire face à ton frère est une aumône » (rapporté par Muslim).", kind=ATT) if f.level != "ok"]
+    assert out and "at-Tirmidhî" in out[0].message
+    # nothing of it in al-Bukhârî: an error, and the attribution is marked if it stays
+    answer = "« Ton sourire face à ton frère est une aumône » (rapporté par al-Bukhârî)."
+    out = errors(answer, kind=ATT)
+    assert out and "(attribution non confirmée)" in r.neutralise(answer, out)
+
+
+def test_a_hadith_of_muslim_translated_differently_is_not_an_error():
+    answer = "« Celui qui croit en Allah et au Jour dernier, qu'il honore son voisin. » Source : Sahih al-Bukhari et Sahih Muslim."
+    assert not errors(answer, kind=ATT), [f.message for f in found(answer, kind=ATT)]
+
+
+def test_false_attribution_to_bukhari_is_caught():
+    answer = "Le Prophète ﷺ a dit : « Ton sourire face à ton frère est une aumône. » (Bukhârî)"
+    assert errors(answer, kind=ATT)
+
+
+def test_the_long_version_of_another_collection_is_not_confirmed():
+    # Bukhârî n°9 has the short version; « la plus élevée… la plus basse… » is the version of Muslim n°35
+    answer = ("Hadith de Bukhârî : « La foi comporte soixante-dix et quelques branches. La plus élevée est de dire : il n'y a de "
+              "divinité qu'Allah, et la plus basse est d'écarter un obstacle du chemin. Et la pudeur est une branche de la foi. »")
+    assert not [f for f in found(answer, kind=ATT) if f.level == "ok"]
+
+
+def test_invented_text_attributed_to_a_collection_is_caught():
+    answer = "Le Prophète ﷺ a dit : « Celui qui plante un palmier chaque vendredi aura un palais en or au paradis. » (Muslim)"
+    assert errors(answer, kind=ATT)
+
+
+def test_invented_saying_without_collection_is_not_presented_as_certain():
+    answer = "Le Prophète ﷺ a dit : « La maladie est un trésor caché du paradis pour le croyant patient et reconnaissant. »"
+    out = errors(answer, kind=ATT)
+    assert out and "(source non confirmée)" in r.neutralise(answer, out)
+    hedged = answer + " Cette parole est souvent citée, mais sa source reste à vérifier."
+    assert not errors(hedged, kind=ATT)
+
+
+def test_weak_hadith_called_authentic_without_number_is_caught():
+    answer = "« La recherche de la science est une obligation pour tout musulman » est un hadith authentique rapporté par Ibn Mâjah."
+    assert any("faible" in f.message for f in errors(answer))
+
+
+def test_unconfirmable_attributions_are_flagged_not_rejected():
+    out = found("« Le meilleur des gens est le plus utile aux gens » (rapporté par at-Tabarânî).", kind=ATT)
+    assert out and all(f.level == "warn" for f in out)
+    out = found("« Le paradis est sous les pieds des mères » : ce hadith n'est pas dans Sahih al-Bukhârî.", kind=ATT)
+    assert not [f for f in out if f.level == "error"]
+
+
+def test_correct_numbered_reference_after_another_collection_is_kept():
+    answer = ("Non, ce hadith n'est pas rapporté dans Sahih Muslim.\n\nIl apparaît dans les recueils suivants :\n\n"
+              "- **Abû Dâwûd n° 1452** – « Le meilleur d'entre vous est celui qui apprend le Coran et l'enseigne. »")
+    refs = r.hadith_refs(answer)
+    assert [(x.book, x.number) for x in refs] == [("abudawud", "1452")]
+    assert not errors(answer, kind=("hadith",))
+
+
+def test_references_in_tables_and_abi_dawud_are_found():
+    table = "| Recueil | Numéro |\n|---|---|\n| **Sahih al-Bukhârî** | 3322 |\n| **Sunan Ibn Mâjah** | 3649 |"
+    assert [(x.book, x.number) for x in r.hadith_refs(table)] == [("bukhari", "3322"), ("ibnmajah", "3649")]
+    answer = "« La clé de la prière est la purification. » Recueil : Sunan Abi Dawud (n°659)."
+    assert [(x.book, x.number) for x in r.hadith_refs(answer)] == [("abudawud", "659")]
+    assert errors(answer, kind=("hadith",))  # n°659 is about praying on a mat (the right one is n°61)
+
+
+def test_wrong_narrator_without_number_is_flagged():
+    answer = "Rapporté par Aïcha : « Les actions ne valent que par les intentions et chacun n'aura que ce qu'il a eu l'intention de faire » (al-Bukhârî)."
+    assert any("rapporteur" in f.message for f in found(answer, kind=ATT) if f.level != "ok")
+
+
+# ------------------------------------------------------------ scholars, fatwas
+def test_grade_of_a_scholar_is_compared_with_the_base():
+    rows = r.hadith("tirmidhi", "2317")
+    albani = [g[1] for g in rows[0]["g"] if "Albani" in g[0]]
+    assert albani
+    good = f"Ce hadith (at-Tirmidhî n°2317) est jugé {albani[0]} selon al-Albânî."
+    assert any(f.kind == "avis" and f.level == "ok" for f in found(good))
+    bad = "Ce hadith (at-Tirmidhî n°2317) est jugé faible (daif) selon al-Albânî." if r._grade_kind(albani[0]) == "authentique" \
+        else "Ce hadith (at-Tirmidhî n°2317) est jugé authentique selon al-Albânî."
+    assert any(f.kind == "avis" for f in errors(bad))
+
+
+def test_fatwa_numbers_are_never_presented_as_verified():
+    answer = "Selon la fatwa n°12345 d'IslamWeb, le tabac est interdit."
+    out = errors(answer, kind=("fatwa",))
+    assert out and "[numéro non vérifié]" in r.neutralise(answer, out)
+    assert not errors("Je ne peux pas vérifier la fatwa n°12345 d'IslamWeb : l'application n'a aucune base de fatwas.", kind=("fatwa",))
+
+
+def test_word_for_word_quotation_of_a_scholar_is_not_presented_as_exact():
+    assert errors("Ibn Taymiyya a dit, mot pour mot : « La musique est le vin des âmes. »", kind=("citation",))
+    out = found("Ibn Taymiyya a écrit : « La musique est le vin des âmes. »", kind=("citation",))
+    assert out and out[0].level == "warn"
+
+
+def test_opinions_of_scholars_are_flagged_as_to_be_confirmed():
+    out = found("Selon Ibn Bâz, il est préférable de prier en groupe à la mosquée.", kind=("avis",))
+    assert out and out[0].level == "warn"
+
+
+# ------------------------------------------------------------ consensus, schools
+def test_invented_consensus_on_a_divergence_is_caught():
+    out = errors("Il y a consensus des savants : il faut croiser les mains sur la poitrine pendant la prière.", kind=("fiqh",))
+    assert out and "malikite" in out[0].message
+
+
+def test_real_divergence_and_real_consensus_are_accepted():
+    assert not errors("Il n'y a pas de consensus sur la position des mains pendant la prière : les malikites laissent les bras "
+                      "le long du corps, les autres écoles posent la main droite sur la gauche.", kind=("fiqh",))
+    out = found("Il y a consensus des savants sur l'obligation des cinq prières quotidiennes.", kind=("fiqh",))
+    assert out and out[0].level == "ok"
+
+
+def test_unknown_consensus_is_flagged():
+    out = found("Les savants sont unanimes : il est interdit de porter une montre en or blanc.", kind=("fiqh",))
+    assert out and out[0].level == "warn"
+
+
+def test_an_opinion_presented_as_an_obligation_for_all_is_caught():
+    assert errors("Le qunût est obligatoire à la prière du Fajr.", kind=("fiqh",))
+    assert errors("Toucher une femme annule les ablutions.", kind=("fiqh",))
+    assert not errors("Selon les chaféites, le qunût est une sunna à la prière du Fajr ; les hanafites ne le font pas.", kind=("fiqh",))
+    assert not errors("Le qunût n'est pas obligatoire à la prière du Fajr.", kind=("fiqh",))
+
+
+def test_fiqh_questions_are_answered_with_the_positions_of_the_schools():
+    context = r.prepare("Quelle école permet de donner la zakat al-fitr en argent ?").context
+    assert "hanafites" in context
+    context = r.prepare("Quel est l'avis exact d'Ibn Taymiyya sur la musique ? Donne sa fatwa mot pour mot.").context
+    assert "ni base de fatwas" in context
+
+
+def test_personal_cases_are_sent_to_a_qualified_person():
+    question = "Mon mari et moi voulons divorcer et nous avons des enfants : que dit exactement la charia dans mon cas ?"
+    assert "Situation personnelle" in r.prepare(question).context
+    out = found("En islam, le divorce obéit à des règles précises.", question, kind=("relecture",))
+    assert out and "relecture" in r.note(out)
+
+
+def test_requests_without_religion_are_not_touched():
+    assert not r.prepare("Écris une fonction Python qui inverse une chaîne de caractères.").active
+    assert not r.prepare("Combien font 25 % de 360 ?").active
