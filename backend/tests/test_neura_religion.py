@@ -252,3 +252,15 @@ def test_source_line_after_the_text_is_compared_with_what_was_said_before():
     answer = ("Selon le hadith de Jibril rapporté par ʿUmar, croire en l'îmân consiste à croire en Allah, en Ses anges, en Ses "
               "livres, en Ses messagers, au Jour dernier et au destin.\n\n*Source : Hadith rapporté par Muslim (n°8).*")
     assert [f.level for f in r.verify(answer) if f.kind == "hadith"] == ["ok"]
+
+
+def test_a_negation_about_another_collection_does_not_cover_the_reference():
+    answer = ("Le hadith est rapporté par **at-Tirmidhî** (n°1956).\n\nIl n'existe pas de version de ce hadith dans le recueil "
+              "de **Bukhârî**. « Ton sourire face à ton frère est une aumône. »")
+    messages = [f.message for f in r.verify(answer) if f.kind == "hadith"]
+    assert messages and not any("la réponse le dit" in m for m in messages)
+
+
+def test_the_note_has_one_line_per_reference():
+    findings = [r.Finding("ok", "hadith", "at-Tirmidhî n°1956 : trouvé"), r.Finding("warn", "hadith", "at-Tirmidhî n°1956 : incertain")]
+    assert r.note(findings).count("n°1956") == 1 and "⚠" in r.note(findings)

@@ -656,7 +656,10 @@ def verify(answer: str, grounding: Optional[Grounding] = None, question: str = "
         floors.append(previous_end)
         rows = hadith(ref.book, ref.number)
         label = f"{BOOKS[ref.book]} n°{ref.number}"
-        around = fold(answer[max(0, ref.start - 140): ref.end + 60])
+        # the sentence of the reference only (« … at-Tirmidhî (n°1956). Il n'existe pas … chez Bukhârî » is about Bukhârî)
+        sentence_start = max(answer.rfind(". ", 0, ref.start), answer.rfind("\n", 0, ref.start), 0)
+        ends = [i for i in (answer.find(". ", ref.end), answer.find("\n", ref.end)) if i >= 0]
+        around = fold(answer[max(sentence_start, ref.start - 140): min(ends + [len(answer)])])
         if re.search(r"n'existe pas|pas trouve|introuvable|non verifi|pas pu (?:etre )?verifi|aucune source|pas de source|"
                      r"ne figure pas|inexistant|n'a pas ete trouve", around):
             # the answer itself says this number is not confirmed: nothing is attributed to it
@@ -809,11 +812,13 @@ def note(findings: List[Finding]) -> str:
     if not findings:
         return ""
     icons = {"ok": "✔", "warn": "⚠", "error": "✘"}
-    seen, lines = set(), []
-    for f in findings:
-        if f.message not in seen:
-            seen.add(f.message)
-            lines.append(f"- {icons[f.level]} {f.message}")
+    severity = {"ok": 0, "warn": 1, "error": 2}
+    kept: Dict[str, Finding] = {}
+    for f in findings:  # one line per reference: the most severe verdict when it is cited several times
+        label = f.message.split(" : ")[0]
+        if label not in kept or severity[f.level] > severity[kept[label].level]:
+            kept[label] = f
+    lines = [f"- {icons[f.level]} {f.message}" for f in kept.values()]
     return ("\n\n---\n**Vérification automatique des sources** (Coran : texte Tanzil ; hadiths : 8 recueils numérotés) :\n"
             + "\n".join(lines[:12]))
 
