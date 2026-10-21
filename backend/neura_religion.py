@@ -357,7 +357,10 @@ def hadith_refs(text: str) -> List[HadithRef]:
             before = [b for b in before if re.fullmatch(r"[\s,:()\-–|]*", clean[b[1]:start]) and start - b[1] <= 15]
         free = [b for b in before if b[0] not in used_books]
         book = None
-        if before and re.fullmatch(r"[\s,:|\-–]*", clean[before[-1][1]:start]) and start - before[-1][1] <= 8:
+        line_start = clean.rfind("\n", 0, start) + 1
+        alone_on_line = before and before[-1][0] >= line_start and not [b for b in before[:-1] if b[0] >= line_start]
+        if before and start - before[-1][1] <= 8 and (re.fullmatch(r"[\s,:|\-–]*", clean[before[-1][1]:start])
+                                                     or (alone_on_line and re.fullmatch(r"[\s,:|\-–(]*", clean[before[-1][1]:start]))):
             # « Il n'est pas dans Sahih Muslim. … - Abû Dâwûd n° 1452 » : the collection written just before the number
             book = before[-1]
         elif free:
@@ -752,7 +755,9 @@ _NEG_ATTR_RE = re.compile(r"n'est pas (?:rapport|dans|chez|cit|mentionn|present|
                           r"introuvable|non retrouv|n'existe pas|ne contien|\baucun|pas rapport|faussement|a tort|\bni\b|pas (?:attest|connu)|"
                           r"ne l'a pas|absent|ne rapporte pas|sans fondement|pas sous cette forme|n'est pas le texte|pas (?:le|un) texte litteral|"
                           r"pas litteral|pas mot pour mot|formulation (?:precise |exacte )?(?:n'est pas|differ|ne figure)|"
-                          r"n'est pas etabli|pas etablie|n'est pas (?:une parole|authentique)|pas une parole|ne provient pas|\bnon (?:par|dans|chez)\b")
+                          r"n'est pas etabli|pas etablie|n'est pas (?:une parole|authentique)|pas une parole|ne provient pas|\bnon (?:par|dans|chez)\b|"
+                          r"ne (?:peux|puis|pouvons) pas (?:le |vous le |te le )?confirmer|pas (?:pu )?(?:etre )?confirm|ne (?:le )?list|"
+                          r"ne le trouve pas|aucune trace|ne (?:le )?mentionne pas")
 _SAYING_RE = re.compile(r"(?:proph[eè]te|messager)[^.\n«]{0,60}?(?:a dit|disait|a declare|a affirme|a enseigne|a recommande|dit)\s*:?\s*$")
 
 
@@ -1275,6 +1280,12 @@ def _compare_translation(quote: str, words: List[str], ref: "QuranRef", original
                        "(Rachid Maach ; Noor International Center — QuranEnc.com).", span)
     if other and other[0] >= 0.6 and other[0] >= cited + 0.3:
         right = _vref(*other[1:])
+        runners = best_verses(words, exclude, 3)
+        clear = other[0] >= 0.85 and (len(runners) < 2 or runners[1][0] <= other[0] - 0.1)
+        if not clear:
+            return Finding("error", "traduction", f"{label} : {shown} n'est pas la traduction de ce verset (plusieurs versets proches, "
+                           f"dont {right} : à vérifier){_reference_text(ref.surah, ref.first)}.", span,
+                           fix=original + " [référence non conforme à ce texte]")
         return Finding("error", "traduction", f"{label} : {shown} n'est pas la traduction de ce verset ; ce texte correspond à "
                        f"{right} ({surah_label(other[1])}){_reference_text(ref.surah, ref.first)}.", span,
                        fix=f"{right} [référence corrigée]")
@@ -1467,6 +1478,12 @@ def fiqh_topics(text: str, context: str = "") -> List[dict]:
 _CONSENSUS_RE = re.compile(r"consensus|ijma|unanim|tous les savants|tous les oulemas|toutes les ecoles|"
                            r"les quatre ecoles (?:sont|s'accordent|disent|considerent|jugent|admettent|interdisent|permettent|imposent)|"
                            r"(?:aucune|pas de|sans) divergence|s'accordent|font l'unanimite|sont d'accord|d'un commun accord")
+# a consensus of the scholars (« consensus sur sa valeur », « si les deux parties sont d'accord » are not)
+_SCHOLAR_CONSENSUS_RE = re.compile(r"ijma|unanim|consensus (?:des|parmi|entre|de tous|chez|de la communaute)|"
+                                   r"(?:il y a|il existe|existe|fait l'objet d'|font l'objet d'|par) (?:un )?(?:veritable |large )?consensus|"
+                                   r"consensus (?:est|existe|absolu|general)|(?:savants|ecoles|oulemas|juristes|imams|musulmans|madhhabs?)"
+                                   r"[^.]{0,40}(?:s'accordent|sont d'accord|sont unanimes|font consensus)|toutes les ecoles|tous les savants|"
+                                   r"tous les oulemas|les quatre ecoles|(?:aucune|pas de|sans) divergence|pas de consensus|aucun consensus")
 _CONSENSUS_NEG_RE = re.compile(r"(?:pas|aucun|aucune|ni|sans|non|absence)\s+(?:de\s+|d'|du\s+)?(?:veritable\s+|reel\s+)?(?:consensus|unanimit|ijma)|"
                                r"ne (?:sont|font|s'accordent) pas|pas (?:tous )?d'accord|n'y a pas (?:de )?(?:consensus|unanimit)|"
                                r"divergen|ne fait pas l'unanimite|ikhtilaf|desaccord")
@@ -1484,7 +1501,7 @@ _COMPLEX_RE = re.compile(r"divorc|talaq|repudi|khul|heritage|succession|garde de
                          r"serment|kaffara|apostas|avortement|contracept|conversion|tutelle|wali|\bdot\b|mahr|polygam|iddah?|viduite|charia")
 
 
-SCHOOLS = {"hanafite": r"hanaf|hanef|ab[ou]+ han[iy]fa", "malikite": r"malikit|maliki\b|malikis|l'imam malik\b",
+SCHOOLS = {"hanafite": r"hanaf|hanef|ab[ou]+ han[iy]fa", "malikite": r"mal[ie]kit|maliki\b|malikis|l'imam malik\b",
            "chafeite": r"chaf[eiy]|shaf[iy]", "hanbalite": r"hanbal|l'imam ahmad\b"}
 
 
@@ -1495,7 +1512,8 @@ def _school_positions(sentence: str, question: str) -> List[Finding]:
     s = fold(sentence)
     if not any(re.search(p, s) for p in SCHOOLS.values()):
         return out
-    for topic in fiqh_topics(sentence, question):
+    title, _, s = s.rpartition(" ⟶ ")  # the title of a list item: « 2. Laisser les mains pendantes ⟶ - C'est l'avis des chaféites »
+    for topic in fiqh_topics(sentence.replace(" ⟶ ", " "), question):
         positions = topic.get("positions")
         if not positions or (positions.get("contexte") and not re.search(positions["contexte"], s + " " + fold(question))):
             continue
@@ -1504,6 +1522,9 @@ def _school_positions(sentence: str, question: str) -> List[Finding]:
             schools = [(name, m) for name, pattern in SCHOOLS.items() for m in re.finditer(pattern, part)]
             # the subject itself must be named in this part (« les saignements (pour les hanafites), la viande de chameau
             # (pour les hanbalites) » : each school goes with its own subject)
+            if schools and title and not any(r.search(part) for r in topic["_mots"]):
+                part = title + " : " + part  # the subject and the position are in the title
+                schools = [(name, m) for name, pattern in SCHOOLS.items() for m in re.finditer(pattern, part)]
             if not schools or not any(r.search(part) for r in topic["_mots"]):
                 continue
             # schools listed together (« les écoles malikite, chaféite et hanbalite ») share what follows them, up to
@@ -1549,15 +1570,25 @@ def _fiqh_findings(answer: str, question: str) -> List[Finding]:
     clean = re.sub(r"[*_`>#|]", " ", answer)
     asked = fiqh_topics(question)
     previous = ""
-    for sentence in (s for s in re.split(r"(?<=[.!?\n])\s+", clean) if s.strip()):
+    heading = ""
+    for sentence in (s for s in re.split(r"(?<=[.!?])\s+|\s*\n\s*", clean) if s.strip()):  # sentences and lines
         s = fold(sentence)
         topics = fiqh_topics(sentence, question)
-        out += [f for f in _school_positions(sentence, question) if f.message.split(" : ")[0] not in seen]
+        if re.match(r"\s*(?:\d+[.)]|#+)\s", sentence) or sentence.rstrip().endswith(":"):
+            heading = sentence  # the title of the list items that follow
+        elif not re.match(r"\s*[-•]", sentence) and len(sentence.split()) > 25:
+            heading = ""
+        context = heading.strip().rstrip(" :") + " ⟶ " + sentence if heading and heading != sentence else sentence
+        out += [f for f in _school_positions(context, question) if f.message.split(" : ")[0] not in seen]
         seen.update(f.message.split(" : ")[0] for f in out)
         if re.search(r"hadith|chaine|isnad|authenti|faible|sahih|da'?if|narrat|rapporteur", s):
             previous = sentence
             continue  # the grade of a hadith, compared with the base elsewhere
-        if _CONSENSUS_RE.search(s) and (re.search(r"(?:aucune|pas de|sans) divergence", s) or not _CONSENSUS_NEG_RE.search(s)):
+        scholars = re.search(r"savant|ecole|oulem|ulema|juriste|ijma|unanim|musulmans|communaute|imams|fuqaha|madhh", s)
+        negated_all = re.search(r"(?:n'est pas|ne sont pas|pas)\b[^.]{0,60}\b(?:toutes les ecoles|tous les savants)", s)
+        nuanced_claim = re.search(r"la plupart|majorit|en general|souvent|beaucoup de", s)
+        if _CONSENSUS_RE.search(s) and _SCHOLAR_CONSENSUS_RE.search(s) and scholars and not negated_all and not (nuanced_claim and not re.search(r"consensus|ijma|unanim", s)) \
+                and (re.search(r"(?:aucune|pas de|sans) divergence", s) or not _CONSENSUS_NEG_RE.search(s)):
             subjects = topics or (asked if len(asked) == 1 and len(s.split()) <= 25 else [])
             if not subjects and "consensus?" not in seen:
                 seen.add("consensus?")
@@ -1701,8 +1732,9 @@ def _scholar_findings(answer: str, question: str, documented: str = "") -> List[
             out.append(Finding("warn", "citation", f"Ouvrage cité « {_short(title, 50)} » : absent de la liste des ouvrages connus de "
                                "l'application, son existence et la citation sont à vérifier."))
     for m in _FATWA_NUM_RE.finditer(clean):
-        context = fold(clean[max(0, m.start() - 150): m.end() + 150])
-        if _HEDGE_RE.search(context) or re.search(r"n'existe pas|pas trouv|introuvable|invent|ne peux pas|impossible|aucune base", context):
+        context = fold(_sentence(clean, m.start(), m.end()) + " " + clean[max(0, m.start() - 250): m.end() + 150])
+        if _HEDGE_RE.search(context) or re.search(r"n'existe pas|pas trouv|introuvable|invent|ne peux pas|impossible|aucune base|"
+                                                  r"aucune source|confirmer l'existence|pas de source", context):
             continue
         out.append(Finding("error", "fatwa", f"Fatwa « {_short(m.group(0), 40)} » : numéro de fatwa non vérifiable (l'application n'a pas "
                            "de base de fatwas) ; il ne doit pas être présenté comme certain.", (m.start(), m.end()),

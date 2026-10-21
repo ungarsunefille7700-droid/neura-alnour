@@ -279,3 +279,44 @@ def test_the_fiqh_file_is_consistent_with_the_checker():
     for item in data["sujets"]:
         for school, said in (item.get("positions") or {}).get("ecoles", {}).items():
             assert school.rstrip("e")[:5] in r.fold(item["texte"]) and said in ("oui", "non"), item["id"]
+
+
+# ------------------------------------------------------------ cases seen in the real answers (Groq/Qwen test run, 2026-10-21)
+def test_a_negation_of_the_collection_is_not_corrected():
+    answer = ("Je ne peux pas confirmer que ce hadith se trouve dans Sahih al-Bukhârî. Il est rapporté par at-Tirmidhî : "
+              "« Ton sourire face à ton frère est une aumône ».")
+    assert not errors(answer, "Le hadith « Ton sourire face à ton frère est une aumône » est dans Sahih al-Bukhârî ?", kind=ATT)
+
+
+def test_a_fatwa_number_that_the_answer_refuses_to_quote_is_not_flagged():
+    answer = ("Je ne peux pas citer cette fatwa spécifique car aucune source vérifiée ne figure dans mon contexte actuel pour "
+              "confirmer l'existence, le numéro ou le contenu exact d'une « fatwa n°12345 » d'IslamWeb concernant le tabac.")
+    assert not errors(answer, kind=("fatwa",))
+
+
+def test_agreements_that_are_not_a_consensus_of_scholars():
+    for answer in ["Si elle remplit les conditions de la monnaie selon le fiqh (consensus sur sa valeur, acceptation), certains "
+                   "savants pourraient la considérer comme licite.",
+                   "Vous pouvez demander une convention de divorce si les deux parties sont d'accord.",
+                   "Non, le witr n'est pas obligatoire de la même manière pour toutes les écoles."]:
+        assert not [f for f in found(answer, kind=("fiqh",)) if f.level != "ok"], answer
+
+
+def test_inverted_schools_in_a_list_are_caught():
+    answer = ("1. Joindre les mains (Qabd) :\n- C'est la position des écoles hanafite et hanbalite.\n\n"
+              "2. Laisser les mains pendantes (Ifradh) :\n- C'est la position de l'école Shafi'ite.")
+    out = errors(answer, "Y a-t-il un consensus sur la position des mains pendant la prière ?", kind=("fiqh",))
+    assert out and "chafeite" in out[0].message
+    answer_malekite = "École Malékite : le qunût du Fajr n'est pas pratiqué, sauf en cas de calamité."
+    assert errors(answer_malekite, "Le qunût au Fajr est-il obligatoire ?", kind=("fiqh",))
+
+
+def test_a_wrong_verse_is_not_replaced_by_an_uncertain_one():
+    answer = "Sourate Al-Ma'arij (70:24-25) : « Et vous préférez la vie d'ici-bas, tandis que la vie de l'au-delà est meilleure et plus durable. »"
+    out = [f for f in errors(answer) if f.kind == "traduction"]
+    assert out and "[référence corrigée]" not in r.neutralise(answer, out) and "non conforme" in r.neutralise(answer, out)
+
+
+def test_a_number_written_after_its_collection_in_a_list():
+    answer = "Il est rapporté dans :\n* **Sahih al-Bukhari** (n° 5027)\n* **Sunan Abi Dawud** (n° 1452)\n* **Sunan Ibn Majah** (n° 211)"
+    assert [(x.book, x.number) for x in r.hadith_refs(answer)] == [("bukhari", "5027"), ("abudawud", "1452"), ("ibnmajah", "211")]

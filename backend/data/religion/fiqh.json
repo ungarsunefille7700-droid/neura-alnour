@@ -20,7 +20,17 @@
     "qiyam",
     "debout"
    ],
-   "texte": "poser la main droite sur la gauche (qabd) est l'avis des hanafites, des chaféites et des hanbalites ; l'avis connu de l'école malikite est de laisser les bras le long du corps (sadl) dans la prière obligatoire, d'autres malikites retenant le qabd ; la place des mains (sous le nombril, au-dessus, sur la poitrine) diffère aussi. Aucune école n'en fait un pilier de la prière."
+   "texte": "poser la main droite sur la gauche (qabd) est l'avis des hanafites, des chaféites et des hanbalites ; l'avis connu de l'école malikite est de laisser les bras le long du corps (sadl) dans la prière obligatoire, d'autres malikites retenant le qabd ; la place des mains (sous le nombril, au-dessus, sur la poitrine) diffère aussi. Aucune école n'en fait un pilier de la prière.",
+   "positions": {
+    "question": "poser la main droite sur la gauche (qabd)",
+    "oui": "qabd|croise|joindre|joignent|jointes|main droite sur la gauche|mains sur la poitrine|sous le nombril|au-dessus du nombril|posent",
+    "non": "\\bn(?:e|')\\s*(?:\\w+\\s+){0,3}?(?:pas|jamais|point|plus)\\b|sadl|le long du corps|pendantes|pendre|ballants|laisser les (?:mains|bras)|laissent les (?:mains|bras)|ifradh",
+    "ecoles": {
+     "hanafite": "oui",
+     "chafeite": "oui",
+     "hanbalite": "oui"
+    }
+   }
   },
   {
    "id": "basmala",
