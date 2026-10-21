@@ -128,6 +128,7 @@ FR_EN = {
     "salutation": ["greet", "salam"], "salam": ["greet", "salam"], "invite": ["guest"], "invites": ["guest"], "honore": ["honou", "honor"],
 }
 _FR_EN = {_stem(k): [_stem(v) for v in vs] for k, vs in FR_EN.items()}
+_ENGLISH = {key: list(values) for key, values in _FR_EN.items()}  # French word -> English equivalents, nothing else
 # The French texts of the base and the answers translate the same Arabic words differently.
 FR_SYNONYMS = [
     ["science", "connaissance", "savoir"], ["obligation", "obligatoire", "devoir"], ["recherche", "chercher", "quete"],
@@ -347,6 +348,9 @@ def hadith_refs(text: str) -> List[HadithRef]:
     refs, used_books = [], set()
     for start, end, value, marked in numbers:
         before = [b for b in books if b[1] <= start and start - b[1] <= 80]
+        sentence_start = max(clean.rfind(". ", 0, start), clean.rfind("\n\n", 0, start))
+        if any(b[0] > sentence_start for b in before):
+            before = [b for b in before if b[0] > sentence_start]  # not a collection named in the previous sentence
         if marked and not before:
             # « Référence dans Sahîh al-Bukhârî : … il s'agit du hadith n°6116 » : the collection named in the same block
             block = clean.rfind("\n\n", 0, start)
@@ -1825,8 +1829,17 @@ def verify(answer: str, grounding: Optional[Grounding] = None, question: str = "
         elsewhere = ([c for c in search_hadith(best_claim, 3, 0.75) if not (c[1] == ref.book and c[2]["n"] == ref.number)]
                      if quoted and len(words) >= 2 else [])  # only a real quotation can belong to another hadith
         better = elsewhere[0] if elsewhere and elsewhere[0][0] >= best + 0.25 else None
+        same = None
+        if quoted and len(words) >= 3 and (better or best < 0.45):
+            for c in search_hadith(best_claim, 4, 0.6):
+                if c[1] != ref.book and _same_arabic_in(ref.book, c[1], c[2]["n"]) == ref.number:
+                    same = c
+                    break
         if grounding and (ref.book, ref.number) in grounding.fiche_refs and best >= 0.25:
             level, note = "ok", "trouvé dans la base (référence des fiches vérifiées), le texte correspond"
+        elif same:
+            level, note = "ok", (f"même hadith, traduction différente de la base : texte arabe identique à celui de "
+                                 f"{BOOKS[same[1]]} n°{same[2]['n']}, d'où vient la formulation citée")
         elif better and (best < 0.45 or (len(words) < 4 and best < 0.99)):
             # (the other hadith found is not named: a suggestion could itself be wrong)
             level, note = "error", f"les mots attribués ne sont pas dans ce hadith ; ce numéro dit en réalité : « {real}… »"
@@ -1851,8 +1864,16 @@ def verify(answer: str, grounding: Optional[Grounding] = None, question: str = "
             if grades and re.search(r"authentique|sahih|sahîh", nearby) and grades and all("da" in g or "fabricat" in g or "mawdu" in g for g in grades):
                 level, note = "error", "présenté comme authentique alors que la base le classe faible : " + \
                     "; ".join(f"{g[1]} ({g[0]})" for g in rows[0]["g"])
+        if level == "ok" and quoted and not (grounding and (ref.book, ref.number) in grounding.fiche_refs) \
+                and not _NOT_AUTHENTIC_RE.search(around):
+            added = _added_word(best_claim, rows, ref.book, ref.number)
+            quote = next((q for q in _outer_quotes(answer) if best_claim.strip() and best_claim.strip() in q[2]), None) if added else None
+            if added and quote:
+                level = "warn"
+                note = (f"à vérifier : le mot « {added} » de la citation ne figure dans aucune version de ce hadith (français, "
+                        f"anglais) — autre traduction ou ajout ; ce numéro dit : « {real}… »")
         findings.append(Finding(level, "hadith", f"{label} : {note}", (ref.start, ref.end)))
-        if level != "ok" and quoted and len(words) >= 4 and not _NOT_AUTHENTIC_RE.search(around):
+        if level != "ok" and quoted and len(words) >= 4 and not _NOT_AUTHENTIC_RE.search(around) and not note.startswith("à vérifier : le mot"):
             if better and better[1] == ref.book and better[0] >= 0.9:
                 if level == "error":
                     findings[-1].fix = f"n°{better[2]['n']} [numéro corrigé]"  # same collection, the right number
@@ -1923,6 +1944,24 @@ def _local(words: List[str], haystack: str, span: int = 160) -> bool:
     return False
 
 
+def _added_word(claim: str, rows: List[dict], book: str, number: str) -> Optional[str]:
+    """A telling word of the quotation that is in no version of the hadith, in French (with its usual synonyms and
+    conjugations) nor in English: added to the hadith (« le Paradis »), not another translation. Only words whose
+    English equivalents are known are judged; for the others nothing can be said."""
+    words = list(dict.fromkeys(_latin_words(claim)))
+    if len(words) < 4:
+        return None
+    english = [en for en, _ in _other_languages(book).get(number, [])]
+    for word in sorted(words, key=_rarity, reverse=True):
+        equivalents = _ENGLISH.get(_stem(word))
+        if _rarity(word) < 2.5 or not equivalents or not english:
+            continue  # only a word whose English equivalent is known can be said absent from the English text
+        if any(_present_loose(word, row["k"]) for row in rows) or any(" " + en in e for en in equivalents for e in english):
+            continue
+        return word
+    return None
+
+
 def _wrong_number_text(answer: str, ref: HadithRef, label: str, claim: str, rows: List[dict], findings: List[Finding]) -> None:
     """The text given with a wrong number: an authentic hadith found elsewhere (reliably) gets its real reference
     in place of the wrong number; a text found nowhere is an invented saying and is removed."""
@@ -1932,7 +1971,13 @@ def _wrong_number_text(answer: str, ref: HadithRef, label: str, claim: str, rows
             findings[-1].fix = f"[numéro faux — ce texte se trouve dans {BOOKS[found[0][1]]} n°{found[0][2]['n']}]"
         return
     if found:
-        return  # partly found: flagged, not removed
+        added = _added_word(claim, [found[0][2]], found[0][1], found[0][2]["n"])
+        quote = next((q for q in _outer_quotes(answer) if claim.strip() and claim.strip() in q[2]), None) if added else None
+        if added and quote:  # partly found: the word that is in no version of the closest hadith is pointed out
+            findings.append(Finding("warn", "attribution", f"« {_short(claim, 50)} » (attribué à {label}) : texte en partie absent "
+                                    f"du hadith le plus proche ({BOOKS[found[0][1]]} n°{found[0][2]['n']} : « {added} » n'y "
+                                    "figure pas) — à vérifier."))
+        return  # partly found: not removed
     if rows and min(max(_weighted(_latin_words(claim), row["k"]) for row in rows) / 0.35,
                     max(_rare_found(_latin_words(claim), row["k"]) for row in rows) / 2) >= 1:
         return  # it is (partly) in the hadith of that number

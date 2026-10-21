@@ -320,3 +320,21 @@ def test_a_wrong_verse_is_not_replaced_by_an_uncertain_one():
 def test_a_number_written_after_its_collection_in_a_list():
     answer = "Il est rapporté dans :\n* **Sahih al-Bukhari** (n° 5027)\n* **Sunan Abi Dawud** (n° 1452)\n* **Sunan Ibn Majah** (n° 211)"
     assert [(x.book, x.number) for x in r.hadith_refs(answer)] == [("bukhari", "5027"), ("abudawud", "1452"), ("ibnmajah", "211")]
+
+
+def test_the_number_goes_with_the_collection_of_its_sentence():
+    answer = ("Non, ce hadith n'est pas rapporté par Muslim.\n\nIl est authentifié par **at-Tirmidhî** (n°1956 et n°1970). "
+              "Le texte : « Ton sourire face à ton frère est une aumône ».")
+    assert [(x.book, x.number) for x in r.hadith_refs(answer)] == [("tirmidhi", "1956"), ("tirmidhi", "1970")]
+
+
+def test_a_word_added_to_a_numbered_hadith_is_not_confirmed():
+    # « to be checked », not an error: on 61 sure pairs of the same hadith, a word absent from the other translation
+    # was 3 times a difference of translation (« musulman », « intentionnellement », « main »)
+    answer = "Le hadith rapporté dans Sahih al-Bukhârî (n° 6116) est : « Ne sois pas en colère, et Allah te donnera le Paradis. »"
+    out = [f for f in found(answer) if f.kind == "hadith"]
+    assert out and out[0].level == "warn" and "paradis" in r.fold(out[0].message)
+    assert "6116" in r.neutralise(answer, errors(answer))  # the right number is kept
+    # the hadith as it is (another translation) stays accepted
+    assert not errors("Le Prophète ﷺ a dit à un homme qui lui demandait un conseil : « Ne te mets pas en colère. » "
+                      "Il répéta sa demande et il lui dit : « Ne te mets pas en colère. » (al-Bukhârî n°6116)")
