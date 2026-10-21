@@ -844,10 +844,10 @@ _NOT_AUTHENTIC_RE = re.compile(r"n'est pas (?:un hadith|authentique|une parole|e
                                r"faussement attribu|n'a jamais dit|pas un hadith|introuvable")
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=2)
 def _other_languages(book: str) -> Dict[str, List[Tuple[str, str]]]:
     """{number: [(English words, Arabic words)]} of one collection, read only when an attribution needs it (two
-    one collection at a time in memory): the same hadith is recognised in another translation or in Arabic."""
+    two collections at most in memory): the same hadith is recognised in another translation or in Arabic."""
     with gzip.open(DATA / "hadiths" / f"{book}.json.gz", "rt", encoding="utf-8") as handle:
         doc = json.load(handle)
     out: Dict[str, List[Tuple[str, str]]] = {}
@@ -881,6 +881,53 @@ def _other_language_match(text: str, book: str) -> Optional[Tuple[float, str]]:
             if score and (best is None or score > best[0]):
                 best = (round(score, 2), number)
     return best
+
+
+def _same_arabic_in(book: str, other_book: str, other_number: str, strict: bool = True) -> Optional[str]:
+    """The number, in the collection named, of the hadith found (in French) in another collection, when the collection
+    named has the same end of text in Arabic: its last seven words, and most of its last thirty words — a short version
+    (al-Bukhârî n°9 for the long one of Muslim n°35) or another story with the same ending does not count.
+    strict=False: seven following Arabic words in common near the end only (perhaps another version of it)."""
+    if book == other_book:
+        return None
+    blessing = " ".join(neura_quran.words("صلى الله عليه وسلم"))
+    # the words of a chain of narrators (« حدثنا فلان عن فلان ») are common to many different hadiths
+    chain = set(neura_quran.words("حدثنا أخبرنا حدثني أخبرني أنبأنا سمعت عن حدثه قال رسول بن ابن أبي أبو"))
+    ends = []
+    for _, arabic in _other_languages(other_book).get(other_number, []):
+        words = arabic.split()
+        for end in ((len(words),) if strict else range(len(words), len(words) - 29, -7)):
+            if end - 7 < 10:
+                continue
+            window = " " + " ".join(words[end - 7:end]) + " "
+            if blessing not in window and len(set(words[end - 7:end])) >= 5 and not chain & set(words[end - 7:end]):
+                ends.append((window, set(words[-30:])))
+    if not ends:
+        return None
+    for number, versions in _other_languages(book).items():
+        for _, arabic in versions:
+            for window, last in ends:
+                if window in arabic and (not strict or len(last & set(arabic.split())) >= 0.7 * len(last)):
+                    return number
+    return None
+
+
+def _arabic_confirmation(text: str, book: str, strict: bool = True) -> Optional[Tuple[str, str]]:
+    """(number in the collection named, where the French words were found): the hadith of another collection that has
+    the words of the quotation in the last part of its text (the end of the saying), looked for in Arabic in the
+    collection named."""
+    words = _latin_words(text)
+    for score, other_book, row in _search_cached(text, 4, 0.5):
+        if other_book == book or score < 0.6:
+            continue
+        k = row["k"]
+        positions = sorted(k.find(" " + _stem(w)) for w in words if " " + _stem(w) in k)
+        if strict and (not positions or positions[len(positions) // 2] < 0.4 * len(k)):
+            continue  # the quotation is at the start of a long text: its Arabic end says nothing about the quotation
+        number = _same_arabic_in(book, other_book, row["n"], strict)
+        if number:
+            return number, f"{BOOKS[other_book]} n°{row['n']}"
+    return None
 
 
 def _removal_span(clean: str, quote: Tuple[int, int], mention: Optional[Tuple[int, int]]) -> Tuple[int, int]:
@@ -1000,6 +1047,14 @@ def _unnumbered(answer: str, hrefs: List[HadithRef], qrefs: List["QuranRef"], qu
         via = " (texte anglais ou arabe de la base)" if other_language and number == other_language[1] and best_named == other_language[0] else ""
         if best_named >= 0.6 and not arabic and len(words) < 4 and best_named < 0.99:
             level, message = "warn", f"texte trop court pour confirmer (le plus proche : n°{number}) : attribution non confirmée"
+        elif other and other[0] >= best_named + 0.25 and other[0] >= 0.6 and _arabic_confirmation(text, book):
+            number, seen_in = _arabic_confirmation(text, book)
+            level, message = "ok", (f"même hadith, traduction différente de la base : son texte arabe est dans ce recueil (n°{number}) ; "
+                                    f"la formulation citée est celle de {seen_in}")
+        elif other and other[0] >= best_named + 0.25 and other[0] >= 0.6 and _arabic_confirmation(text, book, strict=False):
+            number, seen_in = _arabic_confirmation(text, book, strict=False)
+            level, message = "warn", (f"attribution non confirmée : formulation de {seen_in} ; le n°{number} de ce recueil a une "
+                                      "partie du même texte arabe (peut-être une autre version du hadith) : à vérifier")
         elif best_named >= 0.6 and short and best_named < 0.85 and other and other[0] >= best_named + 0.25:
             level = "warn"  # a short text: one word missing may be another hadith, or another translation
             message = (f"attribution non confirmée : ce texte ne se trouve pas dans ce recueil sous cette forme ; il correspond à "
