@@ -7136,6 +7136,57 @@ async def _project_memory_context(user: dict, conversation_id: Optional[str]) ->
     return text[: PROJECT_MEMORY_PROMPT_TOKENS * 4]
 
 
+# ============== RELIGIOUS RELIABILITY (neura_religion) ==============
+# A question about Islam receives the verified sources (Tanzil Quran text, 8 numbered hadith collections,
+# checked fiches) before the answer is written; every reference of the answer is then checked. A wrong
+# reference is sent back once to the model with what the sources really say; what is still wrong is removed.
+# Other requests are not touched. NEURA_RELIGION_CHECK=off turns it off.
+def _religion_grounding(question: Optional[str], code_request: bool = False, force: bool = False):
+    try:
+        import neura_religion
+        if not neura_religion.enabled():
+            return None
+        grounding = neura_religion.prepare(question or "", code_request=code_request, force=force)
+        return grounding if grounding.active else None
+    except Exception as exc:  # the check must never block an answer
+        logger.error(f"religion grounding failed: {exc}")
+        return None
+
+
+async def _religion_review(answer: str, grounding, question: str, system_prompt: str, profile: dict, voice: bool = False):
+    """(answer to show, summary of the check, extra text sent to the model for the quota)."""
+    import neura_religion
+    from neura_engine import LlmChat, UserMessage
+    extra = ""
+    try:
+        findings = await asyncio.to_thread(neura_religion.verify, answer, grounding, question)
+        if neura_religion.problems(findings):
+            request = neura_religion.revision_request(question, answer, findings, grounding)
+            try:
+                chat = LlmChat(
+                    api_key=AI_LLM_KEY,
+                    session_id=f"neura_religion_{uuid.uuid4()}",
+                    system_message=system_prompt,
+                ).with_model(profile.get("provider", "gemini"), profile["model_id"]).with_params(**profile["params"])
+                revised = await asyncio.wait_for(chat.send_message(UserMessage(text=request)), timeout=150)
+                extra = request + (revised or "")
+                if revised and revised.strip():
+                    revised_findings = await asyncio.to_thread(neura_religion.verify, revised, grounding, question)
+                    if len(neura_religion.problems(revised_findings)) <= len(neura_religion.problems(findings)):
+                        answer, findings = revised, revised_findings
+            except Exception as exc:
+                logger.error(f"religion revision failed: {exc}")
+        if neura_religion.problems(findings):
+            answer = neura_religion.neutralise(answer, findings)
+        if not voice and any(f.kind == "hadith" or f.level != "ok" for f in findings):
+            answer += neura_religion.note(findings)
+        summary = {level: sum(1 for f in findings if f.level == level) for level in ("ok", "warn", "error")}
+        return answer, summary, extra
+    except Exception as exc:
+        logger.error(f"religion review failed: {exc}")
+        return answer, None, extra
+
+
 @api_router.post("/chat/message")
 async def send_message(message: MessageCreate, user: dict = Depends(get_current_user)):
     from neura_engine import LlmChat, UserMessage
@@ -7419,7 +7470,11 @@ Règles importantes:
             logger.error(f"Tavily (message/vision) error: {exc}")
             sources = []
         system_message += web_results_context(sources)
-    
+    # Religious question (text only): verified sources now, check of the references before saving the answer.
+    religion = None if effective_image_data else await asyncio.to_thread(
+        _religion_grounding, message.content, bool(looks_like_code_request(message.content))
+    )
+
     # Send current message with or without image. Retry transient Gemini blips
     # (429 rate spike / 503 high-demand) with backoff; the chat is rebuilt each
     # attempt so no message is ever duplicated.
@@ -7479,6 +7534,8 @@ Règles importantes:
                 elif looks_like_code_request(message.content):
                     persona_system += _code_delivery_guard(message)
                 persona_system += _reply_language_instruction(message.lang)
+                if religion:
+                    persona_system += religion.context
                 # Build the conversation history as initial_messages so the model
                 # receives the full context in a SINGLE request. (Previously the
                 # history was replayed by issuing one blocking LLM call per past
@@ -7527,7 +7584,13 @@ Règles importantes:
         if any(x in es for x in ("RESOURCE_EXHAUSTED", "PerDay", "PerMinute", "quota", "429")):
             raise HTTPException(status_code=429, detail="Quota IA gratuit atteint pour le moment (limite du palier gratuit, partagée par l'app). Réessaie dans une minute.")
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Veuillez réessayer.")
-    
+
+    religion_check, religion_extra = None, ""
+    if religion and routed_profile and isinstance(response, str):
+        response, religion_check, religion_extra = await _religion_review(
+            response, religion, message.content, persona_system, routed_profile, voice=bool(message.voice)
+        )
+
     # Save AI response
     routed_model = _model_public(
         routed_profile,
@@ -7573,6 +7636,7 @@ Règles importantes:
             message.content,
             message.document_text,
             response,
+            religion_extra,
             *(item.get("content", "") for item in previous_history),
         )
         text_finish = await _finish_text_quota(
@@ -7617,6 +7681,8 @@ Règles importantes:
             web_decision, performed=web_performed, sources=sources
         ),
     }
+    if religion_check is not None:
+        result["religious_check"] = religion_check
     await _complete_chat_request(request_record, result)
     return result
 
@@ -7866,6 +7932,12 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
             elif memory_result:
                 system_prompt += "\n\nConfirme brievement que cette preference a ete memorisee, sans en faire trop."
             system_prompt += _reply_language_instruction(message.lang)
+            # Religious question: verified sources now, check of the references before the answer is shown.
+            religion = await asyncio.to_thread(
+                _religion_grounding, message.content, bool(looks_like_code_request(message.content))
+            )
+            if religion:
+                system_prompt += religion.context
 
             # Optional web search (real phase events)
             sources = []
@@ -7920,9 +7992,17 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 delta = getattr(event, "content", None)
                 if delta:
                     full_text.append(delta)
-                    yield sse({"type": "delta", "content": delta})
+                    if not religion:  # a religious answer is shown once its references are checked
+                        yield sse({"type": "delta", "content": delta})
 
             answer = "".join(full_text)
+            religion_check, religion_extra = None, ""
+            if religion:
+                answer, religion_check, religion_extra = await _religion_review(
+                    answer, religion, message.content, system_prompt, profile, voice=bool(message.voice)
+                )
+                for start in range(0, len(answer), 400):
+                    yield sse({"type": "delta", "content": answer[start:start + 400]})
 
             # Save AI response
             assistant_doc = {
@@ -7947,6 +8027,7 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                 system_prompt,
                 message.content,
                 answer,
+                religion_extra,
                 *(item.get("content", "") for item in previous_history),
             )
             quota_finish = await _finish_text_quota(
@@ -7980,6 +8061,8 @@ async def chat_stream(message: MessageCreate, user: dict = Depends(get_current_u
                     web_decision, performed=web_performed, sources=sources
                 ),
             }
+            if religion_check is not None:
+                result["religious_check"] = religion_check
             await _complete_chat_request(request_record, result)
             yield sse({"type": "done", **result})
         except Exception as e:
@@ -14726,6 +14809,9 @@ async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_cu
     if topic:
         system += f"\n\nThème demandé pour cette session : {topic}."
     system += current_ai_context() + MODERATION_GUARD + IDENTITY_GUARD
+    religion = await asyncio.to_thread(_religion_grounding, f"{topic} {message.content}".strip(), False, True)
+    if religion:
+        system += religion.context
 
     history = await _latest_chronological(db.islam_messages.find(
         {"session_id": session_id, "user_id": user["id"]}, {"_id": 0}
@@ -14764,6 +14850,11 @@ async def islam_learning(message: IslamLearnMessage, user: dict = Depends(get_cu
         if refusal:
             raise HTTPException(status_code=429, detail=refusal)
         raise HTTPException(status_code=503, detail="Service IA temporairement indisponible. Réessaie.")
+    if religion and isinstance(response, str):
+        response, _, _ = await _religion_review(
+            response, religion, message.content, system,
+            {"provider": provider, "model_id": model, "params": {"max_tokens": 1200, "temperature": 0.3}},
+        )
 
     await db.islam_messages.insert_one({
         "id": str(uuid.uuid4()), "session_id": session_id, "user_id": user["id"],
