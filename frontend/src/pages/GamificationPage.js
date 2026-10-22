@@ -6,6 +6,7 @@ import { ArrowLeft, Award, Box, Check, Gift, Loader2, Sparkles, Star, Trophy, Za
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { useAuth } from '@/contexts/AuthContext';
+import { apiErrorMessage } from '@/utils/apiError';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -18,26 +19,41 @@ export default function GamificationPage() {
   const { getAuthHeader } = useAuth();
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const loadStatus = useCallback(async () => {
     const response = await axios.get(`${API}/gamification/status`, { headers: getAuthHeader() });
     setStatus(response.data);
   }, [getAuthHeader]);
 
-  useEffect(() => {
-    loadStatus().catch(() => toast.error('Impossible de charger les missions.'));
+  const loadInitialStatus = useCallback(() => {
+    setLoadError(false);
+    return loadStatus().catch(() => {
+      setLoadError(true);
+      toast.error('Impossible de charger les missions.');
+    });
   }, [loadStatus]);
+
+  useEffect(() => {
+    loadInitialStatus();
+  }, [loadInitialStatus]);
 
   const claimMission = async (mission) => {
     setBusy(true);
     try {
       const response = await axios.post(`${API}/gamification/missions/${mission.id}/claim`, {}, { headers: getAuthHeader() });
       toast.success(response.data.chest ? 'Mission validee + coffre rare obtenu.' : 'Mission validee, XP ajoutee.');
-      await loadStatus();
     } catch (error) {
-      toast.error(error?.response?.data?.detail || 'Mission indisponible.');
+      toast.error(apiErrorMessage(error, 'Mission indisponible.'));
+      return;
     } finally {
       setBusy(false);
+    }
+    // The claim succeeded: a failed refresh must not be reported as a failed claim.
+    try {
+      await loadStatus();
+    } catch (error) {
+      toast.error('Mission validée, mais l’affichage n’a pas pu être actualisé. Rechargez la page.');
     }
   };
 
@@ -45,14 +61,24 @@ export default function GamificationPage() {
     setBusy(true);
     try {
       const response = await axios.post(`${API}/gamification/chests/${chest.id}/open`, {}, { headers: getAuthHeader() });
-      toast.success(`Coffre ouvert : ${response.data.reward.rarity}, +${response.data.reward.xp} XP.`);
+      const reward = response.data?.reward;
+      toast.success(reward ? `Coffre ouvert : ${reward.rarity}, +${reward.xp} XP.` : 'Coffre ouvert.');
       await loadStatus();
     } catch (error) {
-      toast.error(error?.response?.data?.detail || 'Coffre indisponible.');
+      toast.error(apiErrorMessage(error, 'Coffre indisponible.'));
     } finally {
       setBusy(false);
     }
   };
+
+  if (!status && loadError) {
+    return (
+      <main className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center gap-4 px-6 text-center">
+        <p className="text-muted-foreground">Impossible de charger les missions pour le moment.</p>
+        <Button onClick={loadInitialStatus} className="rounded-full">Réessayer</Button>
+      </main>
+    );
+  }
 
   if (!status) {
     return (

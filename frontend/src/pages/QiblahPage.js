@@ -58,13 +58,17 @@ const QiblahPage = () => {
   }, [location]);
 
   const handleOrientation = (event) => {
-    let heading = event.alpha;
-    
-    // For iOS, we need to handle webkitCompassHeading
-    if (event.webkitCompassHeading) {
+    let heading = null;
+
+    if (typeof event.webkitCompassHeading === 'number') {
+      // iOS: degrees clockwise from north (0 is a valid value).
       heading = event.webkitCompassHeading;
+    } else if (event.absolute && typeof event.alpha === 'number') {
+      // Android: alpha turns counter-clockwise; convert it to a clockwise heading.
+      // Relative events (absolute === false) are not tied to north and are ignored.
+      heading = (360 - event.alpha) % 360;
     }
-    
+
     if (heading !== null) {
       setDeviceHeading(heading);
     }

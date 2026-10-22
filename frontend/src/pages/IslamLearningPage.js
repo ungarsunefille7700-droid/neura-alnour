@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/contexts/AuthContext';
@@ -92,17 +93,23 @@ export default function IslamLearningPage() {
         }));
         setTopics(chapters.length ? chapters : FALLBACK_TOPICS);
         if (isSignedIn) {
-          const [progressRes, notesRes, goalsRes, certificateRes] = await Promise.all([
+          // Each block loads independently: one failing call no longer hides the others.
+          const [progressRes, notesRes, goalsRes, certificateRes] = (await Promise.allSettled([
             axios.get(`${API}/islam-learning/progress`, { headers }),
             axios.get(`${API}/islam-learning/notes`, { headers }),
             axios.get(`${API}/islam-learning/goals`, { headers }),
             axios.get(`${API}/islam-learning/certificate`, { headers }),
-          ]);
-          setProgress({ favorite_topics: [], completed_topics: [], ...(progressRes.data || {}) });
-          setLevel(progressRes.data?.level || 'debutant');
-          setNotes(notesRes.data || []);
-          setGoals(goalsRes.data);
-          setCertificate(certificateRes.data);
+          ])).map((result) => (result.status === 'fulfilled' ? result.value : null));
+          if (progressRes) {
+            setProgress({ favorite_topics: [], completed_topics: [], ...(progressRes.data || {}) });
+            setLevel(progressRes.data?.level || 'debutant');
+          }
+          if (notesRes) setNotes(notesRes.data || []);
+          if (goalsRes) setGoals(goalsRes.data);
+          if (certificateRes) setCertificate(certificateRes.data);
+          if (!progressRes || !notesRes || !goalsRes || !certificateRes) {
+            toast.error('Une partie de votre progression n’a pas pu être chargée.');
+          }
         } else {
           setProgress({ completed_topics: [], favorite_topics: [], current_topic: null });
           setNotes([]);
@@ -151,9 +158,35 @@ export default function IslamLearningPage() {
     setSpeaking(false);
   };
 
+  const voiceErrorMessages = {
+    'not-allowed': "L'accès au microphone est refusé. Autorise le micro dans ton navigateur, ou écris ton message.",
+    'service-not-allowed': "La reconnaissance vocale est désactivée dans ce navigateur. Tu peux écrire ton message.",
+    'no-speech': "Je n'ai rien entendu. Rapproche-toi du micro et réessaie.",
+    'audio-capture': "Aucun microphone n'a été trouvé sur cet appareil.",
+    'network': "La reconnaissance vocale a besoin d'Internet. Vérifie ta connexion et réessaie.",
+  };
+
+  const showVoiceProblem = (content) => {
+    setMessages((current) => [...current, { role: 'assistant', content }]);
+  };
+
+  const stopVoiceInput = () => {
+    try {
+      recognitionRef.current?.stop();
+    } catch (error) {
+      // Already stopped.
+    }
+    setListening(false);
+  };
+
   const startVoiceInput = () => {
+    if (listening) {
+      // Second click: stop listening (the transcript heard so far is sent).
+      stopVoiceInput();
+      return;
+    }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition || busy || listening) {
+    if (!SpeechRecognition || busy) {
       if (!SpeechRecognition) {
         setMessages((current) => [...current, {
           role: 'assistant',
@@ -177,12 +210,23 @@ export default function IslamLearningPage() {
         .trim();
       if (finalText) setInput(finalText);
     };
-    recognition.onerror = () => setListening(false);
+    recognition.onerror = (event) => {
+      setListening(false);
+      if (event.error !== 'aborted') {
+        showVoiceProblem(voiceErrorMessages[event.error] || "Je n'ai pas pu utiliser le micro. Réessaie ou écris ton message.");
+      }
+    };
     recognition.onend = () => {
       setListening(false);
       if (finalText.trim()) sendMessage(finalText.trim(), selectedTopic, true);
     };
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (error) {
+      // e.g. InvalidStateError when the browser is still using the microphone.
+      setListening(false);
+      showVoiceProblem("Le micro n'a pas pu démarrer. Réessaie dans un instant ou écris ton message.");
+    }
   };
 
   const sendMessage = async (text, topic = selectedTopic, voiceReply = false) => {
@@ -225,10 +269,16 @@ export default function IslamLearningPage() {
   };
 
   const startTopic = (topic) => {
+    if (busy && selectedTopic?.id !== topic.id) {
+      // The lesson request would be dropped while an answer is in progress.
+      toast.info('Attends la fin de la réponse en cours avant de changer de thème.');
+      return;
+    }
     setSelectedTopic(topic);
     setNoteDraft(notes.find((note) => note.chapter_id === topic.id)?.content || '');
     setView('assistant');
-    if (messages.length === 0) {
+    // Start a lesson for a newly chosen topic, not only for the very first one.
+    if (messages.length === 0 || selectedTopic?.id !== topic.id) {
       sendMessage(
         `Commence une lecon structuree sur "${topic.title}", adaptee a mon niveau. Cite les sources quand possible, reste prudent, termine par une question de revision.`,
         topic
@@ -518,7 +568,7 @@ export default function IslamLearningPage() {
                       placeholder="Pose ta question sur l'Islam..."
                       className="flex-1 resize-none rounded-lg border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary max-h-32"
                     />
-                    <Button type="button" variant="outline" onClick={startVoiceInput} disabled={busy || listening || !isSignedIn} size="icon" aria-label="Parler">
+                    <Button type="button" variant="outline" onClick={startVoiceInput} disabled={busy || !isSignedIn} size="icon" aria-label={listening ? "Arrêter l'écoute" : 'Parler'}>
                       {listening ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
                     </Button>
                     <Button type="submit" disabled={busy || !input.trim()} size="icon" aria-label={t('common.send')}>

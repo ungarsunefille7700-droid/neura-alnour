@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { LEGAL_LINKS } from '@/pages/LegalPage';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
@@ -24,7 +25,7 @@ import {
   Building,
   GraduationCap,
   Video,
-  LockKeyhole
+  Languages
 } from 'lucide-react';
 
 const LandingPage = () => {
@@ -46,13 +47,7 @@ const LandingPage = () => {
     { icon: Building, title: t('feat.mosques.title'), description: t('feat.mosques.desc'), color: "text-secondary", path: "/mosques" },
     { icon: GraduationCap, title: t('feat.islam.title'), description: t('feat.islam.desc'), color: "text-primary", path: "/islam-learning" },
     { icon: Video, title: "Rappels", description: "Regarder des rappels et enseignements directement dans l’application.", color: "text-secondary", path: "/reminders" },
-    {
-      image: "/images/neuraco-card.png",
-      title: "NeuraCo",
-      description: "Votre agent IA pour développer, créer et travailler directement sur votre PC.",
-      path: user ? "/subscription" : "/auth",
-      locked: !user || (!user.is_vip && !["pro", "neura_plus", "neura_ultra"].includes(user.subscription))
-    }
+    { icon: Languages, title: "Langues", description: "Apprendre l'arabe, la darija, le rifain, l'amazigh, l'anglais, l'espagnol et bien d'autres avec un professeur IA, à l'écrit et à l'oral.", color: "text-primary", path: "/language-tutor" }
   ];
 
   const plans = [
@@ -61,12 +56,18 @@ const LandingPage = () => {
       price: "0€",
       period: "",
       features: [
-        "Messages IA avec quota",
-        "Captures d’écran limitées",
-        "Coran complet avec audio",
-        "Horaires de prière avec Adhan",
+        "Assistant IA Neura Al Noor",
+        "Réflexion : Instantané",
+        "3 styles de réponse au choix (ChatGPT, Claude, Gemini)",
+        "Messages IA avec quota par conversation",
+        "Mémoire : Neura se souvient de toi",
+        "Création de code avec projet téléchargeable (.zip)",
+        "Coran complet avec audio et Moushaf",
+        "Suivi de mémorisation du Coran",
+        "Horaires de prière avec Adhan, Qibla et mosquées",
         "Invocations",
         "Quiz islamiques",
+        "Académie islamique et tuteur de langues",
         "Module Ramadan et Aïd"
       ],
       highlight: false
@@ -77,15 +78,10 @@ const LandingPage = () => {
       period: "/mois",
       features: [
         "Tout du plan Gratuit",
-        "Quotas IA avancée fortement augmentés",
-        "Conversations plus longues",
-        "Jusqu’à 50 captures d’écran par 24 h",
-        "Analyse d’images prolongée",
-        "Mémoire et contexte étendus",
-        "Historique complet",
-        "Réponses détaillées",
-        "Export de conversations",
-        "Génération d’images avec quota étendu"
+        "Réflexion : Instantané et Moyenne",
+        '2× plus d’IA par jour que l’offre gratuite',
+        'Export des conversations (PDF ou texte)',
+        "Historique complet de tes conversations",
       ],
       highlight: true
     },
@@ -96,12 +92,9 @@ const LandingPage = () => {
       description: "Pour une utilisation intensive",
       features: [
         "Tout du plan Mongo",
-        "Accès maximal aux modèles avancés",
-        "Quotas IA trois fois supérieurs à Mongo",
-        "Jusqu’à 80 captures d’écran toutes les 3 h",
-        "Analyse d’images fortement prolongée",
-        "Jusqu’à 50 générations d’images par 24 h",
-        "Mémoire et contexte maximaux"
+        'Réflexion : jusqu’à Élevée',
+        "Mode Work pour les tâches longues",
+        "4× plus d’IA par jour que l’offre gratuite"
       ],
       highlight: false
     }
@@ -128,7 +121,6 @@ const LandingPage = () => {
             <Link to="/duas" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.duas')}</Link>
             <Link to="/quiz" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.quiz')}</Link>
             <Link to="/learn" className="text-muted-foreground hover:text-foreground transition-colors">{t('nav.learn')}</Link>
-            <Link to="/developer" className="text-primary font-medium hover:opacity-80 transition-opacity">{t('nav.developer')}</Link>
             <Link to="/language-tutor" className="text-primary font-medium hover:opacity-80 transition-opacity">Langues</Link>
             <Link to="/islam-learning" className="text-primary font-medium hover:opacity-80 transition-opacity">Islam</Link>
             <Link to="/reminders" className="text-muted-foreground hover:text-foreground transition-colors">Rappels</Link>
@@ -170,18 +162,29 @@ const LandingPage = () => {
 
         {/* Mobile Menu */}
         {mobileMenuOpen && (
-          <div className="min-[1700px]:hidden absolute top-full left-0 right-0 max-h-[calc(100vh-5rem)] overflow-y-auto glass border-t border-border p-4 space-y-4">
+          <div className="min-[1700px]:hidden absolute top-full left-0 right-0 max-h-[calc(100vh-5rem)] overflow-y-auto bg-background border-t border-border p-4 space-y-4">
             <Link to="/quran" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quran')}</Link>
             <Link to="/mushaf" className="block py-2 text-muted-foreground hover:text-foreground">Moushaf</Link>
             <Link to="/prayer-times" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.prayers')}</Link>
             <Link to="/duas" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.duas')}</Link>
             <Link to="/quiz" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.quiz')}</Link>
             <Link to="/learn" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.learn')}</Link>
-            <Link to="/developer" className="block py-2 text-primary font-medium">{t('nav.developer')}</Link>
             <Link to="/language-tutor" className="block py-2 text-primary font-medium">Langues</Link>
             <Link to="/islam-learning" className="block py-2 text-primary font-medium">Islam</Link>
             <Link to="/reminders" className="block py-2 text-muted-foreground hover:text-foreground">Rappels</Link>
             <Link to="/support" className="block py-2 text-muted-foreground hover:text-foreground">{t('nav.support')}</Link>
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="w-full text-sm rounded-full bg-muted px-3 py-2 border-0 outline-none cursor-pointer"
+              title="Langue / Language"
+              aria-label="Langue / Language"
+              data-testid="lang-selector-mobile"
+            >
+              {languages.map((l) => (
+                <option key={l.code} value={l.code}>{l.native}</option>
+              ))}
+            </select>
             <div className="flex items-center gap-4 pt-2">
               <button onClick={toggleTheme} className="p-2 rounded-full hover:bg-muted">
                 {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
@@ -275,26 +278,9 @@ const LandingPage = () => {
                 data-testid={`feature-card-${index}`}
               >
                 <div className={`w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-6 overflow-hidden group-hover:scale-110 transition-transform ${feature.color || ''}`}>
-                  {feature.image ? (
-                    <img
-                      src={feature.image}
-                      alt=""
-                      loading="lazy"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <feature.icon className="w-7 h-7" />
-                  )}
+                  <feature.icon className="w-7 h-7" />
                 </div>
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <h3 className="text-xl font-semibold">{feature.title}</h3>
-                  {feature.locked && (
-                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      <LockKeyhole className="w-3.5 h-3.5" />
-                      Disponible avec Plus
-                    </span>
-                  )}
-                </div>
+                <h3 className="text-xl font-semibold mb-3">{feature.title}</h3>
                 <p className="text-muted-foreground">{feature.description}</p>
               </Card>
             ))}
@@ -314,7 +300,7 @@ const LandingPage = () => {
             </p>
           </div>
           
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {plans.map((plan, index) => (
               <Card 
                 key={index}
@@ -328,7 +314,7 @@ const LandingPage = () => {
                 )}
                 {plan.highlight && (
                   <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium mb-4">
-                    <Star className="w-3 h-3" /> Populaire
+                    <Star className="w-3 h-3" /> Conseillé
                   </span>
                     )}
                     <h3 className="text-xl font-semibold mb-2">{plan.name}</h3>
@@ -408,6 +394,7 @@ const LandingPage = () => {
               <Link to="/learn" className="hover:text-foreground transition-colors">{t('nav.learn')}</Link>
               <Link to="/support" className="hover:text-foreground transition-colors">{t('nav.support')}</Link>
               <Link to="/subscription" className="hover:text-foreground transition-colors">Abonnements</Link>
+              {LEGAL_LINKS.map(([to, label]) => <Link key={to} to={to} className="hover:text-foreground transition-colors">{label}</Link>)}
             </div>
             <p className="text-sm text-muted-foreground">
               © {new Date().getFullYear()} NEURA AL-NOUR. Tous droits réservés.

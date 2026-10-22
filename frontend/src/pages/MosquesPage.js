@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { toast } from 'sonner';
+import { apiErrorMessage } from '@/utils/apiError';
 import { 
   MapPin,
   Sun,
@@ -27,6 +28,10 @@ const MosquesPage = () => {
   const [location, setLocation] = useState(null);
   const [locationName, setLocationName] = useState('');
   const [radius, setRadius] = useState(5000);
+  // Set when the search itself failed (e.g. map service unavailable, HTTP 503),
+  // so a failure is never shown as "no mosque found".
+  const [searchError, setSearchError] = useState('');
+  const requestSeqRef = useRef(0);
 
   useEffect(() => {
     getLocation();
@@ -77,7 +82,11 @@ const MosquesPage = () => {
   };
 
   const fetchMosques = async () => {
+    // Only the answer to the latest location/radius is applied.
+    const seq = requestSeqRef.current + 1;
+    requestSeqRef.current = seq;
     setLoading(true);
+    setSearchError('');
     try {
       const response = await axios.get(`${API}/mosques/nearby`, {
         params: {
@@ -86,12 +95,15 @@ const MosquesPage = () => {
           radius: radius
         }
       });
-      setMosques(response.data);
+      if (seq !== requestSeqRef.current) return;
+      setMosques(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
+      if (seq !== requestSeqRef.current) return;
       console.error('Error fetching mosques:', error);
-      toast.error('Erreur lors de la recherche des mosquées');
+      setMosques([]);
+      setSearchError(apiErrorMessage(error, 'La recherche des mosquées a échoué.'));
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
 
@@ -175,16 +187,30 @@ const MosquesPage = () => {
               <Loader2 className="w-8 h-8 animate-spin text-primary mb-4" />
               <p className="text-muted-foreground">Recherche des mosquées...</p>
             </div>
+          ) : searchError ? (
+            <Card className="p-8 text-center" data-testid="mosques-error">
+              <Building className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+              <p className="text-muted-foreground mb-4">{searchError}</p>
+              <Button onClick={fetchMosques} className="rounded-full">Réessayer</Button>
+            </Card>
           ) : mosques.length === 0 ? (
             <Card className="p-8 text-center">
               <Building className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
               <p className="text-lg font-medium mb-2">Aucune mosquée trouvée</p>
-              <p className="text-muted-foreground mb-4">
-                Essayez d'augmenter le rayon de recherche
-              </p>
-              <Button onClick={() => setRadius(20000)} className="rounded-full">
-                Rechercher dans 20 km
-              </Button>
+              {radius < 20000 ? (
+                <>
+                  <p className="text-muted-foreground mb-4">
+                    Essayez d'augmenter le rayon de recherche
+                  </p>
+                  <Button onClick={() => setRadius(20000)} className="rounded-full">
+                    Rechercher dans 20 km
+                  </Button>
+                </>
+              ) : (
+                <p className="text-muted-foreground">
+                  Aucune mosquée répertoriée dans un rayon de 20 km autour de cette position.
+                </p>
+              )}
             </Card>
           ) : (
             <>

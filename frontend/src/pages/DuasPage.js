@@ -56,6 +56,10 @@ const DuasPage = () => {
   useEffect(() => {
     fetchDuas();
     fetchCategories();
+    // Stop the recitation when leaving the page.
+    return () => {
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    };
   }, []);
 
   const fetchDuas = async () => {
@@ -98,9 +102,12 @@ const DuasPage = () => {
       utterance.lang = 'ar-SA';
       utterance.rate = 0.8;
       
-      utterance.onend = () => setPlayingDua(null);
-      utterance.onerror = () => {
-        setPlayingDua(null);
+      // Only the utterance still playing may reset the state: cancel() makes the
+      // previous one end with an "interrupted"/"canceled" error, which is expected.
+      utterance.onend = () => setPlayingDua((current) => (current === dua.id ? null : current));
+      utterance.onerror = (event) => {
+        if (['interrupted', 'canceled'].includes(event.error)) return;
+        setPlayingDua((current) => (current === dua.id ? null : current));
         toast.error('Erreur de lecture audio');
       };
       

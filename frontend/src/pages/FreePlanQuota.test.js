@@ -10,9 +10,9 @@ describe('free plan quota wording', () => {
     const subscription = readPage('SubscriptionPage.js');
     const landing = readPage('LandingPage.js');
     expect(subscription).toContain('Messages IA avec quota');
-    expect(subscription).toContain('Captures d’écran limitées');
+    expect(subscription).toContain('Mémoire : Neura se souvient de toi');
     expect(landing).toContain('Messages IA avec quota');
-    expect(landing).toContain('Captures d’écran limitées');
+    expect(landing).toContain('Mémoire : Neura se souvient de toi');
     expect(subscription).not.toContain('Messages texte illimités');
     expect(landing).not.toContain('Messages illimités');
   });
@@ -25,22 +25,26 @@ describe('free plan quota wording', () => {
     expect(subscription).not.toContain('price: { monthly: 4.99');
     expect(landing).not.toContain('name: "Comme Toi"');
     expect(landing).not.toContain('price: "4,99€"');
-    ['Mongo', 'Plus', 'Développeur', 'Neura+', 'Neura Ultra'].forEach((name) => {
+    ['Mongo', 'Plus', 'Neura+', 'Neura Ultra'].forEach((name) => {
       expect(subscription).toContain(`name: '${name}'`);
     });
-    ['8.99', 'monthly: 22', '19.99', '119.99', '299.99'].forEach((price) => {
+    ['8.99', 'monthly: 22', '119.99', '299.99'].forEach((price) => {
       expect(subscription).toContain(price);
     });
+  });
+
+  test('no longer sells the Developer plan (19.99 €)', () => {
+    const subscription = readPage('SubscriptionPage.js');
+    expect(subscription).not.toContain("id: 'developer'");
+    expect(subscription).not.toContain('monthly: 19.99');
   });
 
   test('renames only Pro to Plus and removes paid Islamic claims', () => {
     const subscription = readPage('SubscriptionPage.js');
     const landing = readPage('LandingPage.js');
-    ['Pour une utilisation intensive', 'Accès maximal aux modèles avancés',
-      'Quotas IA trois fois supérieurs à Mongo',
-      'Jusqu’à 80 captures d’écran toutes les 3 h',
-      'Jusqu’à 50 générations d’images par 24 h',
-      'Mémoire et contexte maximaux'].forEach((label) => {
+    ['Pour une utilisation intensive', 'Réflexion : jusqu’à Élevée',
+      '4× plus d’IA par jour que l’offre gratuite',
+      'Mode Work pour les tâches longues'].forEach((label) => {
       expect(subscription).toContain(label);
       expect(landing).toContain(label);
     });
@@ -54,20 +58,15 @@ describe('free plan quota wording', () => {
     expect(subscription).not.toContain("name: 'Pro'");
   });
 
-  test('shows the exact Mongo quota offer without unlimited claims', () => {
+  test('shows the exact Mongo offer, only what really works at 0 €, without unlimited claims', () => {
     const subscription = readPage('SubscriptionPage.js');
     const landing = readPage('LandingPage.js');
     const expected = [
       'Tout du plan Gratuit',
-      'Quotas IA avancée fortement augmentés',
-      'Conversations plus longues',
-      'Jusqu’à 50 captures d’écran par 24 h',
-      'Analyse d’images prolongée',
-      'Mémoire et contexte étendus',
-      'Historique complet',
-      'Réponses détaillées',
-      'Export de conversations',
-      'Génération d’images avec quota étendu'
+      'Réflexion : Instantané et Moyenne',
+      '2× plus d’IA par jour que l’offre gratuite',
+      'Export des conversations (PDF ou texte)',
+      'Historique complet de tes conversations'
     ];
     expected.forEach((feature) => {
       expect(subscription).toContain(feature);
@@ -77,6 +76,11 @@ describe('free plan quota wording', () => {
     expect(subscription).not.toContain('Images IA illimitées');
     expect(landing).not.toContain('Screens illimités');
     expect(landing).not.toContain('Images IA illimitées');
+    // Option A (no paid AI): no other company's model and nothing that needs a paid provider.
+    ['GPT-6', 'Claude Opus', 'Gemini 3.8', 'génération', 'captures', 'quasi illimit', 'Priorité serveur'].forEach((claim) => {
+      expect(subscription).not.toContain(claim);
+      expect(landing).not.toContain(claim);
+    });
   });
 });
 
@@ -107,7 +111,7 @@ describe('server-driven model selector', () => {
   test('keeps Plus intelligence modes fully server-driven', () => {
     const chat = readPage('ChatPage.js');
     expect(chat).toContain('response.data?.intelligence_modes');
-    expect(chat).toContain('data-testid="intelligence-mode-selector"');
+    expect(chat).toContain('<ReasoningLevelPicker');
     expect(chat).toContain('intelligence_mode: selectedIntelligenceMode');
     expect(chat).toContain('activeModel?.levels_available');
     expect(chat).toContain('activeModel?.selection_reason');
@@ -135,7 +139,8 @@ describe('server-driven model selector', () => {
     expect(chat).toContain('data-testid="tools-web"');
     expect(chat).toContain('data-testid="tools-create-image"');
     expect(chat).toContain('web_mode: webMode');
-    expect(chat).toContain('`${API}/developer/intent`');
+    expect(chat).not.toContain('`${API}/developer/intent`');
+    expect(chat).not.toContain('`${API}/developer/chat`');
     expect(chat).not.toContain('data-testid="web-search-toggle"');
     expect(chat).not.toContain('data-testid="dev-mode-toggle"');
     expect(chat).not.toContain('data-testid="generate-image-btn"');

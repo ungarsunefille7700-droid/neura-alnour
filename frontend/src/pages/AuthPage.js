@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,10 +9,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { waitForBackendWarmup } from '@/utils/backendWarmup';
+import { apiErrorMessage } from '@/utils/apiError';
 import {
   clearAuthReturnPath,
   rememberAuthReturnPath,
-  validateNeuraCoReturnPath
+  validateAuthReturnPath
 } from '@/utils/authReturnPath';
 import { toast } from 'sonner';
 import { Sparkles, Mail, Lock, User, ArrowLeft, Moon, Sun, Eye, EyeOff } from 'lucide-react';
@@ -28,13 +29,24 @@ const AuthPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const queryReturnPath = new URLSearchParams(location.search).get('return_to');
-  const returnPath = validateNeuraCoReturnPath(queryReturnPath)
-    || validateNeuraCoReturnPath(location.state?.from)
+  const returnPath = validateAuthReturnPath(queryReturnPath)
+    || validateAuthReturnPath(location.state?.from)
     || '/chat';
+
+  // Coming back from the Google page with the browser Back button can restore
+  // this page from cache with the buttons still disabled.
+  useEffect(() => {
+    const resetOnRestore = (event) => { if (event.persisted) setLoading(false); };
+    window.addEventListener('pageshow', resetOnRestore);
+    return () => window.removeEventListener('pageshow', resetOnRestore);
+  }, []);
 
   // Login form
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  // Accounts with two-factor authentication must also send their code.
+  const [twoFactorRequired, setTwoFactorRequired] = useState(false);
+  const [twoFactorCode, setTwoFactorCode] = useState('');
 
   // Register form
   const [registerName, setRegisterName] = useState('');
@@ -44,7 +56,7 @@ const AuthPage = () => {
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   const handleGoogleLogin = async () => {
     const redirectUrl = new URL('/auth/callback', window.location.origin);
-    const neuraCoReturnPath = validateNeuraCoReturnPath(returnPath);
+    const neuraCoReturnPath = validateAuthReturnPath(returnPath);
     if (neuraCoReturnPath) {
       rememberAuthReturnPath(neuraCoReturnPath);
       redirectUrl.searchParams.set('return_to', neuraCoReturnPath);
@@ -64,13 +76,24 @@ const AuthPage = () => {
       toast.error('Veuillez remplir tous les champs');
       return;
     }
+    if (twoFactorRequired && !twoFactorCode.trim()) {
+      toast.error('Entrez votre code de double authentification');
+      return;
+    }
     setLoading(true);
     try {
-      await login(loginEmail, loginPassword);
+      await login(loginEmail, loginPassword, twoFactorRequired ? twoFactorCode.trim() : undefined);
       toast.success('Connexion réussie!');
       navigate(returnPath);
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Erreur de connexion');
+      const code = error?.response?.data?.detail?.code;
+      if (code === 'two_factor_required') {
+        setTwoFactorRequired(true);
+        toast.info('Entrez le code de votre application d’authentification.');
+      } else {
+        if (code === 'two_factor_invalid') setTwoFactorCode('');
+        toast.error(apiErrorMessage(error, 'Erreur de connexion'));
+      }
     } finally {
       setLoading(false);
     }
@@ -82,8 +105,8 @@ const AuthPage = () => {
       toast.error('Veuillez remplir tous les champs');
       return;
     }
-    if (registerPassword.length < 6) {
-      toast.error('Le mot de passe doit contenir au moins 6 caractères');
+    if (registerPassword.length < 8) {
+      toast.error('Le mot de passe doit contenir au moins 8 caractères');
       return;
     }
     setLoading(true);
@@ -92,7 +115,7 @@ const AuthPage = () => {
       toast.success('Compte créé avec succès!');
       navigate(returnPath);
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Erreur lors de l\'inscription');
+      toast.error(apiErrorMessage(error, 'Erreur lors de l\'inscription'));
     } finally {
       setLoading(false);
     }
@@ -141,7 +164,11 @@ const AuthPage = () => {
                         type="email"
                         placeholder="votre@email.com"
                         value={loginEmail}
-                        onChange={(e) => setLoginEmail(e.target.value)}
+                        onChange={(e) => {
+                          setLoginEmail(e.target.value);
+                          setTwoFactorRequired(false);
+                          setTwoFactorCode('');
+                        }}
                         className="pl-10"
                         data-testid="login-email-input"
                       />
@@ -169,6 +196,22 @@ const AuthPage = () => {
                       </button>
                     </div>
                   </div>
+                  {twoFactorRequired && (
+                    <div className="space-y-2" data-testid="login-2fa">
+                      <Label htmlFor="login-2fa-code">Code de double authentification</Label>
+                      <Input
+                        id="login-2fa-code"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        autoFocus
+                        placeholder="123456 ou code de secours"
+                        value={twoFactorCode}
+                        onChange={(e) => setTwoFactorCode(e.target.value)}
+                        maxLength={32}
+                        data-testid="login-2fa-input"
+                      />
+                    </div>
+                  )}
                   <Button 
                     type="submit" 
                     className="w-full rounded-full h-12" 
@@ -308,8 +351,9 @@ const AuthPage = () => {
           </Card>
 
           {/* Disclaimer */}
-          <p className="text-xs text-center text-muted-foreground mt-6 max-w-sm mx-auto">
-            En vous inscrivant, vous acceptez nos conditions d'utilisation. 
+          <p className="text-xs text-center text-muted-foreground mt-6 max-w-sm mx-auto" data-testid="register-legal">
+            En vous inscrivant, vous acceptez nos <Link to="/cgu" className="underline">conditions d'utilisation</Link> et
+            notre <Link to="/confidentialite" className="underline">politique de confidentialité</Link>.
             NEURA AL-NOUR respecte le RGPD et ne vend jamais vos données.
           </p>
         </div>

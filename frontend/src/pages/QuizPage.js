@@ -78,7 +78,10 @@ const QuizPage = () => {
 
     try {
       const params = category ? `?category=${category}` : '';
-      const response = await axios.post(`${API}/quiz/start${params}`);
+      const response = await axios.post(`${API}/quiz/start${params}`, null, { headers: user ? getAuthHeader() : {} });
+      if (!Array.isArray(response.data?.questions) || response.data.questions.length === 0) {
+        throw new Error('empty quiz');
+      }
       setSessionId(response.data.session_id);
       setQuestions(response.data.questions);
       setQuizState('playing');
@@ -104,7 +107,9 @@ const QuizPage = () => {
       setAnswers(prev => [...prev, { index: currentIndex, answer: answerIndex, ...response.data }]);
     } catch (error) {
       console.error('Error submitting answer:', error);
-      toast.error('Erreur lors de la soumission');
+      // Unlock the options so the same question can be answered again.
+      setSelectedAnswer(null);
+      toast.error('Erreur lors de la soumission. Réessayez.');
     } finally {
       setSubmitting(false);
     }
@@ -126,6 +131,9 @@ const QuizPage = () => {
   const scorePercent = totalAnswered > 0 ? Math.round((correctCount / totalAnswered) * 100) : 0;
 
   const currentQuestion = questions[currentIndex];
+  // AI-generated questions can come back without usable answer choices.
+  const currentOptions = Array.isArray(currentQuestion?.options) ? currentQuestion.options : [];
+  const questionUnusable = Boolean(currentQuestion) && currentOptions.length < 2;
 
   // ====== IDLE STATE ======
   if (quizState === 'idle') {
@@ -352,8 +360,17 @@ const QuizPage = () => {
                 {currentQuestion.question}
               </h2>
 
+              {questionUnusable && (
+                <div className="text-center space-y-4" data-testid="quiz-question-unusable">
+                  <p className="text-muted-foreground">Cette question n'a pas pu être générée correctement.</p>
+                  <Button onClick={nextQuestion} className="rounded-full">
+                    {currentIndex + 1 >= questions.length ? 'Voir les résultats' : 'Question suivante'}
+                  </Button>
+                </div>
+              )}
+
               <div className="space-y-3">
-                {currentQuestion.options.map((option, index) => {
+                {currentOptions.map((option, index) => {
                   let optionClass = 'border-border hover:border-primary/50 hover:bg-muted';
                   if (selectedAnswer !== null && answerResult) {
                     if (index === answerResult.correct_answer) {

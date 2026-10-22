@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
 import {
-  ArrowLeft, BarChart3, Crown, Gift, History, Loader2, Search,
+  ArrowLeft, BarChart3, Crown, Gift, History, KeyRound, Loader2, Search,
   ShieldCheck, Trophy, Users, AlertTriangle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import ApiKeysPanel from '@/components/admin/ApiKeysPanel';
 import { useAuth } from '@/contexts/AuthContext';
+import { apiErrorMessage } from '@/utils/apiError';
 import { useLanguage } from '@/contexts/LanguageContext';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -34,6 +36,9 @@ export default function FounderAdminPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const searchSeqRef = useRef(0);
   const [overview, setOverview] = useState(null);
   const [users, setUsers] = useState([]);
   const [search, setSearch] = useState('');
@@ -67,8 +72,10 @@ export default function FounderAdminPage() {
 
   useEffect(() => {
     setLoading(true);
+    setLoadError(false);
     loadDashboard()
       .catch((error) => {
+        setLoadError(true);
         if (error?.response?.status === 403) {
           toast.error('Acces reserve aux fondateurs et administrateurs.');
           navigate('/');
@@ -77,15 +84,18 @@ export default function FounderAdminPage() {
         }
       })
       .finally(() => setLoading(false));
-  }, [loadDashboard, navigate]);
+  }, [loadDashboard, navigate, reloadKey]);
 
   const searchUsers = async (value) => {
     setSearch(value);
+    // One request per keystroke: only the answer to the latest query is kept.
+    const seq = searchSeqRef.current + 1;
+    searchSeqRef.current = seq;
     try {
       const response = await axios.get(`${API}/founder-admin/users?search=${encodeURIComponent(value)}`, { headers });
-      setUsers(response.data || []);
+      if (seq === searchSeqRef.current) setUsers(response.data || []);
     } catch (error) {
-      toast.error('Recherche impossible.');
+      if (seq === searchSeqRef.current) toast.error('Recherche impossible.');
     }
   };
 
@@ -110,7 +120,7 @@ export default function FounderAdminPage() {
       await loadDashboard();
       await openUser(selectedUser);
     } catch (error) {
-      toast.error(error?.response?.data?.detail || 'Impossible doffrir labonnement.');
+      toast.error(apiErrorMessage(error, 'Impossible doffrir labonnement.'));
     }
   };
 
@@ -124,7 +134,7 @@ export default function FounderAdminPage() {
       toast.success('Signalement mis a jour.');
       await loadDashboard();
     } catch (error) {
-      toast.error(error?.response?.data?.detail || 'Impossible de mettre a jour le signalement.');
+      toast.error(apiErrorMessage(error, 'Impossible de mettre a jour le signalement.'));
     }
   };
 
@@ -132,6 +142,16 @@ export default function FounderAdminPage() {
     return (
       <main className="min-h-screen bg-background text-foreground flex items-center justify-center">
         <Loader2 className="w-6 h-6 animate-spin text-primary mr-3" /> {t('common.loading')}
+      </main>
+    );
+  }
+
+  if (loadError) {
+    // Without this, a failed load would display a dashboard full of zeros.
+    return (
+      <main className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center gap-4 px-6 text-center">
+        <p className="text-muted-foreground">Panel admin indisponible pour le moment.</p>
+        <Button onClick={() => setReloadKey((key) => key + 1)} className="rounded-full">Réessayer</Button>
       </main>
     );
   }
@@ -155,6 +175,7 @@ export default function FounderAdminPage() {
               ['leaderboard', 'Classements', Trophy],
               ['reports', 'Signalements', AlertTriangle],
               ['logs', 'Logs', History],
+              ['api', 'API & IA', KeyRound],
             ].map(([key, label, Icon]) => (
               <button
                 key={key}
@@ -342,6 +363,8 @@ export default function FounderAdminPage() {
             {!reports.length && <p className="py-8 text-center text-muted-foreground">Aucun signalement.</p>}
           </div>
         )}
+
+        {tab === 'api' && <ApiKeysPanel headers={headers} />}
 
         {tab === 'logs' && (
           <div className="grid lg:grid-cols-2 gap-6">

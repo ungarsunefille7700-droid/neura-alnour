@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { toast } from 'sonner';
+import { getPrayerLocation, savePrayerLocation } from '@/utils/notificationPreferences';
 import { 
   Moon as MoonIcon, 
   Sun,
@@ -23,6 +24,20 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Hijri date from the browser's Umm al-Qura calendar (same date as Aladhan).
+// Ramadan is month 9. Local moon sighting can shift the start by a day.
+export const getHijriInfo = (date = new Date()) => {
+  try {
+    const month = Number(new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', { month: 'numeric' }).format(date));
+    const label = new Intl.DateTimeFormat('fr-FR-u-ca-islamic-umalqura', {
+      day: 'numeric', month: 'long', year: 'numeric'
+    }).format(date);
+    return { isRamadan: month === 9, label };
+  } catch {
+    return null;
+  }
+};
+
 const RamadanPage = () => {
   const { theme, toggleTheme } = useTheme();
   const [ramadanTimes, setRamadanTimes] = useState(null);
@@ -30,6 +45,8 @@ const RamadanPage = () => {
   const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [timesError, setTimesError] = useState(false);
+  const hijri = getHijriInfo(currentTime);
 
   useEffect(() => {
     getLocation();
@@ -48,22 +65,25 @@ const RamadanPage = () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          setLocation({
+          const nextLocation = {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude
-          });
+          };
+          savePrayerLocation(nextLocation);
+          setLocation(nextLocation);
         },
-        () => {
-          setLocation({ latitude: 48.8566, longitude: 2.3522 });
-        }
+        // Refused or unavailable: last known position, else Paris (same as the prayer reminders).
+        () => setLocation(getPrayerLocation()),
+        { timeout: 10000, maximumAge: 10 * 60 * 1000 }
       );
     } else {
-      setLocation({ latitude: 48.8566, longitude: 2.3522 });
+      setLocation(getPrayerLocation());
     }
   };
 
   const fetchRamadanTimes = async () => {
     setLoading(true);
+    setTimesError(false);
     try {
       const response = await axios.get(`${API}/ramadan/times`, {
         params: {
@@ -73,6 +93,7 @@ const RamadanPage = () => {
       });
       setRamadanTimes(response.data);
     } catch (error) {
+      setTimesError(true);
       console.error('Error fetching Ramadan times:', error);
       toast.error('Erreur lors du chargement des horaires');
     } finally {
@@ -140,7 +161,17 @@ const RamadanPage = () => {
             <MoonIcon className="w-16 h-16 text-secondary mx-auto mb-4" />
             <h1 className="text-4xl font-bold mb-2">رمضان كريم</h1>
             <p className="text-xl text-muted-foreground">Ramadan Kareem</p>
+            {hijri && (
+              <p className="mt-2 text-sm text-muted-foreground" data-testid="hijri-date">{hijri.label}</p>
+            )}
           </div>
+
+          {hijri && !hijri.isRamadan && (
+            <Card className="p-4 mb-6 text-center text-sm border-secondary/40 bg-secondary/10" data-testid="not-ramadan-notice">
+              Nous ne sommes pas pendant le Ramadan. Les horaires ci-dessous (fin du suhoor et iftar)
+              valent pour un jeûne aujourd'hui, par exemple un jeûne surérogatoire.
+            </Card>
+          )}
 
           {/* Current Time */}
           <Card className="p-6 mb-6 text-center glass">
@@ -159,6 +190,12 @@ const RamadanPage = () => {
           ) : (
             <>
               {/* Fasting Times */}
+              {timesError || !ramadanTimes ? (
+                <Card className="p-8 mb-8 text-center" data-testid="ramadan-times-error">
+                  <p className="text-muted-foreground mb-4">Les horaires de jeûne n'ont pas pu être chargés.</p>
+                  <Button onClick={fetchRamadanTimes} className="rounded-full">Réessayer</Button>
+                </Card>
+              ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 {/* Suhoor */}
                 <Card className="p-6 bg-gradient-to-br from-blue-500/10 to-transparent border-blue-500/20">
@@ -196,6 +233,7 @@ const RamadanPage = () => {
                   </p>
                 </Card>
               </div>
+              )}
 
               {/* Dua for Iftar */}
               <Card className="p-6 mb-8 text-center">

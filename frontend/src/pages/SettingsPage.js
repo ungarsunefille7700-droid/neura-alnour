@@ -7,8 +7,21 @@ import { Label } from '@/components/ui/label';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getNotificationPreferences, saveNotificationPreferences } from '@/utils/notificationPreferences';
+import {
+  ADHAN_VOICES,
+  getAdhanVoice,
+  getNotificationPreferences,
+  hasSavedPrayerLocation,
+  locateForPrayers,
+  saveAdhanPreference,
+  saveAdhanVoice,
+  saveNotificationPreferences
+} from '@/utils/notificationPreferences';
 import { toast } from 'sonner';
+import { planLabel } from '@/utils/planLabels';
+import MemoryCard from '@/components/MemoryCard';
+import AccountDataCard from '@/components/AccountDataCard';
+import PrioritySupportCard from '@/components/PrioritySupportCard';
 import { 
   Settings as SettingsIcon,
   Sun,
@@ -34,6 +47,29 @@ const SettingsPage = () => {
   const initialNotificationPreferences = getNotificationPreferences();
   const [notifications, setNotifications] = useState(initialNotificationPreferences.notifications);
   const [prayerReminders, setPrayerReminders] = useState(initialNotificationPreferences.prayerReminders);
+  const [adhan, setAdhan] = useState(initialNotificationPreferences.adhan);
+  const [adhanVoiceId, setAdhanVoiceId] = useState(() => getAdhanVoice().id);
+
+  const [hasLocation, setHasLocation] = useState(hasSavedPrayerLocation);
+
+  const handleAdhanChange = async (enabled) => {
+    setAdhan(enabled);
+    saveAdhanPreference(enabled);
+    if (!enabled) {
+      toast.success('Adhan désactivé');
+      return;
+    }
+    // The Adhan follows the prayer times of the place where the person is.
+    const result = await locateForPrayers({ allowPrompt: true });
+    setHasLocation(hasSavedPrayerLocation());
+    if (result === 'located') {
+      toast.success("Adhan activé selon votre position actuelle");
+    } else {
+      toast.error(hasSavedPrayerLocation()
+        ? "Position indisponible : l'Adhan suit votre dernière position connue."
+        : "Position refusée : l'Adhan suit les horaires de Paris. Autorisez la localisation pour vos horaires.");
+    }
+  };
 
   const handleNotificationsChange = async (enabled) => {
     if (enabled) {
@@ -85,7 +121,12 @@ const SettingsPage = () => {
                 <Sparkles className="w-4 h-4 text-primary-foreground" />
               </div>
             </Link>
-            <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              // Opened directly (new tab, bookmark): there is no in-app page to go back to.
+              onClick={() => (window.history.state?.idx > 0 ? navigate(-1) : navigate('/chat'))}
+            >
               <ArrowLeft className="w-4 h-4 mr-2" />
               {t('common.back')}
             </Button>
@@ -124,12 +165,18 @@ const SettingsPage = () => {
                     px-2 py-0.5 rounded-full text-xs font-medium
                     ${user?.is_vip ? 'bg-secondary text-secondary-foreground' : 'bg-primary/10 text-primary'}
                   `}>
-                    {user?.is_vip ? '👑 VIP Admin' : user?.subscription?.toUpperCase()}
+                    {user?.is_vip ? '👑 VIP Admin' : planLabel(user?.subscription)}
                   </span>
                 </div>
               </div>
             </div>
           </Card>
+
+          <MemoryCard />
+
+          <AccountDataCard />
+
+          <PrioritySupportCard />
 
           {/* Appearance */}
           <Card className="p-6 mb-6">
@@ -206,6 +253,39 @@ const SettingsPage = () => {
                   onCheckedChange={handlePrayerRemindersChange}
                   data-testid="prayer-toggle"
                 />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label htmlFor="adhan-toggle" className="font-medium">Adhan</Label>
+                  <p className="text-sm text-muted-foreground">Joué à l'heure de chaque prière, application ouverte</p>
+                  {adhan && (
+                    <p className="text-xs text-muted-foreground" data-testid="adhan-location-status">
+                      {hasLocation
+                        ? 'Horaires de votre position (mise à jour automatique)'
+                        : 'Position non autorisée : horaires de Paris'}
+                    </p>
+                  )}
+                </div>
+                <Switch
+                  id="adhan-toggle"
+                  checked={adhan}
+                  onCheckedChange={handleAdhanChange}
+                  data-testid="adhan-toggle"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <Label htmlFor="adhan-voice" className="font-medium">Voix de l'Adhan</Label>
+                <select
+                  id="adhan-voice"
+                  value={adhanVoiceId}
+                  onChange={(e) => { saveAdhanVoice(e.target.value); setAdhanVoiceId(e.target.value); }}
+                  className="h-9 max-w-[60%] rounded-full border border-border bg-background px-3 text-sm outline-none"
+                  data-testid="adhan-voice-settings"
+                >
+                  {ADHAN_VOICES.map((voice) => (
+                    <option key={voice.id} value={voice.id}>{voice.label}</option>
+                  ))}
+                </select>
               </div>
             </div>
           </Card>

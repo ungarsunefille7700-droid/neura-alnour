@@ -82,7 +82,20 @@ export default function RemindersPage() {
 
       <section className="max-w-5xl mx-auto px-4 sm:px-6 pt-6">
         <div className="aspect-video w-full bg-black overflow-hidden rounded-lg relative">
-          {!mediaError ? (
+          {selected.youtubeId ? (
+            // Optional: a reminder hosted on YouTube (privacy-enhanced domain, no cookie before playing).
+            <iframe
+              key={playerKey}
+              className="absolute inset-0 w-full h-full"
+              src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(selected.youtubeId)}?rel=0`}
+              title={selected.title}
+              allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+              loading="lazy"
+              onLoad={rememberWatched}
+              data-testid="reminder-youtube"
+            />
+          ) : !mediaError ? (
             <video
               key={playerKey}
               className="w-full h-full object-contain"
@@ -94,7 +107,8 @@ export default function RemindersPage() {
               onError={() => setMediaError(true)}
               data-testid="reminder-player"
             >
-              <source src={selected.videoUrl} type="video/mp4" />
+              {/* A failing <source> reports the error on itself, not on <video>. */}
+              <source src={selected.videoUrl} type="video/mp4" onError={() => setMediaError(true)} />
               Votre navigateur ne prend pas en charge la lecture vidéo.
             </video>
           ) : (

@@ -46,6 +46,27 @@ export const validateNeuraCoReturnPath = (value) => {
   }
 };
 
+export const shouldStartNeuraCoConnection = ({ started, loading, token }) => (
+  !started && !loading && Boolean(token)
+);
+
+export const validateAuthReturnPath = (value) => {
+  const desktopPath = validateNeuraCoReturnPath(value);
+  if (desktopPath) return desktopPath;
+  if (typeof value !== 'string' || value.length > 2048 || !value.startsWith('/') || /[\\\r\n]/.test(value)) return null;
+  try {
+    const parsed = new URL(value, VALIDATION_ORIGIN);
+    if (parsed.origin !== VALIDATION_ORIGIN || !['/subscription', '/chat', '/settings'].includes(parsed.pathname) || parsed.hash) return null;
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return null;
+  }
+};
+
+export const isNeuraCoSessionAuthError = (error) => (
+  Number(error?.response?.status) === 401
+);
+
 export const clearAuthReturnPath = () => {
   try {
     window.sessionStorage.removeItem(SESSION_KEY);
@@ -56,7 +77,7 @@ export const clearAuthReturnPath = () => {
 };
 
 export const rememberAuthReturnPath = (value) => {
-  const returnPath = validateNeuraCoReturnPath(value);
+  const returnPath = validateAuthReturnPath(value);
   clearAuthReturnPath();
   if (!returnPath) return null;
 
@@ -74,17 +95,17 @@ export const rememberAuthReturnPath = (value) => {
 };
 
 export const resolveAuthReturnPath = (explicitValue) => {
-  const explicitPath = validateNeuraCoReturnPath(explicitValue);
+  const explicitPath = validateAuthReturnPath(explicitValue);
   if (explicitPath) return explicitPath;
 
   try {
-    const sessionPath = validateNeuraCoReturnPath(window.sessionStorage.getItem(SESSION_KEY));
+    const sessionPath = validateAuthReturnPath(window.sessionStorage.getItem(SESSION_KEY));
     if (sessionPath) return sessionPath;
 
     const persisted = JSON.parse(window.localStorage.getItem(PERSISTED_KEY) || 'null');
     const isFresh = Number.isFinite(persisted?.createdAt)
       && Date.now() - persisted.createdAt <= RETURN_PATH_TTL_MS;
-    if (isFresh) return validateNeuraCoReturnPath(persisted.path);
+    if (isFresh) return validateAuthReturnPath(persisted.path);
   } catch {
     return null;
   }

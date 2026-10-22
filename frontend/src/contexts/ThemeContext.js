@@ -4,12 +4,19 @@ const ThemeContext = createContext(null);
 
 export const ThemeProvider = ({ children }) => {
   const [theme, setTheme] = useState(() => {
-    const saved = localStorage.getItem('neura_theme');
-    return saved || 'dark';
+    try {
+      return localStorage.getItem('neura_theme') || 'dark';
+    } catch {
+      return 'dark'; // Storage blocked (some embedded browsers): keep the default.
+    }
   });
 
   useEffect(() => {
-    localStorage.setItem('neura_theme', theme);
+    try {
+      localStorage.setItem('neura_theme', theme);
+    } catch {
+      // The theme still applies for this visit.
+    }
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
 

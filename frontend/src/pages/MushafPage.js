@@ -49,8 +49,16 @@ const MushafPage = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [coverSide, setCoverSide] = useState(() => readStoredReader().lastPage === LAST_PAGE ? 'back' : 'front');
   const [pageNumber, setPageNumber] = useState(() => readStoredReader().lastPage);
+  // Text typed in the page box; applied on Enter or when the box loses focus,
+  // so the field can be cleared and retyped without loading every keystroke.
+  const [pageDraft, setPageDraft] = useState(null);
   const [pageData, setPageData] = useState(null);
   const [facingPageData, setFacingPageData] = useState(null);
+  // From the md breakpoint the reader shows two facing pages (p and p + 1),
+  // so turning the page must move by two to avoid showing a page twice.
+  const [twoPageView, setTwoPageView] = useState(
+    () => typeof window !== 'undefined' && Boolean(window.matchMedia?.('(min-width: 768px)').matches)
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [turnDirection, setTurnDirection] = useState('');
@@ -134,12 +142,28 @@ const MushafPage = () => {
     window.setTimeout(() => setTurnDirection(''), 420);
   };
 
+  useEffect(() => {
+    const query = window.matchMedia?.('(min-width: 768px)');
+    if (!query) return undefined;
+    const update = () => setTwoPageView(query.matches);
+    query.addEventListener?.('change', update);
+    return () => query.removeEventListener?.('change', update);
+  }, []);
+
+  const pageStep = twoPageView ? 2 : 1;
+  const goToNextPage = () => changePage(Math.min(LAST_PAGE, pageNumber + pageStep));
+  const goToPreviousPage = () => changePage(Math.max(FIRST_PAGE, pageNumber - pageStep));
+  const visiblePagesLabel = twoPageView && facingPageData && pageNumber < LAST_PAGE
+    ? `${pageNumber}–${pageNumber + 1}`
+    : `${pageNumber}`;
+
   const finishPageGesture = (clientX) => {
     if (pointerStartX.current === null) return;
     const distance = clientX - pointerStartX.current;
     pointerStartX.current = null;
     if (Math.abs(distance) < 60) return;
-    changePage(distance < 0 ? pageNumber + 1 : pageNumber - 1);
+    if (distance < 0) goToNextPage();
+    else goToPreviousPage();
   };
 
   const toggleBookmark = () => {
@@ -310,8 +334,16 @@ const MushafPage = () => {
                   type="number"
                   min={FIRST_PAGE}
                   max={LAST_PAGE}
-                  value={pageNumber}
-                  onChange={(event) => changePage(Number(event.target.value))}
+                  value={pageDraft ?? pageNumber}
+                  onChange={(event) => setPageDraft(event.target.value)}
+                  onBlur={() => {
+                    if (pageDraft !== null) changePage(Number(pageDraft));
+                    setPageDraft(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur();
+                    if (event.key === 'Escape') setPageDraft(null);
+                  }}
                   className="w-20 h-10 rounded-md border border-white/10 bg-black/20 px-2 text-center text-white outline-none focus:border-[#c9a85f]"
                   aria-label="Aller à une page"
                 />
@@ -590,18 +622,18 @@ const MushafPage = () => {
             <div className="flex items-center justify-center gap-4 mt-5">
               <button
                 type="button"
-                onClick={() => changePage(pageNumber - 1)}
+                onClick={goToPreviousPage}
                 disabled={pageNumber === FIRST_PAGE || loading}
                 className="w-11 h-11 grid place-items-center rounded-md border border-white/10 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
                 aria-label="Page précédente"
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <span className="min-w-24 text-center text-sm">{pageNumber} / {LAST_PAGE}</span>
+              <span className="min-w-24 text-center text-sm" data-testid="mushaf-page-counter">{visiblePagesLabel} / {LAST_PAGE}</span>
               <button
                 type="button"
-                onClick={() => changePage(pageNumber + 1)}
-                disabled={pageNumber === LAST_PAGE || loading}
+                onClick={goToNextPage}
+                disabled={pageNumber + (facingPageData && twoPageView ? 1 : 0) >= LAST_PAGE || loading}
                 className="w-11 h-11 grid place-items-center rounded-md border border-white/10 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
                 aria-label="Page suivante"
               >

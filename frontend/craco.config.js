@@ -9,6 +9,19 @@ module.exports = {
       '@': path.resolve(__dirname, 'src'),
     },
   },
+  // Same "@" alias for Jest ("craco test"), so components can be tested.
+  // Jest 27 (react-scripts 5) ignores package "exports", which react-router 7
+  // relies on, so its CommonJS builds are mapped explicitly (tests only).
+  jest: {
+    configure: {
+      moduleNameMapper: {
+        '^@/(.*)$': '<rootDir>/src/$1',
+        '^react-router-dom$': '<rootDir>/node_modules/react-router-dom/dist/index.js',
+        '^react-router$': '<rootDir>/node_modules/react-router/dist/development/index.js',
+        '^react-router/dom$': '<rootDir>/node_modules/react-router/dist/development/dom-export.js',
+      },
+    },
+  },
   style: {
     postcss: {
       loaderOptions: (postcssLoaderOptions) => {

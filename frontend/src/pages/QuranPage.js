@@ -9,6 +9,8 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useTheme } from '@/contexts/ThemeContext';
 import { toast } from 'sonner';
+import { apiErrorMessage } from '@/utils/apiError';
+import { MemorizationBar, MemorizationDot, MemorizationSummary, useQuranMemorization } from '@/components/QuranMemorization';
 import { 
   BookOpen, 
   Play, 
@@ -33,6 +35,7 @@ const QuranPage = () => {
   const { surahNumber } = useParams();
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
+  const memorization = useQuranMemorization();
   
   const [surahs, setSurahs] = useState([]);
   const [currentSurah, setCurrentSurah] = useState(null);
@@ -42,8 +45,11 @@ const QuranPage = () => {
   const [currentAyah, setCurrentAyah] = useState(0);
   const [autoPlayNext, setAutoPlayNext] = useState(true);
   const [audioLoading, setAudioLoading] = useState(false);
+  const [surahError, setSurahError] = useState('');
   
   const audioRef = useRef(null);
+  // Set when a finished surah hands over to the next one (auto-play).
+  const autoPlayPendingRef = useRef(false);
 
   useEffect(() => {
     fetchSurahs();
@@ -54,6 +60,7 @@ const QuranPage = () => {
       fetchSurah(parseInt(surahNumber));
     } else {
       setCurrentSurah(null);
+      setSurahError('');
     }
   }, [surahNumber]);
 
@@ -69,23 +76,33 @@ const QuranPage = () => {
 
   const fetchSurah = async (number) => {
     setLoading(true);
+    setSurahError('');
+    // Stop the previous surah's recitation before switching.
+    audioRef.current?.pause();
     try {
       const response = await axios.get(`${API}/quran/surah/${number}`);
       setCurrentSurah(response.data);
       setCurrentAyah(0);
       setPlaying(false);
+      if (autoPlayPendingRef.current) {
+        autoPlayPendingRef.current = false;
+        playAyah(1, response.data);
+      }
     } catch (error) {
+      autoPlayPendingRef.current = false;
       console.error('Error fetching surah:', error);
+      setCurrentSurah(null);
+      setSurahError(apiErrorMessage(error, 'Erreur lors du chargement de la sourate'));
       toast.error('Erreur lors du chargement de la sourate');
     } finally {
       setLoading(false);
     }
   };
 
-  const playAyah = (ayahNum) => {
-    if (!currentSurah) return;
+  const playAyah = (ayahNum, surah = currentSurah) => {
+    if (!surah) return;
     
-    const surahStr = String(currentSurah.number).padStart(3, '0');
+    const surahStr = String(surah.number).padStart(3, '0');
     const ayahStr = String(ayahNum).padStart(3, '0');
     const audioUrl = `https://everyayah.com/data/Alafasy_128kbps/${surahStr}${ayahStr}.mp3`;
     
@@ -122,11 +139,9 @@ const QuranPage = () => {
     else if (autoPlayNext && currentSurah.number < 114) {
       // Play next surah
       toast.info(`Passage à la sourate ${currentSurah.number + 1}...`);
+      // The useEffect fetches the new surah, then fetchSurah starts its first ayah.
+      autoPlayPendingRef.current = true;
       navigate(`/quran/${currentSurah.number + 1}`);
-      // The useEffect will fetch the new surah, then we start playing
-      setTimeout(() => {
-        playAyah(1);
-      }, 2000);
     } else {
       setPlaying(false);
       setCurrentAyah(0);
@@ -146,9 +161,13 @@ const QuranPage = () => {
   const togglePlay = () => {
     if (playing) {
       pauseAudio();
-    } else if (currentAyah > 0) {
-      audioRef.current?.play();
-      setPlaying(true);
+    } else if (currentAyah > 0 && audioRef.current) {
+      audioRef.current.play()
+        .then(() => setPlaying(true))
+        .catch((err) => {
+          console.error('Audio play error:', err);
+          toast.error('Erreur de lecture audio');
+        });
     } else {
       playAll();
     }
@@ -213,7 +232,25 @@ const QuranPage = () => {
       </header>
 
       <main className="pt-20 pb-32 px-4">
-        {!currentSurah ? (
+        {surahNumber && !currentSurah && (loading || surahError) ? (
+          /* Direct link to a surah: loading or failure, instead of silently showing the list */
+          <div className="max-w-md mx-auto text-center py-20" data-testid="surah-status">
+            {loading ? (
+              <Loader2 className="w-8 h-8 animate-spin text-primary mx-auto" />
+            ) : (
+              <div className="space-y-4">
+                <p className="text-muted-foreground">
+                  La sourate {surahNumber} n’a pas pu être chargée.
+                  {surahError ? ` (${surahError})` : ''}
+                </p>
+                <div className="flex justify-center gap-3">
+                  <Button onClick={() => fetchSurah(parseInt(surahNumber))} className="rounded-full">Réessayer</Button>
+                  <Button variant="outline" onClick={() => navigate('/quran')} className="rounded-full">Liste des sourates</Button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : !currentSurah ? (
           /* Surahs List View */
           <div className="max-w-4xl mx-auto">
             <div className="text-center mb-8">
@@ -234,6 +271,8 @@ const QuranPage = () => {
               />
             </div>
 
+            <MemorizationSummary rows={memorization.rows} />
+
             {/* Surahs Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredSurahs.map((surah) => (
@@ -250,6 +289,7 @@ const QuranPage = () => {
                     <div className="flex-1 min-w-0">
                       <h3 className="font-semibold truncate">{surah.frenchName}</h3>
                       <p className="text-sm text-muted-foreground">{surah.ayahs} versets</p>
+                      <MemorizationDot row={memorization.rows[surah.number]} />
                     </div>
                     <div className="text-right font-arabic text-xl">
                       {surah.name}
@@ -279,6 +319,11 @@ const QuranPage = () => {
                     {currentSurah.ayahs?.length} versets • {currentSurah.revelationType === 'Meccan' ? 'Mecquoise' : 'Médinoise'}
                   </p>
                 </div>
+
+                {memorization.signedIn && (
+                  <MemorizationBar surah={currentSurah.number} row={memorization.rows[currentSurah.number]}
+                    onUpdate={memorization.update} />
+                )}
 
                 {/* Audio Player */}
                 <Card className="p-4 mb-8 glass">

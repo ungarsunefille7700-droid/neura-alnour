@@ -9,11 +9,14 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
+import { apiErrorMessage } from '@/utils/apiError';
 
 const BACKEND = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 const API = `${BACKEND}/api`;
 const WS_BASE = BACKEND.replace(/^http/, 'ws');
 const CAPACITIES = [2, 4, 6, 8, 10];
+// Readable label of a stored key (the room keeps keys such as "general", "moyen").
+const labelOf = (pairs, key) => (pairs.find(([value]) => value === key) || [key, key])[1];
 const GAME_CATEGORIES = [
   ['general', 'Toutes catégories'], ['piliers', 'Piliers'], ['coran', 'Coran'],
   ['priere', 'Prière'], ['ramadan', 'Ramadan'], ['prophetes', 'Prophètes'], ['croyance', 'Croyance']
@@ -31,7 +34,7 @@ const REACTIONS = [
 ];
 
 function roomError(error, fallback) {
-  return error?.response?.data?.detail || fallback;
+  return apiErrorMessage(error, fallback);
 }
 
 export default function MultiplayerQuizPage() {
@@ -48,6 +51,7 @@ export default function MultiplayerQuizPage() {
   const [questionTime, setQuestionTime] = useState(15);
   const [joinCode, setJoinCode] = useState('');
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState('');
   const [socketState, setSocketState] = useState('disconnected');
   const [ping, setPing] = useState(null);
   const [countdown, setCountdown] = useState(null);
@@ -63,6 +67,8 @@ export default function MultiplayerQuizPage() {
   const reconnectRef = useRef(null);
   const roomRef = useRef(null);
   const leavingRef = useRef(false);
+  const unmountedRef = useRef(false);
+  const reactionTimerRef = useRef(null);
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : {}),
     [token]
@@ -109,6 +115,8 @@ export default function MultiplayerQuizPage() {
       const ticketResponse = await axios.post(
         `${API}/multiplayer/socket-ticket`, {}, { headers: authHeaders }
       );
+      // The player may have left the room or the page while the ticket was requested.
+      if (unmountedRef.current || leavingRef.current || roomRef.current?.code !== roomCode) return;
       const socket = new WebSocket(
         `${WS_BASE}/api/multiplayer/ws/${encodeURIComponent(roomCode)}?ticket=${encodeURIComponent(ticketResponse.data.ticket)}`
       );
@@ -134,27 +142,38 @@ export default function MultiplayerQuizPage() {
         }
         if (payload.type === 'reaction') {
           setReaction(`${payload.name} : ${payload.label}`);
-          window.setTimeout(() => setReaction(null), 2500);
+          window.clearTimeout(reactionTimerRef.current);
+          reactionTimerRef.current = window.setTimeout(() => setReaction(null), 2500);
         }
       };
       socket.onerror = () => setSocketState('error');
       socket.onclose = () => {
         window.clearInterval(heartbeatRef.current);
         setSocketState('disconnected');
-        if (!leavingRef.current && roomRef.current?.code) {
+        if (!unmountedRef.current && !leavingRef.current && roomRef.current?.code) {
           reconnectRef.current = window.setTimeout(() => openSocket(roomRef.current.code), 2000);
         }
       };
     } catch (error) {
       setSocketState('error');
+      // No retry once the page is closed, the room left, or the session rejected.
+      if (unmountedRef.current || leavingRef.current || [401, 403].includes(error.response?.status)) return;
       reconnectRef.current = window.setTimeout(() => openSocket(roomCode), 3000);
     }
   }, [authHeaders, closeSocket]);
 
-  useEffect(() => () => closeSocket(), [closeSocket]);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      window.clearTimeout(reactionTimerRef.current);
+      closeSocket();
+    };
+  }, [closeSocket]);
 
   const enterRoom = async (nextRoom) => {
     leavingRef.current = false;
+    roomRef.current = nextRoom;
     setRoom(nextRoom);
     setLaunched(nextRoom.status === 'ready');
     setCountdown(null);
@@ -163,6 +182,7 @@ export default function MultiplayerQuizPage() {
   };
 
   const createRoom = async () => {
+    setBusyLabel('Création de la salle…');
     setBusy(true);
     try {
       const response = await axios.post(
@@ -186,6 +206,7 @@ export default function MultiplayerQuizPage() {
   };
 
   const quickMatch = async () => {
+    setBusyLabel('Recherche de joueurs…');
     setBusy(true);
     try {
       const response = await axios.post(`${API}/multiplayer/quick-match`, {}, { headers: authHeaders });
@@ -203,6 +224,7 @@ export default function MultiplayerQuizPage() {
       toast.error('Le code doit contenir 6 caractères.');
       return;
     }
+    setBusyLabel('Connexion à la salle…');
     setBusy(true);
     try {
       const response = await axios.post(
@@ -301,12 +323,15 @@ export default function MultiplayerQuizPage() {
     if (!room?.game || gameAnswer !== null || busy) return;
     setGameAnswer(answerIndex);
     setBusy(true);
+    const questionIndex = room.game.current_index;
     try {
       const response = await axios.post(
         `${API}/multiplayer/rooms/${room.code}/answer`,
-        { question_index: room.game.current_index, answer: answerIndex },
+        { question_index: questionIndex, answer: answerIndex },
         { headers: authHeaders }
       );
+      // The server may already have moved to the next question.
+      if (roomRef.current?.game?.current_index !== questionIndex) return;
       setGameAnswerResult(response.data);
       playFeedbackSound(Boolean(response.data.correct));
     } catch (error) {
@@ -350,7 +375,7 @@ export default function MultiplayerQuizPage() {
       );
       toast.success('Signalement envoye au panel admin.');
     } catch (error) {
-      toast.error(error?.response?.data?.detail || 'Signalement impossible.');
+      toast.error(apiErrorMessage(error, 'Signalement impossible.'));
     }
   };
 
@@ -411,8 +436,8 @@ export default function MultiplayerQuizPage() {
           <div className="space-y-5">
             <div className="rounded-lg border border-border bg-card p-5">
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mb-3">
-                <span className="px-2.5 py-1 rounded-md bg-muted">{room.category || 'general'}</span>
-                <span className="px-2.5 py-1 rounded-md bg-muted">{room.difficulty || 'moyen'}</span>
+                <span className="px-2.5 py-1 rounded-md bg-muted">{labelOf(GAME_CATEGORIES, room.category || 'general')}</span>
+                <span className="px-2.5 py-1 rounded-md bg-muted">{labelOf(DIFFICULTIES, room.difficulty || 'moyen')}</span>
                 <span className="px-2.5 py-1 rounded-md bg-muted">{room.question_count || game.total_questions || 0} questions</span>
                 {game.is_tiebreak && <span className="px-2.5 py-1 rounded-md bg-amber-500/15 text-amber-400">Question decisive</span>}
               </div>
@@ -857,7 +882,7 @@ export default function MultiplayerQuizPage() {
       </section>
       {busy && screen === 'menu' && (
         <div className="fixed inset-0 bg-background/80 flex items-center justify-center z-50">
-          <div className="inline-flex items-center gap-3"><Loader2 className="w-5 h-5 animate-spin text-primary" /> Recherche de joueurs…</div>
+          <div className="inline-flex items-center gap-3"><Loader2 className="w-5 h-5 animate-spin text-primary" /> {busyLabel || 'Chargement…'}</div>
         </div>
       )}
     </main>

@@ -50,6 +50,9 @@ const LearnPage = () => {
     fetchLessons();
     if (user) {
       fetchProgress();
+    } else {
+      // Logged out: do not keep showing the previous account's progress.
+      setProgress(null);
     }
   }, [user]);
 
@@ -136,7 +139,7 @@ const LearnPage = () => {
   const getLessonProgress = (lesson) => {
     if (isLessonCompleted(lesson.id)) return 100;
     const position = progress?.last_position?.[lesson.id] || 0;
-    return Math.round((position / (lesson.content.length - 1)) * 100);
+    return Math.round((position / Math.max(1, lesson.content.length - 1)) * 100);
   };
 
   const totalProgress = lessons.length > 0 
@@ -178,7 +181,7 @@ const LearnPage = () => {
 
             {/* Progress */}
             <div className="mb-8">
-              <Progress value={(currentSection / (currentLesson.content.length - 1)) * 100} className="h-2" />
+              <Progress value={(currentSection / Math.max(1, currentLesson.content.length - 1)) * 100} className="h-2" />
             </div>
 
             {/* Content */}
@@ -365,7 +368,9 @@ const LearnPage = () => {
 
           {/* Info */}
           <p className="text-center text-sm text-muted-foreground mt-8">
-            Apprenez à votre rythme • Votre progression est sauvegardée automatiquement
+            Apprenez à votre rythme • {user
+              ? 'Votre progression est sauvegardée automatiquement'
+              : <><Link to="/auth" className="text-primary hover:underline">Connectez-vous</Link> pour sauvegarder votre progression</>}
           </p>
         </div>
       </main>

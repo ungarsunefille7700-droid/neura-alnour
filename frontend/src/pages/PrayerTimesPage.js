@@ -6,10 +6,16 @@ import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { toast } from 'sonner';
 import {
+  ADHAN_VOICES,
+  getAdhanVoice,
   getNotificationPreferences,
+  hasSavedPrayerLocation,
+  saveAdhanPreference,
+  saveAdhanVoice,
   saveNotificationPreferences,
   savePrayerLocation,
 } from '@/utils/notificationPreferences';
+import { startAdhan, stopAdhan } from '@/components/PrayerNotificationManager';
 import { 
   Clock, 
   MapPin, 
@@ -24,7 +30,9 @@ import {
   RefreshCw,
   Volume2,
   Navigation,
-  Compass
+  Compass,
+  Play,
+  Square
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -35,6 +43,8 @@ const PrayerTimesPage = () => {
   const [loading, setLoading] = useState(true);
   const [location, setLocation] = useState(null);
   const [locationName, setLocationName] = useState('');
+  // True when geolocation is unavailable and the times are computed for Paris.
+  const [usingFallback, setUsingFallback] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const initialNotificationPreferences = getNotificationPreferences();
   const [notificationsEnabled, setNotificationsEnabled] = useState(
@@ -43,6 +53,9 @@ const PrayerTimesPage = () => {
     Notification.permission === 'granted'
   );
   const [qiblah, setQiblah] = useState(null);
+  const [adhanEnabled, setAdhanEnabled] = useState(initialNotificationPreferences.adhan);
+  const [adhanPreview, setAdhanPreview] = useState(false);
+  const [adhanVoice, setAdhanVoice] = useState(getAdhanVoice);
 
   useEffect(() => {
     getLocation();
@@ -68,13 +81,15 @@ const PrayerTimesPage = () => {
             longitude: position.coords.longitude
           };
           savePrayerLocation(nextLocation);
+          setUsingFallback(false);
           setLocation(nextLocation);
         },
         (error) => {
           console.error('Geolocation error:', error);
-          // Default to Paris
+          // Default to Paris for display only: a real position saved earlier
+          // keeps being used by the prayer reminders.
           const fallbackLocation = { latitude: 48.8566, longitude: 2.3522 };
-          savePrayerLocation(fallbackLocation);
+          setUsingFallback(true);
           setLocation(fallbackLocation);
           setLocationName('Paris, France (position par défaut)');
           toast.info('Position par défaut: Paris. Activez la géolocalisation pour votre position exacte.');
@@ -83,9 +98,9 @@ const PrayerTimesPage = () => {
       );
     } else {
       const fallbackLocation = { latitude: 48.8566, longitude: 2.3522 };
-      savePrayerLocation(fallbackLocation);
+      setUsingFallback(true);
       setLocation(fallbackLocation);
-      setLocationName('Paris, France');
+      setLocationName('Paris, France (position par défaut)');
     }
   };
 
@@ -97,7 +112,8 @@ const PrayerTimesPage = () => {
       const data = await response.json();
       const city = data.address?.city || data.address?.town || data.address?.village || '';
       const country = data.address?.country || '';
-      setLocationName(`${city}${city && country ? ', ' : ''}${country}`);
+      const name = `${city}${city && country ? ', ' : ''}${country}`;
+      setLocationName(usingFallback ? `${name || 'Paris, France'} (position par défaut)` : name);
     } catch (error) {
       console.error('Error fetching location name:', error);
     }
@@ -159,6 +175,46 @@ const PrayerTimesPage = () => {
       toast.error("L'autorisation des notifications a été refusée.");
     }
   };
+
+  const toggleAdhan = () => {
+    const next = !adhanEnabled;
+    setAdhanEnabled(next);
+    saveAdhanPreference(next);
+    if (next && usingFallback) {
+      // This page asked for the position on load; it was refused or unavailable.
+      toast.warning(hasSavedPrayerLocation()
+        ? "Adhan activé sur votre dernière position connue : autorisez la localisation pour suivre vos déplacements."
+        : "Adhan activé, mais sur les horaires de Paris : autorisez la localisation pour suivre votre position.");
+      return;
+    }
+    toast.success(next
+      ? "Adhan activé à l'heure des prières de votre position, tant que l'application est ouverte."
+      : 'Adhan désactivé');
+  };
+
+  const toggleAdhanPreview = async () => {
+    if (adhanPreview) {
+      stopAdhan();
+      setAdhanPreview(false);
+      return;
+    }
+    // Played from a click, which also allows the browser to play it later at prayer time.
+    const played = await startAdhan(() => setAdhanPreview(false), adhanVoice);
+    if (!played) {
+      toast.error("Impossible de lire l'Adhan sur cet appareil.");
+      return;
+    }
+    setAdhanPreview(true);
+  };
+
+  const changeAdhanVoice = (id) => {
+    stopAdhan();
+    setAdhanPreview(false);
+    saveAdhanVoice(id);
+    setAdhanVoice(getAdhanVoice());
+  };
+
+  useEffect(() => () => stopAdhan(), []);
 
   const prayers = prayerTimes ? [
     { name: 'Fajr', arabic: 'الفجر', time: prayerTimes.fajr, icon: Sunrise, color: 'text-blue-400' },
@@ -373,6 +429,56 @@ const PrayerTimesPage = () => {
                 )}
               </Button>
             </div>
+            <div className="mt-4 pt-4 border-t border-border flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-medium">Adhan à l'heure de la prière</p>
+                <p className="text-sm text-muted-foreground">
+                  Joué quand l'application est ouverte (limite des navigateurs).
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={adhanVoice.id}
+                  onChange={(e) => changeAdhanVoice(e.target.value)}
+                  className="h-9 max-w-full rounded-full border border-border bg-background px-3 text-sm outline-none"
+                  aria-label="Voix de l'Adhan"
+                  data-testid="adhan-voice-select"
+                >
+                  {ADHAN_VOICES.map((voice) => (
+                    <option key={voice.id} value={voice.id}>{voice.label}</option>
+                  ))}
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleAdhanPreview}
+                  className="rounded-full"
+                  data-testid="adhan-preview-btn"
+                >
+                  {adhanPreview ? <Square className="w-4 h-4 mr-1" /> : <Play className="w-4 h-4 mr-1" />}
+                  {adhanPreview ? 'Arrêter' : 'Écouter'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant={adhanEnabled ? 'outline' : 'default'}
+                  onClick={toggleAdhan}
+                  className="rounded-full"
+                  data-testid="adhan-toggle-btn"
+                  aria-pressed={adhanEnabled}
+                >
+                  {adhanEnabled ? 'Activé' : 'Activer'}
+                </Button>
+              </div>
+              <a
+                href={adhanVoice.source}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full text-xs text-muted-foreground hover:underline"
+                data-testid="adhan-credit"
+              >
+                {adhanVoice.credit} (Wikimedia Commons)
+              </a>
+            </div>
           </Card>
 
           {/* Quick Links */}
@@ -393,7 +499,7 @@ const PrayerTimesPage = () => {
 
           {/* Info */}
           <p className="text-center text-sm text-muted-foreground mt-8">
-            Horaires calculés selon la méthode ISNA • Basés sur votre position GPS
+            Horaires calculés selon la méthode ISNA • {usingFallback ? 'Position par défaut : Paris' : 'Basés sur votre position GPS'}
           </p>
         </div>
       </main>

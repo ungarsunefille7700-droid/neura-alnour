@@ -1,7 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
+import AssistantMarkdown from '@/components/AssistantMarkdown';
+import ThinkingPanel from '@/components/ThinkingPanel';
+import ReasoningLevelPicker from '@/components/ReasoningLevelPicker';
+import { ProjectWorkshopPanel, useProjectWorkshop, workshopSummary } from '@/components/ProjectWorkshop';
+import ProjectMemoryCard from '@/components/ProjectMemoryCard';
+import { VideoAnalysisPanel, useVideoAnalysis } from '@/components/VideoAnalysis';
+import { Clapperboard } from 'lucide-react';
+import { extractCodeFiles } from '@/utils/codeFiles';
+import { checkProject, fixRequest } from '@/utils/projectCheck';
+import { keepsErrorsOnPurpose, MAX_AUTO_FIXES, verificationSummary, verifyProject } from '@/utils/codeRunner';
+import { versionOf } from '@/components/ProjectWorkshop';
+import VerificationNote from '@/components/VerificationNote';
+import { canExport, downloadText, printPdf } from '@/utils/exportConversation';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,8 +23,9 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
-import DevWorkspace from '@/components/DevWorkspace';
 import { createChatRequestId, formatQuotaReset } from '@/utils/chatQuota';
+import { apiErrorMessage } from '@/utils/apiError';
+import { readSseEvents, streamError, streamErrorMessage, streamHttpError } from '@/utils/sseStream';
 import {
   MAX_CHAT_IMAGES,
   clipboardImageFiles,
@@ -23,6 +37,10 @@ import {
 import { toast } from 'sonner';
 import { 
   Send, 
+  Square,
+  Package,
+  FileDown,
+  Lock,
   Plus, 
   Menu, 
   X, 
@@ -46,13 +64,23 @@ import {
   Wand2,
   Globe,
   Camera,
-  Code2,
   Briefcase,
   Copy,
-  Check
+  Check,
+  Languages,
+  GraduationCap,
+  MapPin,
+  Compass,
+  Gift,
+  Phone,
+  PhoneOff
 } from 'lucide-react';
+import { planLabel } from '@/utils/planLabels';
+import useVoiceCall from '@/hooks/useVoiceCall';
+import VoiceCallPanel, { VoicePicker } from '@/components/VoiceCallPanel';
+import { getVoicePreference, saveVoicePreference } from '@/utils/voice';
 
-// Code block with a copy button (used for developer-mode responses).
+// Code block with a copy button.
 function CodeBlock({ children }) {
   const ref = useRef(null);
   const [copied, setCopied] = useState(false);
@@ -75,17 +103,6 @@ function CodeBlock({ children }) {
   );
 }
 
-// Extract the last AI code block (+ "Fichier: path") to pre-fill the workspace editor.
-function extractAiCode(messages) {
-  const lastAi = [...(messages || [])].reverse().find((m) => m.role === 'assistant');
-  if (!lastAi) return null;
-  const text = lastAi.content || '';
-  const fence = text.match(/```[a-zA-Z0-9]*\n([\s\S]*?)```/);
-  if (!fence) return null;
-  const pathMatch = text.match(/Fichier\s*:\s*([^\n`]+)/i);
-  return { code: fence[1].replace(/\n$/, ''), path: pathMatch ? pathMatch[1].trim() : '' };
-}
-
 const mdComponents = {
   pre: CodeBlock,
   code: ({ children }) => (
@@ -98,7 +115,24 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const getStoredModelKey = () => {
   const stored = localStorage.getItem('neura_model');
   if (stored === 'grok') return 'gemini';
+  // "model:<id>" = a model of the full catalogue (Plus plans); the server checks access.
+  if (typeof stored === 'string' && stored.startsWith('model:')) return stored;
   return ['chatgpt', 'claude', 'gemini'].includes(stored) ? stored : 'chatgpt';
+};
+
+// Routers first, then the catalogue grouped by provider (when the plan offers it).
+const groupModelOptions = (options) => {
+  const routers = options.filter((option) => !option.group);
+  const groups = [];
+  options.filter((option) => option.group).forEach((option) => {
+    let group = groups.find((item) => item.name === option.group);
+    if (!group) {
+      group = { name: option.group, options: [] };
+      groups.push(group);
+    }
+    group.options.push(option);
+  });
+  return { routers, groups };
 };
 
 // Per-model web-search status labels, translated for the active UI languages.
@@ -111,18 +145,18 @@ const SEARCH_STATUS = {
     tr: { searching: "Web'de aranıyor…", reading_sources: 'Kaynaklar analiz ediliyor…', writing: 'Yanıt yazılıyor…' },
   },
   claude: {
-    fr: { searching: 'Claude recherche sur le web…', reading_sources: 'Consultation des sources…', writing: 'Synthèse des informations…' },
-    en: { searching: 'Claude is searching the web…', reading_sources: 'Reviewing sources…', writing: 'Synthesizing information…' },
-    ar: { searching: 'كلود يبحث في الويب…', reading_sources: 'مراجعة المصادر…', writing: 'تجميع المعلومات…' },
-    es: { searching: 'Claude está buscando en la web…', reading_sources: 'Revisando las fuentes…', writing: 'Sintetizando la información…' },
-    tr: { searching: "Claude web'de arıyor…", reading_sources: 'Kaynaklar inceleniyor…', writing: 'Bilgiler sentezleniyor…' },
+    fr: { searching: 'Recherche sur le web…', reading_sources: 'Consultation des sources…', writing: 'Synthèse des informations…' },
+    en: { searching: 'Searching the web…', reading_sources: 'Reviewing sources…', writing: 'Synthesizing information…' },
+    ar: { searching: 'البحث في الويب…', reading_sources: 'مراجعة المصادر…', writing: 'تجميع المعلومات…' },
+    es: { searching: 'Buscando en la web…', reading_sources: 'Revisando las fuentes…', writing: 'Sintetizando la información…' },
+    tr: { searching: "Web'de aranıyor…", reading_sources: 'Kaynaklar inceleniyor…', writing: 'Bilgiler sentezleniyor…' },
   },
   gemini: {
-    fr: { searching: 'Recherche Google…', reading_sources: 'Vérification des sources…', writing: 'Génération de la réponse…' },
-    en: { searching: 'Searching Google…', reading_sources: 'Verifying sources…', writing: 'Generating the answer…' },
-    ar: { searching: 'البحث في جوجل…', reading_sources: 'التحقق من المصادر…', writing: 'إنشاء الإجابة…' },
-    es: { searching: 'Buscando en Google…', reading_sources: 'Verificando las fuentes…', writing: 'Generando la respuesta…' },
-    tr: { searching: "Google'da aranıyor…", reading_sources: 'Kaynaklar doğrulanıyor…', writing: 'Yanıt oluşturuluyor…' },
+    fr: { searching: 'Recherche sur le web…', reading_sources: 'Vérification des sources…', writing: 'Génération de la réponse…' },
+    en: { searching: 'Searching the web…', reading_sources: 'Verifying sources…', writing: 'Generating the answer…' },
+    ar: { searching: 'البحث في الويب…', reading_sources: 'التحقق من المصادر…', writing: 'إنشاء الإجابة…' },
+    es: { searching: 'Buscando en la web…', reading_sources: 'Verificando las fuentes…', writing: 'Generando la respuesta…' },
+    tr: { searching: "Web'de aranıyor…", reading_sources: 'Kaynaklar doğrulanıyor…', writing: 'Yanıt oluşturuluyor…' },
   },
   grok: {
     fr: { searching: 'Recherche en temps réel…', reading_sources: 'Analyse de plusieurs sources…', writing: 'Préparation de la réponse…' },
@@ -133,11 +167,23 @@ const SEARCH_STATUS = {
   },
 };
 
+// While the answer is being prepared, the app shows that NEURA AL-NOUR is thinking,
+// whatever engine answers behind it.
+const THINKING_LABEL = {
+  fr: 'NEURA AL-NOUR réfléchit',
+  en: 'NEURA AL-NOUR is thinking',
+  ar: 'نور يفكّر',
+  es: 'NEURA AL-NOUR está pensando',
+  tr: 'NEURA AL-NOUR düşünüyor',
+};
 const getStatusLabel = (lang, model, phase) => {
-  const m = SEARCH_STATUS[model] || SEARCH_STATUS.chatgpt;
-  const l = m[lang] || m.en || m.fr;
+  if (phase === 'writing' || !phase) return THINKING_LABEL[lang] || THINKING_LABEL.fr;
+  const l = SEARCH_STATUS.chatgpt[lang] || SEARCH_STATUS.chatgpt.fr;
   return (l && l[phase]) || '…';
 };
+
+const STREAM_INTERRUPTED_MESSAGE = 'La réponse a été interrompue avant la fin. Réessayez.';
+const WORK_UNAVAILABLE_MESSAGE = 'Le mode Work est temporairement indisponible.';
 
 const WORK_STATUS = {
   analyzing: 'Analyse de la tâche…',
@@ -206,12 +252,27 @@ const isImageGenerationIntent = (text) => {
 const ChatPage = () => {
   const { conversationId } = useParams();
   const navigate = useNavigate();
-  const { user, getAuthHeader, logout } = useAuth();
+  const { user, getAuthHeader, logout, handleUnauthorizedResponse } = useAuth();
+  // The model reasons in English: translated to French when the user opens "Réflexion".
+  const translateThinking = useCallback(
+    (text) => axios.post(`${API}/chat/thinking/translate`, { text }, { headers: getAuthHeader(), timeout: 60000 })
+      .then((response) => response.data?.text || ''),
+    [getAuthHeader],
+  );
   const { theme, toggleTheme } = useTheme();
   const { languageName, language, t } = useLanguage();
   
   const [conversations, setConversations] = useState([]);
   const [messages, setMessages] = useState([]);
+  // Latest messages for the voice call, which reads the reply after sending.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const [chatVoice, setChatVoice] = useState(() => getVoicePreference('chat'));
+  // During a call the microphone pauses while the user types (keyboard noise).
+  const lastTypedAtRef = useRef(0);
+  // Receives the reply while it streams, so the call's voice starts on the first sentence.
+  const voiceDeltaRef = useRef(null);
+  const streamAbortRef = useRef(null);
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -227,23 +288,31 @@ const ChatPage = () => {
   const [selectedModel, setSelectedModel] = useState(getStoredModelKey);
   const [modelOptions, setModelOptions] = useState([]);
   const [activeModel, setActiveModel] = useState(null);
-  const [selectedIntelligenceMode, setSelectedIntelligenceMode] = useState('auto');
+  const [selectedIntelligenceMode, setSelectedIntelligenceMode] = useState(() => {
+    try { return localStorage.getItem('neura_reasoning_level') || 'auto'; } catch { return 'auto'; }
+  });
   const [intelligenceModes, setIntelligenceModes] = useState([]);
   const [workAvailable, setWorkAvailable] = useState(false);
   const [conversationMode, setConversationMode] = useState('chat');
   const [workQuota, setWorkQuota] = useState(null);
   const [webMode, setWebMode] = useState(() => localStorage.getItem('neura_websearch') === '1' ? 'forced' : 'auto');
-  const [devMode, setDevMode] = useState(false);
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const workshop = useProjectWorkshop();
+  const zipInputRef = useRef(null);
+  // Step 5: a video analysed in the browser; its timeline goes with each question.
+  const video = useVideoAnalysis(getAuthHeader);
+  const videoInputRef = useRef(null);
+  const [projectMemoryTick, setProjectMemoryTick] = useState(0);
+  // Real checks of the delivered code (by answer) and the automatic corrections (3 at most).
+  const [verifications, setVerifications] = useState({});
+  const autoFixRef = useRef({ conversation: null, attempts: 0 });
+  const [pendingAutoFix, setPendingAutoFix] = useState(null);
   const [imageCreationMode, setImageCreationMode] = useState(false);
-  const [devSessionId, setDevSessionId] = useState(null);
-  const [devStatus, setDevStatus] = useState(null);
-  const [devRole, setDevRole] = useState('');
-  const [wsOpen, setWsOpen] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [streamPhase, setStreamPhase] = useState(null);
   const [streamContent, setStreamContent] = useState('');
   const [streamSources, setStreamSources] = useState([]);
+  const [streamThinking, setStreamThinking] = useState('');
   const [conversationQuota, setConversationQuota] = useState(null);
   const [chatImageQuota, setChatImageQuota] = useState(null);
   const [activeCaptureId, setActiveCaptureId] = useState(null);
@@ -257,6 +326,15 @@ const ChatPage = () => {
   const cameraInputRef = useRef(null);
   const toolsMenuRef = useRef(null);
   const imageBatchRef = useRef(0);
+  // Incremented whenever the displayed conversation changes. A request started
+  // in another view keeps running (the server saves its answer) but must not
+  // update the conversation now on screen.
+  const viewTokenRef = useRef(0);
+  const fetchMessagesSeqRef = useRef(0);
+  // Generated images and developer answers are not stored in the conversation
+  // by the server: keep them for this visit so a reload of the conversation
+  // does not wipe them. Keyed by conversation id ('new' before it exists).
+  const localOnlyMessagesRef = useRef({});
   const webSearch = webMode === 'forced';
   const cameraAvailable = typeof navigator !== 'undefined'
     && Boolean(navigator.mediaDevices?.getUserMedia);
@@ -289,6 +367,7 @@ const ChatPage = () => {
   }, [toolsMenuOpen]);
 
   useEffect(() => {
+    resetViewState();
     if (conversationId) {
       setCurrentConversation(conversationId);
       fetchMessages(conversationId);
@@ -381,6 +460,41 @@ const ChatPage = () => {
     }
   };
 
+  const viewGuard = () => {
+    const token = viewTokenRef.current;
+    return () => viewTokenRef.current === token;
+  };
+
+  const rememberLocalMessages = (convKey, ...items) => {
+    const key = convKey || 'new';
+    localOnlyMessagesRef.current[key] = [...(localOnlyMessagesRef.current[key] || []), ...items];
+  };
+
+  // A new chat that just received its id adopts the local-only messages kept under 'new'.
+  const adoptNewChatLocalMessages = (convId) => {
+    const pending = localOnlyMessagesRef.current.new;
+    if (!convId || !pending?.length) return;
+    localOnlyMessagesRef.current[convId] = [...(localOnlyMessagesRef.current[convId] || []), ...pending];
+    delete localOnlyMessagesRef.current.new;
+  };
+
+  const resetViewState = () => {
+    viewTokenRef.current += 1;
+    setStreaming(false);
+    setStreamPhase(null);
+    setStreamContent('');
+    setStreamSources([]);
+    setLoading(false);
+    setGeneratingImage(false);
+    setSelectedImage(null);
+    setImagePreview(null);
+    setSelectedImages([]);
+    imageBatchRef.current += 1;
+    setImagesProcessing(false);
+    setSelectedDocument(null);
+    setImageCreationMode(false);
+  };
+
   const generateImage = async () => {
     if (!inputMessage.trim() || loading || generatingImage) return;
     
@@ -392,6 +506,8 @@ const ChatPage = () => {
     }
 
     const prompt = inputMessage.trim();
+    const stillHere = viewGuard();
+    const convKey = currentConversation;
     setInputMessage('');
     setGeneratingImage(true);
 
@@ -417,18 +533,20 @@ const ChatPage = () => {
         generated_image: `data:image/png;base64,${response.data.image_base64}`,
         created_at: new Date().toISOString()
       };
-      setMessages(prev => [...prev, aiMessage]);
+      rememberLocalMessages(convKey, tempUserMsg, aiMessage);
       if (response.data.generation_quota) setImageGenRemaining(response.data.generation_quota);
-      
-      // Refresh remaining count
       fetchImageGenRemaining();
+      if (!stillHere()) return;
+      setMessages(prev => [...prev, aiMessage]);
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || 'Erreur lors de la génération de l\'image';
-      toast.error(errorMsg);
+      if (!stillHere()) return;
+      toast.error(apiErrorMessage(error, 'Erreur lors de la génération de l\'image'));
       setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id));
     } finally {
-      setGeneratingImage(false);
-      inputRef.current?.focus();
+      if (stillHere()) {
+        setGeneratingImage(false);
+        inputRef.current?.focus();
+      }
     }
   };
 
@@ -489,18 +607,35 @@ const ChatPage = () => {
     fetchModelState(currentConversation, nextModel, selectedIntelligenceMode);
   };
 
+  // "Réflexion en cours" only when the engine really reasons (or searches, or writes code);
+  // at the Instantané level there is no reasoning step: a dot, like ChatGPT.
+  const appliedLevel = activeModel?.requested_mode || selectedIntelligenceMode;
+  const showsReasoning = Boolean(streamThinking)
+    || /```/.test(streamContent || '')
+    || Boolean(streamPhase && streamPhase !== 'writing')
+    || ['medium', 'high', 'very_high'].includes(appliedLevel);
+
   const handleIntelligenceModeChange = (nextMode) => {
     setSelectedIntelligenceMode(nextMode);
+    try { localStorage.setItem('neura_reasoning_level', nextMode); } catch { /* private mode */ }
     fetchModelState(currentConversation, selectedModel, nextMode);
   };
 
   const fetchMessages = async (convId) => {
+    const seq = fetchMessagesSeqRef.current + 1;
+    fetchMessagesSeqRef.current = seq;
     try {
       const [messagesResponse, quotaResponse] = await Promise.all([
         axios.get(`${API}/chat/conversations/${convId}/messages`, { headers: getAuthHeader() }),
         axios.get(`${API}/chat/conversations/${convId}/quota`, { headers: getAuthHeader() })
       ]);
-      setMessages(messagesResponse.data);
+      // Opening A then B quickly: only the latest request may fill the screen.
+      if (seq !== fetchMessagesSeqRef.current) return;
+      const localOnly = localOnlyMessagesRef.current[convId] || [];
+      const serverMessages = Array.isArray(messagesResponse.data) ? messagesResponse.data : [];
+      setMessages(localOnly.length
+        ? [...serverMessages, ...localOnly].sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+        : serverMessages);
       setConversationQuota(quotaResponse.data);
       setConversationMode(quotaResponse.data?.conversation_type || 'chat');
       setWorkQuota(quotaResponse.data?.work_quota || null);
@@ -517,18 +652,32 @@ const ChatPage = () => {
   };
 
   const sendMessageStream = async (userMessage, tempId, requestId) => {
+    const stillHere = viewGuard();
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
     setStreaming(true);
     setStreamPhase('writing');
     setStreamContent('');
     setStreamSources([]);
+    setStreamThinking('');
+    const startedAt = Date.now();
     let acc = '';
+    let thinking = '';
     let sources = [];
     let webMeta = null;
     let convId = currentConversation;
     let quotaLimited = false;
+    let completed = false;
     try {
+      const workshopContext = workshop.active ? await workshop.contextFor(userMessage, appliedLevel) : null;
+      if (workshopContext) {
+        setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, workshop: workshopSummary(workshopContext.report) } : m)));
+      }
+      const videoContext = video.ready ? video.contextFor() : null;
+      if (videoContext) setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, video: videoContext.summary } : m)));
       const response = await fetch(`${API}/chat/stream`, {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
         body: JSON.stringify({
           content: userMessage,
@@ -538,38 +687,44 @@ const ChatPage = () => {
           intelligence_mode: selectedIntelligenceMode,
           lang: languageName,
           web_search: webSearch,
-          web_mode: webMode
+          web_mode: webMode,
+          // Spoken in a voice call: the server keeps the answer short and easy to listen to.
+          voice: Boolean(voiceDeltaRef.current),
+          ...(workshopContext ? { project_context: workshopContext.text, project_summary: workshopSummary(workshopContext.report) } : {}),
+          ...(videoContext ? { video_context: videoContext.text, video_summary: videoContext.summary } : {}),
         })
       });
-      if (!response.ok || !response.body) throw new Error('stream failed');
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop();
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith('data:')) continue;
-          let evt;
-          try { evt = JSON.parse(line.slice(5).trim()); } catch (err) { continue; }
+      if (!response.ok) {
+        handleUnauthorizedResponse(response.status);
+        throw await streamHttpError(response, 'Erreur lors de la réponse IA');
+      }
+      if (!response.body) throw new Error('Erreur lors de la réponse IA');
+      await readSseEvents(response, (evt) => {
           if (evt.type === 'conversation') {
             convId = evt.conversation_id;
+          } else if (!stillHere()) {
+            // Another conversation is on screen: keep reading so the server
+            // completes and saves this answer, without touching the display.
+            if (evt.type === 'delta') acc += evt.content || '';
+            if (evt.type === 'done') completed = true;
           } else if (evt.type === 'phase') {
             setStreamPhase(evt.phase);
             if (evt.phase === 'reading_sources' && Array.isArray(evt.sources)) {
               sources = evt.sources;
               setStreamSources(evt.sources);
             }
+          } else if (evt.type === 'thinking') {
+            // The model's reasoning: shown folded under "Réflexion en cours".
+            thinking += evt.content || '';
+            setStreamThinking(thinking);
           } else if (evt.type === 'delta') {
             acc += evt.content || '';
             setStreamContent(acc);
+            voiceDeltaRef.current?.(evt.content || '');
           } else if (evt.type === 'model') {
             applyServerModel(evt.model);
           } else if (evt.type === 'done') {
+            completed = true;
             if (Array.isArray(evt.sources)) sources = evt.sources;
             if (evt.conversation_id) convId = evt.conversation_id;
             if (evt.quota) setConversationQuota(evt.quota);
@@ -580,9 +735,13 @@ const ChatPage = () => {
             if (evt.quota) setConversationQuota(evt.quota);
             toast.error(evt.detail || 'Limite gratuite atteinte pour cette conversation.');
           } else if (evt.type === 'error') {
-            throw new Error(evt.detail || 'error');
+            throw streamError(evt.detail || 'Erreur lors de la réponse IA');
           }
-        }
+      });
+      if (!stillHere()) {
+        // The new conversation (if any) now exists server-side: refresh the list.
+        if (!currentConversation && convId) fetchConversations();
+        return;
       }
       if (quotaLimited) {
         setMessages(prev => prev.filter(m => m.id !== tempId));
@@ -595,38 +754,121 @@ const ChatPage = () => {
         }
         return;
       }
-      const aiMessage = {
-        id: `ai-${Date.now()}`,
-        role: 'assistant',
-        content: acc,
-        sources,
-        web_search: webMeta,
-        created_at: new Date().toISOString()
-      };
-      setMessages(prev => [...prev, aiMessage]);
+      // The server ends every complete answer with a `done` event.
+      if (!completed) throw streamError(STREAM_INTERRUPTED_MESSAGE);
+      // Project memory: files studied (with their version) and checks of the delivered code.
+      if (convId && (workshopContext || /```/.test(acc))) {
+        (async () => {
+          if (workshopContext) await workshop.saveSnapshot(convId, getAuthHeader());
+          const delivered = extractCodeFiles(acc);
+          if (delivered.length) {
+            const key = versionOf(acc);
+            const python = delivered.some((file) => /\.py$/i.test(file.path));
+            setVerifications((v) => ({ ...v, [key]: { running: true, python } }));
+            const verified = await verifyProject(delivered);
+            const issues = verified.issues.map((issue) => `${issue.file} : ${issue.message}`);
+            const summary = verificationSummary(verified);
+            if (autoFixRef.current.conversation !== convId) autoFixRef.current = { conversation: convId, attempts: 0 };
+            const attempt = autoFixRef.current.attempts + 1;
+            const onPurpose = issues.length > 0 && keepsErrorsOnPurpose(userMessage);
+            const willFix = issues.length > 0 && !onPurpose && attempt <= MAX_AUTO_FIXES;
+            setVerifications((v) => ({ ...v, [key]: { ...summary, issues: issues.length, details: issues.slice(0, 5),
+              autoFix: willFix ? `Correction automatique ${attempt}/${MAX_AUTO_FIXES} envoyée à Neura`
+                : onPurpose ? 'Pas de correction automatique : tu as demandé de garder cette erreur'
+                  : issues.length ? `${MAX_AUTO_FIXES} corrections automatiques déjà faites : à toi de voir (bouton « Corriger automatiquement »)` : null } }));
+            await axios.post(`${API}/projects/memory/checks`, { conversation_id: convId, issues }, { headers: getAuthHeader() }).catch(() => {});
+            if (willFix) {
+              autoFixRef.current.attempts = attempt;
+              setPendingAutoFix(fixRequest(verified.issues, delivered));
+            }
+          }
+          setProjectMemoryTick((tick) => tick + 1);
+        })();
+      }
+      if (acc) {
+        setMessages(prev => [...prev, {
+          id: `ai-${Date.now()}`,
+          role: 'assistant',
+          content: acc,
+          sources,
+          web_search: webMeta,
+          thinking,
+          duration_ms: Date.now() - startedAt,
+          created_at: new Date().toISOString()
+        }]);
+      }
       if (!currentConversation && convId) {
+        adoptNewChatLocalMessages(convId);
         setCurrentConversation(convId);
         navigate(`/chat/${convId}`, { replace: true });
         fetchConversations();
       }
       if (convId) fetchMessages(convId);
     } catch (error) {
-      toast.error('Erreur lors de la réponse IA');
-      setMessages(prev => prev.filter(m => m.id !== tempId));
+      if (!stillHere()) return;
+      if (controller.signal.aborted) {
+        // Stopped by the user: keep what was written (or say it was stopped, like ChatGPT).
+        {
+          setMessages(prev => [...prev, {
+            id: `ai-stopped-${Date.now()}`,
+            role: 'assistant',
+            content: acc,
+            sources,
+            stopped: true,
+            created_at: new Date().toISOString()
+          }]);
+        }
+        if (!currentConversation && convId) {
+          setCurrentConversation(convId);
+          navigate(`/chat/${convId}`, { replace: true });
+          fetchConversations();
+        }
+      } else if (acc.trim() && !quotaLimited) {
+        // Keep the text already shown instead of discarding it, marked as incomplete.
+        setMessages(prev => [...prev, {
+          id: `ai-partial-${Date.now()}`,
+          role: 'assistant',
+          content: acc,
+          sources,
+          interrupted: true,
+          created_at: new Date().toISOString()
+        }]);
+        if (!currentConversation && convId) {
+          setCurrentConversation(convId);
+          navigate(`/chat/${convId}`, { replace: true });
+          fetchConversations();
+        }
+        toast.error(STREAM_INTERRUPTED_MESSAGE);
+      } else {
+        if (error.detail?.quota) setConversationQuota(error.detail.quota);
+        toast.error(streamErrorMessage(error, 'Erreur lors de la réponse IA'));
+        setMessages(prev => prev.filter(m => m.id !== tempId));
+      }
     } finally {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
       if (webMode === 'forced') {
         setWebMode('auto');
         localStorage.removeItem('neura_websearch');
       }
-      setStreaming(false);
-      setStreamPhase(null);
-      setStreamContent('');
-      setStreamSources([]);
-      inputRef.current?.focus();
+      if (stillHere()) {
+        setStreaming(false);
+        setStreamPhase(null);
+        setStreamContent('');
+        setStreamSources([]);
+        setStreamThinking('');
+        inputRef.current?.focus();
+      }
     }
   };
 
+  // Stop button: halts the answer being written (and the call voice reading it).
+  const stopGenerating = () => {
+    streamAbortRef.current?.abort();
+    if (voiceCall.active) voiceCall.interrupt();
+  };
+
   const sendWorkTask = async (userMessage, tempId, requestId, imageToSend, documentToSend) => {
+    const stillHere = viewGuard();
     setStreaming(true);
     setStreamPhase('analyzing');
     setStreamContent('');
@@ -654,21 +896,14 @@ const ChatPage = () => {
           web_mode: webMode
         })
       });
-      if (!response.ok || !response.body) throw new Error('work stream failed');
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop();
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith('data:')) continue;
-          let evt;
-          try { evt = JSON.parse(line.slice(5).trim()); } catch (err) { continue; }
+      if (!response.ok) {
+        handleUnauthorizedResponse(response.status);
+        throw await streamHttpError(response, WORK_UNAVAILABLE_MESSAGE);
+      }
+      if (!response.body) throw streamError(WORK_UNAVAILABLE_MESSAGE);
+      await readSseEvents(response, (evt) => {
+          if (evt.type === 'done') convId = evt.conversation_id || convId;
+          if (!stillHere()) return;
           if (evt.type === 'phase') {
             setStreamPhase(evt.phase);
           } else if (evt.type === 'model') {
@@ -687,15 +922,18 @@ const ChatPage = () => {
             webMeta = evt.web_search || null;
             applyServerModel(evt.active_model || evt.model);
           } else if (evt.type === 'error') {
-            throw new Error(evt.detail || 'work error');
+            throw streamError(evt.detail || WORK_UNAVAILABLE_MESSAGE);
           }
-        }
+      });
+      if (!stillHere()) {
+        if (!currentConversation && convId) fetchConversations();
+        return;
       }
       if (quotaLimited) {
         setMessages(prev => prev.filter(m => m.id !== tempId));
         return;
       }
-      if (!answer) throw new Error('empty work response');
+      if (!answer) throw streamError(STREAM_INTERRUPTED_MESSAGE);
       setMessages(prev => [...prev, {
         id: `work-${Date.now()}`,
         role: 'assistant',
@@ -712,74 +950,76 @@ const ChatPage = () => {
       }
       if (convId) fetchMessages(convId);
     } catch (error) {
-      toast.error(error.message || 'Le mode Work est temporairement indisponible.');
+      if (!stillHere()) return;
+      toast.error(streamErrorMessage(error, WORK_UNAVAILABLE_MESSAGE));
       setMessages(prev => prev.filter(m => m.id !== tempId));
     } finally {
       if (webMode === 'forced') {
         setWebMode('auto');
         localStorage.removeItem('neura_websearch');
       }
-      setStreaming(false);
-      setStreamPhase(null);
-      setStreamContent('');
-      setStreamSources([]);
-      inputRef.current?.focus();
+      if (stillHere()) {
+        setStreaming(false);
+        setStreamPhase(null);
+        setStreamContent('');
+        setStreamSources([]);
+        inputRef.current?.focus();
+      }
     }
   };
 
-  // Developer (Code) mode: dedicated assistant endpoint with per-plan quotas.
-  const sendDevMessage = async (userMessage, tempId, imageToSend, documentToSend = null) => {
-    setLoading(true);
+  const handleVoiceUtterance = async (spoken, { onDelta } = {}) => {
+    const before = messagesRef.current.length;
+    voiceDeltaRef.current = onDelta || null;
     try {
-      const devContent = documentToSend
-        ? `${userMessage || 'Analyse ce document.'}\n\nDocument fourni (${documentToSend.name}) :\n\`\`\`text\n${documentToSend.content}\n\`\`\``
-        : userMessage;
-      const r = await axios.post(`${API}/developer/chat`,
-        { content: devContent, session_id: devSessionId, image_base64: imageToSend || null, web_search: webSearch, role: devRole || null },
-        { headers: getAuthHeader(), timeout: 120000 });
-      setDevSessionId(r.data.session_id);
-      if (r.data.quota) setDevStatus(s => s ? { ...s, remaining: r.data.quota.remaining, used: r.data.quota.used, reset_at: r.data.quota.reset_at } : s);
-      setMessages(prev => [...prev, {
-        id: `dev-${Date.now()}`, role: 'assistant', content: r.data.response,
-        sources: r.data.sources || [],
-        created_at: new Date().toISOString()
-      }]);
-    } catch (err) {
-      if (err.response?.status === 429) {
-        const d = err.response.data?.detail || {};
-        setMessages(prev => [...prev, {
-          id: `dev-${Date.now()}`, role: 'assistant',
-          content: (d.message || 'Tu as atteint la limite de génération de ton abonnement.') +
-                   '\n\n👉 Passe à **Neura+** ou **Neura Ultra** pour continuer avec plus de puissance.',
-          created_at: new Date().toISOString()
-        }]);
-      } else {
-        toast.error('Service IA développeur temporairement indisponible.');
-        setMessages(prev => prev.filter(m => m.id !== tempId));
-      }
+      await sendMessage(null, spoken);
     } finally {
-      if (webMode === 'forced') {
-        setWebMode('auto');
-        localStorage.removeItem('neura_websearch');
-      }
-      setLoading(false);
-      inputRef.current?.focus();
+      voiceDeltaRef.current = null;
     }
+    // Let React apply the last state updates of the answer.
+    await new Promise((resolve) => { window.setTimeout(resolve, 60); });
+    const reply = messagesRef.current.slice(before).reverse().find((message) => message.role === 'assistant');
+    return reply?.content || '';
+  };
+  const voiceCall = useVoiceCall({
+    getAuthHeader,
+    onUtterance: handleVoiceUtterance,
+    voice: chatVoice,
+    canListen: () => !inputRef.current?.value?.trim() && Date.now() - lastTypedAtRef.current > 2500,
+    // Vocabulary only: given the AI's last reply, the transcriber "hears" it in the silence.
+    context: () => 'NEURA AL-NOUR, islam, Coran, salat, inchallah, hamdoulillah, bismillah, doua.',
+  });
+  const toggleVoiceCall = () => (voiceCall.active ? voiceCall.stop() : voiceCall.start());
+  const changeChatVoice = (voice) => {
+    setChatVoice(voice);
+    saveVoicePreference(voice, 'chat');
   };
 
-  const sendMessage = async (e) => {
-    e.preventDefault();
+  // The automatic correction asked after a failed real check, sent once the answer is over.
+  useEffect(() => {
+    if (!pendingAutoFix || streaming || loading) return;
+    const request = pendingAutoFix;
+    setPendingAutoFix(null);
+    sendMessage(null, request);
+  }, [pendingAutoFix, streaming, loading]);
+
+  const sendMessage = async (e, spokenText) => {
+    e?.preventDefault();
+    // A message typed by the user starts a new series of automatic corrections.
+    if (e) autoFixRef.current.attempts = 0;
+    // A voice call sends what was said instead of the text box.
+    const text = spokenText ?? inputMessage;
     if (
-      (!inputMessage.trim() && !selectedImage && !selectedDocument)
+      (!text.trim() && !selectedImage && !selectedDocument)
       || loading
       || streaming
       || imagesProcessing
     ) return;
     if (
-      conversationMode === 'chat'
-      && !selectedImage
+      !selectedImage
       && !selectedDocument
-      && (imageCreationMode || isImageGenerationIntent(inputMessage))
+      && spokenText == null
+      && (imageCreationMode || (conversationMode === 'chat' && isImageGenerationIntent(text)))
     ) {
       setImageCreationMode(false);
       await generateImage();
@@ -790,9 +1030,9 @@ const ChatPage = () => {
       return;
     }
 
-    const userMessage = inputMessage.trim();
+    const userMessage = text.trim();
     const requestId = createChatRequestId();
-    setInputMessage('');
+    if (spokenText == null) setInputMessage('');
 
     // Optimistically add user message
     const tempUserMsg = {
@@ -828,7 +1068,7 @@ const ChatPage = () => {
       return;
     }
 
-    const localDateAnswer = (!imageToSend && !documentToSend && !devMode && !webSearch)
+    const localDateAnswer = (!imageToSend && !documentToSend && !webSearch)
       ? getLocalCurrentDateAnswer(userMessage, language)
       : null;
     if (localDateAnswer) {
@@ -862,32 +1102,13 @@ const ChatPage = () => {
       return;
     }
 
-    let developerRequest = false;
-    try {
-      const intent = await axios.post(
-        `${API}/developer/intent`,
-        { content: userMessage, document_name: documentToSend?.name || null },
-        { headers: getAuthHeader(), timeout: 10000 }
-      );
-      developerRequest = Boolean(intent.data?.use_developer);
-    } catch (error) {
-      developerRequest = false;
-    }
-    setDevMode(developerRequest);
-    if (developerRequest) {
-      axios.get(`${API}/developer/status`, { headers: getAuthHeader() })
-        .then(response => setDevStatus(response.data))
-        .catch(() => {});
-      await sendDevMessage(userMessage, tempUserMsg.id, imageToSend, documentToSend);
-      return;
-    }
-
     // Text chat always uses SSE so the server can activate Web automatically.
     if (!imageToSend && !documentToSend && !activeCaptureId) {
       await sendMessageStream(userMessage, tempUserMsg.id, requestId);
       return;
     }
 
+    const stillHere = viewGuard();
     setLoading(true);
     try {
       const response = await axios.post(`${API}/chat/message`, {
@@ -908,6 +1129,11 @@ const ChatPage = () => {
         headers: getAuthHeader(),
         timeout: 120000 // 2 minute timeout for image/document analysis
       });
+
+      if (!stillHere()) {
+        if (!currentConversation) fetchConversations();
+        return;
+      }
 
       // Update with real response
       const aiMessage = {
@@ -934,11 +1160,13 @@ const ChatPage = () => {
       fetchChatImageQuota();
       if (response.data.conversation_id) fetchMessages(response.data.conversation_id);
     } catch (error) {
+      if (!stillHere()) return;
       const detail = error.response?.data?.detail;
-      const errorMsg = typeof detail === 'object'
+      // A FastAPI validation error (422) sends a list: never pass it to the toast.
+      const errorMsg = detail && typeof detail === 'object' && !Array.isArray(detail)
         ? detail.message || 'Limite gratuite atteinte'
-        : detail || 'Erreur lors de l\'envoi du message';
-      if (detail && typeof detail === 'object') {
+        : apiErrorMessage(error, 'Erreur lors de l\'envoi du message');
+      if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
         if (detail.quota) setConversationQuota(detail.quota);
         if (detail.image_quota) setChatImageQuota(detail.image_quota);
         if (detail.capture_quota) {
@@ -964,8 +1192,10 @@ const ChatPage = () => {
         setWebMode('auto');
         localStorage.removeItem('neura_websearch');
       }
-      setLoading(false);
-      inputRef.current?.focus();
+      if (stillHere()) {
+        setLoading(false);
+        inputRef.current?.focus();
+      }
     }
   };
 
@@ -1121,6 +1351,8 @@ const ChatPage = () => {
 
   const startNewChat = (requestedMode = 'chat') => {
     const nextMode = typeof requestedMode === 'string' ? requestedMode : 'chat';
+    // Also needed when already on /chat (the URL does not change then).
+    resetViewState();
     setCurrentConversation(null);
     setMessages([]);
     setConversationQuota(null);
@@ -1176,6 +1408,11 @@ const ChatPage = () => {
     { icon: Heart, label: t('nav.duas'), path: '/duas' },
     { icon: Brain, label: t('nav.quiz'), path: '/quiz' },
     { icon: Moon, label: 'Ramadan', path: '/ramadan' },
+    { icon: Languages, label: 'Langues', path: '/language-tutor' },
+    { icon: GraduationCap, label: 'Apprendre', path: '/islam-learning' },
+    { icon: MapPin, label: 'Mosquées', path: '/mosques' },
+    { icon: Compass, label: 'Qibla', path: '/qiblah' },
+    { icon: Gift, label: 'Missions', path: '/rewards' },
   ];
 
   const renderSources = (sources) => (
@@ -1221,7 +1458,7 @@ const ChatPage = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <Button 
+            <Button
               onClick={startNewChat} 
               className="w-full rounded-full"
               data-testid="new-chat-btn"
@@ -1253,7 +1490,8 @@ const ChatPage = () => {
                   <span className="flex-1 truncate text-sm">{conv.title}</span>
                   <button
                     onClick={(e) => deleteConversation(conv.id, e)}
-                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-destructive transition-opacity"
+                    className="md:opacity-0 md:group-hover:opacity-100 p-1 hover:text-destructive transition-opacity"
+                    aria-label="Supprimer la conversation"
                     data-testid={`delete-conv-${conv.id}`}
                   >
                     <Trash2 className="w-4 h-4" />
@@ -1272,8 +1510,10 @@ const ChatPage = () => {
                   to={item.path}
                   className="p-2 rounded-lg hover:bg-muted flex flex-col items-center gap-1 transition-colors"
                   title={item.label}
+                  data-testid={`quick-nav-${item.path.slice(1)}`}
                 >
                   <item.icon className="w-4 h-4" />
+                  <span className="text-[10px] leading-none text-muted-foreground truncate max-w-full">{item.label}</span>
                 </Link>
               ))}
             </div>
@@ -1302,10 +1542,7 @@ const ChatPage = () => {
                 ) : user?.subscription && user?.subscription !== 'free' ? (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/15 text-primary text-xs font-medium" data-testid="premium-badge">
                     <Zap className="w-3 h-3" />
-                    {user.subscription === 'comme_toi' ? 'Comme Toi' : 
-                     user.subscription === 'mongo' ? 'Mongo' : 
-                     user.subscription === 'pro' ? 'Plus' :
-                     user.subscription === 'developer' ? 'Développeur' : user.subscription}
+                    {planLabel(user.subscription)}
                   </span>
                 ) : (
                   <Link to="/subscription" className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs hover:bg-primary/10 hover:text-primary transition-colors" data-testid="upgrade-link">
@@ -1369,6 +1606,31 @@ const ChatPage = () => {
           </div>
         )}
 
+        {messages.length > 0 && (
+          <div className="flex items-center justify-end gap-2 border-b border-border px-4 py-1.5 text-xs" data-testid="export-bar">
+            {canExport(user) ? (
+              <>
+                <span className="text-muted-foreground">Exporter :</span>
+                <button type="button" className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 hover:text-foreground"
+                  onClick={() => downloadText(messages, conversations.find((c) => c.id === currentConversation)?.title || 'Conversation NEURA AL-NOUR')}
+                  data-testid="export-text">
+                  <FileDown className="h-3 w-3" /> Texte
+                </button>
+                <button type="button" className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 hover:text-foreground"
+                  onClick={() => printPdf(messages, conversations.find((c) => c.id === currentConversation)?.title || 'Conversation NEURA AL-NOUR')}
+                  data-testid="export-pdf">
+                  <FileDown className="h-3 w-3" /> PDF
+                </button>
+              </>
+            ) : (
+              <Link to="/subscription" className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-muted-foreground hover:text-foreground"
+                data-testid="export-locked">
+                <Lock className="h-3 w-3" /> Exporter la conversation avec Mongo
+              </Link>
+            )}
+          </div>
+        )}
+
         {/* Messages Area */}
         <ScrollArea className="flex-1 p-4">
           <div className="max-w-3xl mx-auto space-y-6">
@@ -1417,6 +1679,12 @@ const ChatPage = () => {
                         ? 'max-w-[85%] rounded-2xl rounded-bl-md border border-amber-500/40 bg-amber-500/10 p-4'
                         : 'w-full max-w-[85%] py-2'
                     }>
+                      {msg.role === 'user' && msg.workshop && (
+                        <p className="mb-1 text-[11px] opacity-80" data-testid="message-workshop">📦 {msg.workshop}</p>
+                      )}
+                      {msg.role === 'user' && msg.video && (
+                        <p className="mb-1 text-[11px] opacity-80" data-testid="message-video">{msg.video}</p>
+                      )}
                       {msg.role === 'assistant' && (
                         <div className="flex items-center gap-2 mb-2 text-primary">
                           <Sparkles className="w-4 h-4" />
@@ -1452,15 +1720,29 @@ const ChatPage = () => {
                         <img
                           src={msg.generated_image}
                           alt="Generated"
-                          className="max-w-[300px] rounded-lg mb-2"
+                          className="w-full max-w-[300px] rounded-lg mb-2"
                           data-testid="generated-image"
                         />
                       )}
                       {msg.role === 'assistant' || isQuotaNotice ? (
                         <div className="markdown-content text-sm leading-relaxed">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                            {isQuotaNotice ? quotaNoticeContent(msg) : msg.content}
-                          </ReactMarkdown>
+                          {isQuotaNotice ? (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                              {quotaNoticeContent(msg)}
+                            </ReactMarkdown>
+                          ) : (
+                            <>
+                              {Boolean(msg.thinking?.trim() || /```/.test(msg.content || '')) && (
+                                <ThinkingPanel thinking={msg.thinking || ''} content={msg.content} seconds={(msg.duration_ms || 0) / 1000} translate={translateThinking} />
+                              )}
+                              <AssistantMarkdown
+                                content={msg.content}
+                                components={mdComponents}
+                                onFixProject={streaming || loading ? undefined : (request) => sendMessage(null, request)}
+                              />
+                              <VerificationNote result={verifications[versionOf(msg.content || '')]} />
+                            </>
+                          )}
                         </div>
                       ) : (
                         <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
@@ -1486,6 +1768,16 @@ const ChatPage = () => {
                           )}
                         </div>
                       )}
+                      {msg.role === 'assistant' && msg.stopped && (
+                        <p className="mt-2 text-xs text-muted-foreground" data-testid="message-stopped">
+                          {msg.content?.trim() ? 'Réponse arrêtée.' : 'Tu as arrêté cette réponse.'}
+                        </p>
+                      )}
+                      {msg.role === 'assistant' && msg.interrupted && (
+                        <p className="mt-2 text-xs text-amber-600 dark:text-amber-400" data-testid="message-interrupted">
+                          Réponse incomplète : la connexion a été interrompue.
+                        </p>
+                      )}
                       {msg.role === 'assistant' && msg.web_search?.performed && (
                         <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-xs text-primary" data-testid="web-search-used">
                           <Globe className="h-3 w-3" />
@@ -1506,19 +1798,39 @@ const ChatPage = () => {
                     <Sparkles className="w-4 h-4" />
                     <span className="text-xs font-medium">NEURA AL-NOUR</span>
                   </div>
-                  {streamPhase && !streamContent && (
-                    <div className="flex items-center gap-2 text-primary text-sm">
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                  {conversationMode !== 'work' && !showsReasoning && !streamContent && (
+                    <span className="inline-block h-3.5 w-3.5 animate-pulse rounded-full bg-blue-500" aria-label="Neura écrit" data-testid="writing-dot" />
+                  )}
+                  {conversationMode !== 'work' && showsReasoning && (
+                    <ThinkingPanel
+                      active
+                      thinking={streamThinking}
+                      translate={translateThinking}
+                      content={streamContent}
+                      label={streamPhase && streamPhase !== 'writing' ? getStatusLabel(language, selectedModel, streamPhase) : undefined}
+                    />
+                  )}
+                  {!streamContent && conversationMode === 'work' && (
+                    <div className="flex items-center gap-2 text-primary text-sm" data-testid="neura-thinking">
+                      <span className="relative flex h-4 w-4 items-center justify-center">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/30" />
+                        <Sparkles className="relative w-3.5 h-3.5" />
+                      </span>
                       <span data-testid={conversationMode === 'work' ? 'work-status' : 'search-status'}>
                         {conversationMode === 'work'
                           ? WORK_STATUS[streamPhase] || 'Travail en cours…'
                           : getStatusLabel(language, selectedModel, streamPhase)}
                       </span>
+                      <span className="inline-flex gap-0.5" aria-hidden="true">
+                        {[0, 150, 300].map((delay) => (
+                          <span key={delay} className="h-1 w-1 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${delay}ms` }} />
+                        ))}
+                      </span>
                     </div>
                   )}
                   {streamContent && (
                     <div className="markdown-content text-sm leading-relaxed">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamContent}</ReactMarkdown>
+                      <AssistantMarkdown content={streamContent} components={mdComponents} live />
                     </div>
                   )}
                   {streamSources.length > 0 && renderSources(streamSources)}
@@ -1530,7 +1842,7 @@ const ChatPage = () => {
                 <div className="py-2">
                   <div className="flex items-center gap-2 text-primary">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span className="text-sm">{t('chat.thinking')}</span>
+                    <span className="text-sm">{getStatusLabel(language, selectedModel, 'writing')}…</span>
                   </div>
                 </div>
               </div>
@@ -1635,7 +1947,7 @@ const ChatPage = () => {
               <select
                 value={selectedModel}
                 onChange={(e) => handleModelChange(e.target.value)}
-                className="text-xs rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
+                className="text-xs rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer max-w-[60vw] sm:max-w-sm"
                 data-testid="model-selector"
                 data-provider={activeModel?.provider || ''}
                 data-model-id={activeModel?.model_id || ''}
@@ -1643,88 +1955,38 @@ const ChatPage = () => {
                 data-selection-reason={activeModel?.selection_reason || ''}
                 disabled={!modelOptions.length}
               >
-                {modelOptions.length ? modelOptions.map((option) => {
-                  const model = option.key === selectedModel && activeModel
-                    ? activeModel
-                    : option.model;
+                {modelOptions.length ? (() => {
+                  const { routers, groups } = groupModelOptions(modelOptions);
+                  const renderOption = (option, label) => {
+                    const model = option.key === selectedModel && activeModel
+                      ? activeModel
+                      : option.model;
+                    return (
+                      <option key={option.key} value={option.key}>{label(model)}</option>
+                    );
+                  };
                   return (
-                    <option key={option.key} value={option.key}>{model.label}</option>
+                    <>
+                      {routers.map((option) => renderOption(option, (model) => model.label))}
+                      {groups.map((group) => (
+                        <optgroup key={group.name} label={`Tous les modèles · ${group.name}`}>
+                          {group.options.map((option) => renderOption(
+                            option,
+                            (model) => model.display_name || model.label
+                          ))}
+                        </optgroup>
+                      ))}
+                    </>
                   );
-                }) : (
+                })() : (
                   <option value={selectedModel}>Modèle indisponible</option>
                 )}
               </select>
-              {intelligenceModes.length > 0 && (
-                <select
-                  value={selectedIntelligenceMode}
-                  onChange={(e) => handleIntelligenceModeChange(e.target.value)}
-                  className="text-xs rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
-                  data-testid="intelligence-mode-selector"
-                  aria-label="Niveau d’intelligence"
-                >
-                  {intelligenceModes.map((mode) => {
-                    const unavailable = mode.key !== 'auto'
-                      && activeModel?.levels_available
-                      && activeModel.levels_available[mode.key] === false;
-                    return (
-                      <option key={mode.key} value={mode.key} disabled={unavailable}>
-                        {mode.label}{unavailable ? ' · Indisponible' : ''}
-                      </option>
-                    );
-                  })}
-                </select>
-              )}
             </div>
 
-            {devMode && (
-              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs" data-testid="dev-panel">
-                {devStatus && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 text-primary px-3 py-1 font-medium">
-                    <Code2 className="w-3 h-3" />
-                    {devStatus.label}{devStatus.is_founder ? ' · Fondateur' : ''} ·{' '}
-                    {devStatus.unlimited ? 'illimité' : `${devStatus.remaining ?? '—'}/${devStatus.limit} crédits`}
-                  </span>
-                )}
-                {devStatus && (devStatus.tier === 'plus' || devStatus.tier === 'ultra') && (
-                  <select
-                    value={devRole}
-                    onChange={(e) => setDevRole(e.target.value)}
-                    className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer"
-                    title="Rôle expert (Neura+/Ultra)"
-                    data-testid="dev-role-selector"
-                  >
-                    <option value="">Rôle…</option>
-                    <option value="frontend">Frontend senior</option>
-                    <option value="backend">Backend senior</option>
-                    <option value="fullstack">Fullstack senior</option>
-                    <option value="architect">Architecte</option>
-                    <option value="security">Sécurité</option>
-                    <option value="database">Base de données</option>
-                    <option value="mobile">Mobile senior</option>
-                  </select>
-                )}
-                <button type="button" onClick={() => setWsOpen(true)}
-                  className="rounded-full bg-primary/10 text-primary px-3 py-1 hover:bg-primary/20 transition-colors inline-flex items-center gap-1"
-                  data-testid="dev-workspace-btn">
-                  <Code2 className="w-3 h-3" /> Projet
-                </button>
-                {[
-                  { label: 'Page React', text: 'Crée une page React ' },
-                  { label: 'Corriger un bug', text: 'Corrige ce bug : ' },
-                  { label: 'API Express', text: 'Crée une API Express pour ' },
-                  { label: 'Auditer du code', text: 'Audite ce code (forces, faiblesses, risques, note /10) :\n' },
-                  { label: 'Script FiveM', text: 'Crée un script FiveM ESX pour ' },
-                ].map((t, i) => (
-                  <button key={i} type="button" onClick={() => { setInputMessage(t.text); inputRef.current?.focus(); }}
-                    className="rounded-full bg-muted px-3 py-1 text-muted-foreground hover:text-foreground transition-colors"
-                    data-testid={`dev-template-${i}`}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <DevWorkspace open={wsOpen} onClose={() => setWsOpen(false)} lastAiCode={extractAiCode(messages)} />
+            <ProjectWorkshopPanel workshop={workshop} />
+            <VideoAnalysisPanel video={video} level={appliedLevel} />
+            <ProjectMemoryCard conversationId={currentConversation} refreshKey={projectMemoryTick} />
 
             {webMode === 'forced' && (
               <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs text-primary" data-testid="web-search-active">
@@ -1752,6 +2014,12 @@ const ChatPage = () => {
               </div>
             )}
 
+            {voiceCall.active && (
+              <VoiceCallPanel call={voiceCall} voice={chatVoice} onVoiceChange={changeChatVoice} title="Appel avec Neura" />
+            )}
+            {!voiceCall.active && voiceCall.error && (
+              <p className="mb-2 text-sm text-amber-600 dark:text-amber-400" data-testid="voice-call-error">{voiceCall.error}</p>
+            )}
             <div className="relative flex items-center gap-2">
               <input
                 type="file"
@@ -1778,6 +2046,30 @@ const ChatPage = () => {
                 accept=".txt,.md,.csv,.json,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.php,.sql,.yml,.yaml,.toml,.ini,.log"
                 className="hidden"
                 data-testid="document-input"
+              />
+              <input
+                type="file"
+                ref={zipInputRef}
+                accept=".zip,application/zip"
+                className="hidden"
+                data-testid="zip-input"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) workshop.open(file);
+                  event.target.value = '';
+                }}
+              />
+              <input
+                type="file"
+                ref={videoInputRef}
+                accept="video/*"
+                className="hidden"
+                data-testid="video-input"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) video.open(file);
+                  event.target.value = '';
+                }}
               />
 
               <div className="relative" ref={toolsMenuRef}>
@@ -1840,6 +2132,28 @@ const ChatPage = () => {
                     </button>
                     <button
                       type="button"
+                      onClick={() => {
+                        setToolsMenuOpen(false);
+                        zipInputRef.current?.click();
+                      }}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
+                      data-testid="tools-zip"
+                    >
+                      <Package className="h-4 w-4" /> Atelier de projet (ZIP)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setToolsMenuOpen(false);
+                        videoInputRef.current?.click();
+                      }}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
+                      data-testid="tools-video"
+                    >
+                      <Clapperboard className="h-4 w-4" /> Analyser une vidéo
+                    </button>
+                    <button
+                      type="button"
                       onClick={activateForcedWebSearch}
                       className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
                       data-testid="tools-web"
@@ -1859,6 +2173,22 @@ const ChatPage = () => {
                         <span className="ml-auto text-xs text-muted-foreground">{imageGenRemaining.remaining}</span>
                       )}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setToolsMenuOpen(false);
+                        toggleVoiceCall();
+                      }}
+                      className="flex w-full items-center gap-3 rounded px-3 py-2 text-left text-sm hover:bg-muted"
+                      data-testid="tools-voice-call"
+                    >
+                      {voiceCall.active ? <PhoneOff className="h-4 w-4 text-destructive" /> : <Phone className="h-4 w-4" />}
+                      {voiceCall.active ? 'Raccrocher' : 'Appel vocal'}
+                    </button>
+                    <div className="px-3 py-2 border-t border-border mt-1">
+                      <p className="text-xs text-muted-foreground mb-1.5">Voix de Neura</p>
+                      <VoicePicker value={chatVoice} onChange={changeChatVoice} />
+                    </div>
                   </div>
                 )}
               </div>
@@ -1867,7 +2197,10 @@ const ChatPage = () => {
                 <Input
                   ref={inputRef}
                   value={inputMessage}
-                  onChange={(e) => setInputMessage(e.target.value)}
+                  onChange={(e) => {
+                    lastTypedAtRef.current = Date.now();
+                    setInputMessage(e.target.value);
+                  }}
                   onPaste={handleImagePaste}
                   placeholder={conversationBlocked
                     ? 'Limite atteinte pour cette conversation'
@@ -1883,15 +2216,54 @@ const ChatPage = () => {
                   data-testid="chat-input"
                 />
               </div>
-              <Button 
-                type="submit" 
-                size="icon" 
-                className="h-12 w-12 rounded-full"
-                disabled={loading || generatingImage || imagesProcessing || conversationBlocked || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
-                data-testid="send-message-btn"
+              <ReasoningLevelPicker
+                modes={intelligenceModes.map((mode) => ({
+                  ...mode,
+                  // A level of the plan whose Plus quota is used up is locked until it renews.
+                  available: mode.available !== false
+                    && !(activeModel?.levels_available && activeModel.levels_available[mode.key] === false),
+                }))}
+                value={selectedIntelligenceMode}
+                onChange={handleIntelligenceModeChange}
+                disabled={streaming}
+              />
+              <Button
+                type="button"
+                size="icon"
+                onClick={toggleVoiceCall}
+                className={`h-12 w-12 rounded-full shadow-md transition-all ${voiceCall.active
+                  ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
+                  : 'bg-gradient-to-br from-emerald-400 to-teal-600 text-white hover:shadow-lg hover:shadow-emerald-500/30 hover:scale-105'}`}
+                disabled={!voiceCall.active && conversationBlocked}
+                title={voiceCall.active ? 'Raccrocher' : 'Appel vocal avec Neura'}
+                aria-label={voiceCall.active ? 'Raccrocher' : 'Appel vocal'}
+                data-testid="voice-call-btn"
               >
-                <Send className="w-5 h-5" />
+                {voiceCall.active ? <PhoneOff className="w-5 h-5" /> : <Phone className="w-5 h-5" />}
               </Button>
+              {streaming && streamAbortRef.current ? (
+                <Button
+                  type="button"
+                  size="icon"
+                  onClick={stopGenerating}
+                  className="h-12 w-12 rounded-full bg-blue-500 text-white hover:bg-blue-600"
+                  title="Arrêter la réponse"
+                  aria-label="Arrêter la réponse"
+                  data-testid="stop-generating-btn"
+                >
+                  <Square className="w-4 h-4 fill-white text-white" />
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  size="icon"
+                  className="h-12 w-12 rounded-full"
+                  disabled={loading || streaming || generatingImage || imagesProcessing || conversationBlocked || (!inputMessage.trim() && !selectedImage && !selectedDocument)}
+                  data-testid="send-message-btn"
+                >
+                  <Send className="w-5 h-5" />
+                </Button>
+              )}
             </div>
             {imageUploadBlocked && (
               <p className="mt-2 text-xs text-muted-foreground" data-testid="chat-image-reset">

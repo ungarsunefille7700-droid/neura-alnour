@@ -6,12 +6,23 @@ import remarkGfm from 'remark-gfm';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { LANGUAGES } from '@/i18n/languages';
+import { TUTOR_LANGUAGE_GROUPS, detectRequestedLanguage, frenchLanguageName } from '@/utils/tutorLanguages';
 import { selectBestVoice, speechChunks, speechLang } from '@/utils/speech';
+import { readSseEvents, streamError, streamErrorMessage, streamHttpError } from '@/utils/sseStream';
 import {
-  Mic, Send, Phone, PhoneOff, Volume2, Square, GraduationCap, ArrowLeft, Loader2, Sparkles
+  getVoicePreference, recordUtterance, saveVoicePreference, speakWithVoice, transcribeAudio,
+  voiceCallSupported, voiceErrorMessage,
+} from '@/utils/voice';
+import useVoiceCall from '@/hooks/useVoiceCall';
+import VoiceCallPanel, { VoicePicker } from '@/components/VoiceCallPanel';
+import {
+  Mic, Send, Phone, Volume2, Square, GraduationCap, ArrowLeft, Loader2, Plus, Trash2
 } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
+const TUTOR_UNAVAILABLE_MESSAGE = 'Service IA temporairement indisponible. Réessaie.';
+const TUTOR_INTERRUPTED_MESSAGE = 'Réponse interrompue avant la fin. Réessaie.';
 
 const LEVELS = [
   { key: 'débutant', label: 'Débutant' },
@@ -29,31 +40,50 @@ const QUICK = [
 ];
 
 export default function LanguageTutorPage() {
-  const { token, getAuthHeader } = useAuth();
+  const { token, getAuthHeader, handleUnauthorizedResponse } = useAuth();
   const navigate = useNavigate();
 
   const [language, setLanguage] = useState(() => localStorage.getItem('neura_tutor_lang') || 'en');
   const [level, setLevel] = useState(() => localStorage.getItem('neura_tutor_level') || 'débutant');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [sessionId, setSessionId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [streamStarted, setStreamStarted] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [callMode, setCallMode] = useState(false);
+  const [dictation, setDictation] = useState(null); // null | 'listening' | 'transcribing'
   const [speaking, setSpeaking] = useState(false);
+  const [tutorVoice, setTutorVoice] = useState(() => getVoicePreference('tutor'));
+  const lastTypedAtRef = useRef(0);
+  const inputValueRef = useRef('');
+  const messagesRef = useRef([]);
+  inputValueRef.current = input;
+  messagesRef.current = messages;
   const [voices, setVoices] = useState([]);
   const [voiceNotice, setVoiceNotice] = useState('');
   const [progress, setProgress] = useState([]);
+  // Saved conversations of the current language (each language keeps its own).
+  const [sessions, setSessions] = useState([]);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const conversationSeqRef = useRef(0);
 
-  const recognitionRef = useRef(null);
-  const recognitionTextRef = useRef('');
-  const recognitionSentRef = useRef(false);
-  const recognitionConfidenceRef = useRef(1);
-  const recognitionFallbackRef = useRef(false);
+  const dictationAbortRef = useRef(null);
+  const dictationFinishRef = useRef(null);
+  const speechAbortRef = useRef(null);
   const bottomRef = useRef(null);
-  const callModeRef = useRef(false);
-  useEffect(() => { callModeRef.current = callMode; }, [callMode]);
+  // Voice callbacks (end of recording, end of speech) outlive the render that
+  // created them; these refs give them the current session, busy flag and
+  // handlers instead of the values captured when the call started.
+  const sessionIdRef = useRef(null);
+  const busyRef = useRef(false);
+  const sendRef = useRef(null);
+  const requestRef = useRef(null);
+  useEffect(() => () => {
+    // Leaving the page ends the call: stop the microphone, the voice and the request.
+    dictationAbortRef.current?.abort();
+    speechAbortRef.current?.abort();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    requestRef.current?.abort();
+  }, []);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, busy]);
   useEffect(() => {
     if (!('speechSynthesis' in window)) return undefined;
@@ -70,83 +100,180 @@ export default function LanguageTutorPage() {
   }, [token]);
 
   const langName = (LANGUAGES.find((l) => l.code === language) || {}).name || 'English';
-  const langNative = (LANGUAGES.find((l) => l.code === language) || {}).native || 'English';
 
-  const sttSupported = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const fetchSessions = useCallback(async (code) => {
+    const name = (LANGUAGES.find((l) => l.code === code) || {}).name || 'English';
+    const response = await axios.get(`${API}/language-tutor/sessions`, {
+      headers: getAuthHeader(), params: { language: name },
+    });
+    return Array.isArray(response.data) ? response.data : [];
+  }, [getAuthHeader]);
+
+  const selectSession = useCallback((sessionId) => {
+    sessionIdRef.current = sessionId;
+    setCurrentSessionId(sessionId);
+  }, []);
+
+  const showConversation = useCallback(async (sessionId, seq) => {
+    const response = await axios.get(
+      `${API}/language-tutor/sessions/${sessionId}/messages`, { headers: getAuthHeader() }
+    );
+    if (seq !== conversationSeqRef.current) return;
+    setMessages((response.data || []).map(({ role, content }) => ({ role, content })));
+    selectSession(sessionId);
+  }, [getAuthHeader, selectSession]);
+
+  const openConversation = useCallback(async (sessionId) => {
+    const seq = ++conversationSeqRef.current;
+    setLoadingConversation(true);
+    try {
+      await showConversation(sessionId, seq);
+    } catch (error) {
+      if (seq === conversationSeqRef.current) setVoiceNotice('Impossible de charger cette conversation.');
+    } finally {
+      if (seq === conversationSeqRef.current) setLoadingConversation(false);
+    }
+  }, [showConversation]);
+
+  // Shows the most recent saved conversation of a language (or an empty one).
+  const loadLanguageConversations = useCallback(async (code) => {
+    const seq = ++conversationSeqRef.current;
+    setLoadingConversation(true);
+    try {
+      const list = await fetchSessions(code);
+      if (seq !== conversationSeqRef.current) return;
+      setSessions(list);
+      if (!list.length) {
+        setMessages([]);
+        selectSession(null);
+        return;
+      }
+      await showConversation(list[0].session_id, seq);
+    } catch (error) {
+      if (seq !== conversationSeqRef.current) return;
+      setSessions([]);
+      setMessages([]);
+      selectSession(null);
+    } finally {
+      if (seq === conversationSeqRef.current) setLoadingConversation(false);
+    }
+  }, [fetchSessions, selectSession, showConversation]);
+
+  useEffect(() => {
+    if (!token) return;
+    loadLanguageConversations(language);
+    // Only on arrival: a language change loads its conversations explicitly.
+  }, [token]);
+  const langNative = (LANGUAGES.find((l) => l.code === language) || {}).native || 'English';
+  const langFrench = frenchLanguageName(LANGUAGES.find((l) => l.code === language)) || langNative;
+
   const ttsSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
   const speechLocale = speechLang(language);
   const matchingVoice = selectBestVoice(voices, speechLocale);
   const savedProgress = progress.find((item) => item.language === langName);
 
-  // --- Text to speech ---
-  const speak = useCallback((text, onEnd) => {
-    if (!ttsSupported || !text) { onEnd && onEnd(); return; }
+  // Browser voice, used only when the server voice is unavailable.
+  const speakWithBrowser = useCallback((text, signal) => new Promise((resolve) => {
+    if (!ttsSupported || !text) { resolve(); return; }
     try {
       window.speechSynthesis.cancel();
       const chunks = speechChunks(text);
-      if (!chunks.length) { onEnd && onEnd(); return; }
       let index = 0;
-      const finish = () => { setSpeaking(false); onEnd && onEnd(); };
       const playNext = () => {
-        if (index >= chunks.length) { finish(); return; }
+        if (index >= chunks.length || signal?.aborted) { resolve(); return; }
         const utterance = new SpeechSynthesisUtterance(chunks[index]);
         utterance.lang = speechLocale;
         utterance.rate = 0.95;
-        utterance.pitch = 1;
-        utterance.volume = 1;
         if (matchingVoice) utterance.voice = matchingVoice;
-        utterance.onstart = () => setSpeaking(true);
         utterance.onend = () => { index += 1; playNext(); };
-        utterance.onerror = finish;
+        utterance.onerror = () => resolve();
         window.speechSynthesis.speak(utterance);
       };
       playNext();
-    } catch (e) { onEnd && onEnd(); }
-  }, [matchingVoice, speechLocale, ttsSupported]);
+    } catch (e) { resolve(); }
+  }), [matchingVoice, speechLocale, ttsSupported]);
 
-  const stopSpeaking = () => { if (ttsSupported) window.speechSynthesis.cancel(); setSpeaking(false); };
+  const speak = useCallback(async (text) => {
+    if (!text) return;
+    speechAbortRef.current?.abort();
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
+    setSpeaking(true);
+    try {
+      await speakWithVoice(text, {
+        voice: tutorVoice, headers: getAuthHeader(), signal: controller.signal, language, languageName: langFrench,
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) await speakWithBrowser(text, controller.signal);
+    } finally {
+      if (speechAbortRef.current === controller) {
+        speechAbortRef.current = null;
+        setSpeaking(false);
+      }
+    }
+  }, [getAuthHeader, language, langFrench, speakWithBrowser, tutorVoice]);
+
+  const stopSpeaking = () => {
+    speechAbortRef.current?.abort();
+    if (ttsSupported) window.speechSynthesis.cancel();
+    setSpeaking(false);
+  };
 
   // --- Send a message ---
-  const send = useCallback(async (text, fromVoice = false) => {
+  // onDelta (voice call) receives the reply while it streams.
+  const send = useCallback(async (text, fromVoice = false, onDelta = null) => {
     const msg = (text != null ? text : input).trim();
-    if (!msg || busy) return;
+    if (!msg || busyRef.current || loadingConversation) return '';
     setInput('');
-    setMessages((p) => [...p, { role: 'user', content: msg }]);
+    busyRef.current = true;
     setBusy(true);
+    // "Je veux apprendre le rifain": switch the tutor to that language first,
+    // reopening the conversation already saved for it.
+    const requestedCode = detectRequestedLanguage(msg, language);
+    const requested = requestedCode && LANGUAGES.find((l) => l.code === requestedCode);
+    const targetName = requested ? requested.name : langName;
+    const targetCode = requested ? requested.code : language;
+    if (requested) {
+      setLanguage(requested.code);
+      localStorage.setItem('neura_tutor_lang', requested.code);
+      setVoiceNotice('');
+      await loadLanguageConversations(requested.code);
+      setMessages((p) => [
+        ...p,
+        { role: 'assistant', content: `🔄 Langue changée : ${frenchLanguageName(requested)}.` },
+        { role: 'user', content: msg },
+      ]);
+    } else {
+      setMessages((p) => [...p, { role: 'user', content: msg }]);
+    }
     setStreamStarted(false);
     const assistantId = `tutor-${Date.now()}`;
     let accumulated = '';
     const controller = new AbortController();
+    requestRef.current = controller;
     const timeoutId = window.setTimeout(() => controller.abort(), 90000);
     try {
       const response = await fetch(`${API}/language-tutor/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
         body: JSON.stringify({
-          content: msg, language: langName, level, session_id: sessionId, voice: fromVoice,
+          content: msg, language: targetName, level, session_id: sessionIdRef.current, voice: fromVoice,
         }),
         signal: controller.signal,
       });
-      if (!response.ok || !response.body) throw new Error('stream unavailable');
+      if (!response.ok) {
+        handleUnauthorizedResponse(response.status);
+        throw await streamHttpError(response, TUTOR_UNAVAILABLE_MESSAGE);
+      }
+      if (!response.body) throw streamError(TUTOR_UNAVAILABLE_MESSAGE);
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || '';
-        for (const rawEvent of events) {
-          const line = rawEvent.trim();
-          if (!line.startsWith('data:')) continue;
-          let event;
-          try { event = JSON.parse(line.slice(5).trim()); } catch (error) { continue; }
+      await readSseEvents(response, (event) => {
+          if (controller.signal.aborted) return;
           if (event.type === 'session' && event.session_id) {
-            setSessionId(event.session_id);
+            selectSession(event.session_id);
           } else if (event.type === 'delta' && event.content) {
             accumulated += event.content;
+            onDelta?.(event.content);
             setStreamStarted(true);
             setMessages((current) => {
               const exists = current.some((item) => item.id === assistantId);
@@ -156,130 +283,132 @@ export default function LanguageTutorPage() {
               ));
             });
           } else if (event.type === 'error') {
-            throw new Error(event.detail || 'stream failed');
+            throw streamError(event.detail || TUTOR_UNAVAILABLE_MESSAGE);
           }
-        }
-      }
-      if (!accumulated.trim()) throw new Error('empty stream');
+      });
+      if (controller.signal.aborted) throw streamError(TUTOR_INTERRUPTED_MESSAGE);
+      if (!accumulated.trim()) throw streamError(TUTOR_UNAVAILABLE_MESSAGE);
       setProgress((current) => [
-        { language: langName, level, updated_at: new Date().toISOString() },
-        ...current.filter((item) => item.language !== langName),
+        { language: targetName, level, updated_at: new Date().toISOString() },
+        ...current.filter((item) => item.language !== targetName),
       ]);
-      // In call mode: speak the reply, then listen again.
-      if (callModeRef.current) {
-        speak(accumulated, () => { if (callModeRef.current) startListening(); });
-      }
+      fetchSessions(targetCode).then(setSessions).catch(() => {});
+      return accumulated;
     } catch (e) {
       if (!accumulated) {
-        setMessages((p) => [...p, { role: 'assistant', content: '⚠️ Service IA temporairement indisponible. Réessaie.' }]);
+        setMessages((p) => [...p, { role: 'assistant', content: `⚠️ ${streamErrorMessage(e, TUTOR_UNAVAILABLE_MESSAGE)}` }]);
+      } else {
+        // Partial answer already displayed: say clearly that it is incomplete.
+        setMessages((current) => current.map((item) => (
+          item.id === assistantId ? { ...item, content: `${accumulated}\n\n⚠️ ${TUTOR_INTERRUPTED_MESSAGE}` } : item
+        )));
       }
+      return accumulated;
     } finally {
       window.clearTimeout(timeoutId);
+      if (requestRef.current === controller) requestRef.current = null;
+      busyRef.current = false;
       setBusy(false);
       setStreamStarted(false);
     }
-  }, [input, busy, langName, level, sessionId, getAuthHeader, speak]);
+  }, [input, language, langName, level, loadingConversation, getAuthHeader, handleUnauthorizedResponse,
+    loadLanguageConversations, fetchSessions, selectSession]);
+  sendRef.current = send;
 
-  // --- Speech to text ---
-  const startListening = useCallback((fallbackLocale = null) => {
-    if (!sttSupported) return;
-    try {
-      try { recognitionRef.current?.abort(); } catch (error) {}
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const rec = new SR();
-      const primaryLocale = speechLang(language);
-      rec.lang = fallbackLocale || primaryLocale;
-      rec.interimResults = true;
-      rec.maxAlternatives = 5;
-      rec.continuous = Boolean(callModeRef.current);
-      recognitionTextRef.current = '';
-      recognitionSentRef.current = false;
-      recognitionConfidenceRef.current = 1;
-      recognitionFallbackRef.current = Boolean(fallbackLocale);
-      rec.onstart = () => {
-        setListening(true);
-        setVoiceNotice(fallbackLocale ? 'Je retente en français pour mieux comprendre...' : '');
-      };
-      rec.onerror = (event) => {
-        setListening(false);
-        const notices = {
-          'language-not-supported': `La reconnaissance vocale ${langNative} n'est pas disponible dans ce navigateur. Le chat écrit reste pleinement fonctionnel.`,
-          'not-allowed': "L'accès au microphone est refusé. Autorise le microphone dans le navigateur puis réessaie.",
-          'service-not-allowed': "Le service vocal du navigateur est désactivé. Vérifie les autorisations du navigateur.",
-          'network': "La reconnaissance vocale est momentanément indisponible. Vérifie la connexion puis réessaie.",
-          'no-speech': "Je n'ai pas entendu de phrase. Rapproche-toi du microphone et parle clairement.",
-        };
-        if (event.error === 'no-speech' && callModeRef.current) {
-          window.setTimeout(() => {
-            if (callModeRef.current) startListening(fallbackLocale);
-          }, 700);
-          return;
-        }
-        if (event.error !== 'aborted') {
-          setVoiceNotice(notices[event.error] || "Je n'ai pas bien compris. Réessaie en parlant un peu plus lentement.");
-        }
-      };
-      rec.onspeechend = () => { try { rec.stop(); } catch (error) {} };
-      rec.onend = () => {
-        setListening(false);
-        const said = recognitionTextRef.current.trim();
-        if (said && !recognitionSentRef.current) {
-          const shouldRetryFrench = (
-            !recognitionFallbackRef.current
-            && primaryLocale.toLowerCase() !== 'fr-fr'
-            && recognitionConfidenceRef.current < 0.55
-          );
-          if (shouldRetryFrench) {
-            window.setTimeout(() => {
-              if (!recognitionSentRef.current) startListening('fr-FR');
-            }, 250);
-            return;
-          }
-          recognitionSentRef.current = true;
-          setVoiceNotice('');
-          send(said, true);
-        }
-      };
-      rec.onresult = (ev) => {
-        let finalText = recognitionTextRef.current;
-        let interimText = '';
-        for (let i = ev.resultIndex; i < ev.results.length; i += 1) {
-          const result = ev.results[i];
-          let best = result[0];
-          for (let alt = 1; alt < result.length; alt += 1) {
-            if ((result[alt].confidence || 0) > (best.confidence || 0)) best = result[alt];
-          }
-          if (typeof best.confidence === 'number' && best.confidence > 0) {
-            recognitionConfidenceRef.current = Math.min(recognitionConfidenceRef.current, best.confidence);
-          }
-          if (result.isFinal) finalText = `${finalText} ${best.transcript}`.trim();
-          else interimText = `${interimText} ${best.transcript}`.trim();
-        }
-        recognitionTextRef.current = finalText;
-        const heard = `${finalText} ${interimText}`.trim();
-        if (heard) setVoiceNotice(`Entendu : « ${heard} »`);
-      };
-      recognitionRef.current = rec;
-      rec.start();
-    } catch (e) {
-      setListening(false);
-      setVoiceNotice("Impossible de démarrer le microphone. Vérifie son autorisation puis réessaie.");
+  // --- Voice: dictation (one sentence) and hands-free call ---
+  const call = useVoiceCall({
+    getAuthHeader,
+    voice: tutorVoice,
+    accentLanguage: language,
+    accentName: langFrench,
+    onUtterance: (spoken, { onDelta } = {}) => sendRef.current?.(spoken, true, onDelta) || '',
+    // The microphone pauses while the learner types (keyboard noise).
+    canListen: () => !inputValueRef.current.trim() && Date.now() - lastTypedAtRef.current > 2500,
+    // Only the language: given the tutor's last reply, the transcriber "hears" it in the silence.
+    context: () => `${langName}.`,
+  });
+
+  const dictate = async () => {
+    if (dictation === 'listening') { dictationFinishRef.current?.abort(); return; }
+    if (dictation || busyRef.current) return;
+    if (!voiceCallSupported()) {
+      setVoiceNotice('Ce navigateur ne permet pas d’enregistrer la voix. Essaie avec Chrome, Edge ou Safari récents.');
+      return;
     }
-  }, [language, langNative, sttSupported, send]);
-
-  const stopListening = () => { try { recognitionRef.current && recognitionRef.current.stop(); } catch (e) {} setListening(false); };
-
-  const toggleCall = () => {
-    if (callMode) {
-      setCallMode(false); stopListening(); stopSpeaking();
-    } else {
-      setCallMode(true);
-      setMessages((p) => p.length ? p : [{ role: 'assistant', content: `📞 Appel démarré — parle-moi en ${langNative} (ou en français si tu bloques). Je t'écoute…` }]);
-      startListening();
+    const controller = new AbortController();
+    const finish = new AbortController();
+    dictationAbortRef.current = controller;
+    dictationFinishRef.current = finish;
+    setVoiceNotice('');
+    setDictation('listening');
+    try {
+      const recording = await recordUtterance({ signal: controller.signal, finishSignal: finish.signal });
+      if (controller.signal.aborted) return;
+      if (!recording.blob || !recording.heard) {
+        setVoiceNotice('Je n’ai rien entendu. Rapproche-toi du micro et réessaie.');
+        return;
+      }
+      setDictation('transcribing');
+      const said = await transcribeAudio(recording.blob, { headers: getAuthHeader(), signal: controller.signal });
+      if (said) sendRef.current?.(said, true);
+      else setVoiceNotice('Je n’ai pas compris. Réessaie en parlant un peu plus fort.');
+    } catch (error) {
+      const message = voiceErrorMessage(error);
+      if (message) setVoiceNotice(message);
+    } finally {
+      if (dictationAbortRef.current === controller) {
+        dictationAbortRef.current = null;
+        dictationFinishRef.current = null;
+        setDictation(null);
+      }
     }
   };
 
-  const changeLang = (code) => { setLanguage(code); localStorage.setItem('neura_tutor_lang', code); setMessages([]); setSessionId(null); setVoiceNotice(''); };
+  const toggleCall = () => {
+    if (call.active) {
+      call.stop();
+      return;
+    }
+    stopSpeaking();
+    dictationAbortRef.current?.abort();
+    setMessages((p) => p.length ? p : [{ role: 'assistant', content: `📞 Appel démarré — parle-moi en ${langFrench} (ou dans ta langue si tu bloques). Je t'écoute…` }]);
+    call.start();
+  };
+
+  const changeTutorVoice = (voice) => {
+    setTutorVoice(voice);
+    saveVoicePreference(voice, 'tutor');
+  };
+
+  const changeLang = (code) => {
+    setLanguage(code);
+    localStorage.setItem('neura_tutor_lang', code);
+    setVoiceNotice('');
+    loadLanguageConversations(code);
+  };
+  const startNewConversation = () => {
+    conversationSeqRef.current += 1;
+    setLoadingConversation(false);
+    setMessages([]);
+    selectSession(null);
+  };
+  const deleteConversation = async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || !window.confirm('Supprimer cette conversation ?')) return;
+    try {
+      await axios.delete(`${API}/language-tutor/sessions/${sessionId}`, { headers: getAuthHeader() });
+      loadLanguageConversations(language);
+    } catch (error) {
+      setVoiceNotice('Impossible de supprimer cette conversation.');
+    }
+  };
+  const sessionLabel = (session) => {
+    const date = session.updated_at ? new Date(session.updated_at) : null;
+    const when = date && !Number.isNaN(date.getTime())
+      ? date.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
+      : '';
+    return `${session.title || 'Conversation'}${when ? ` · ${when}` : ''}`;
+  };
   const changeLevel = (lv) => { setLevel(lv); localStorage.setItem('neura_tutor_level', lv); };
 
   return (
@@ -291,24 +420,66 @@ export default function LanguageTutorPage() {
         <div className="flex items-center gap-2 ml-auto text-sm">
           <span className="text-muted-foreground">Langue :</span>
           <select value={language} onChange={(e) => changeLang(e.target.value)}
-            className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer max-w-[150px]" data-testid="tutor-lang">
-            {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.native}</option>)}
+            disabled={busy}
+            aria-label="Langue à apprendre"
+            className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer max-w-[220px] disabled:opacity-60" data-testid="tutor-lang">
+            {TUTOR_LANGUAGE_GROUPS.map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.options.map((option) => <option key={option.code} value={option.code}>{option.label}</option>)}
+              </optgroup>
+            ))}
           </select>
           <select value={level} onChange={(e) => changeLevel(e.target.value)}
             className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer" data-testid="tutor-level">
             {LEVELS.map((lv) => <option key={lv.key} value={lv.key}>{lv.label}</option>)}
           </select>
+          <VoicePicker value={tutorVoice} onChange={changeTutorVoice} onPreview={() => speak('Salam alaykoum ! Voici ma voix de professeur.')} previewing={speaking} />
           {savedProgress && <span className="hidden lg:inline text-xs text-muted-foreground">Progression enregistrée</span>}
         </div>
       </div>
 
+      {/* Saved conversations of this language */}
+      <div className="border-b border-border px-3 py-2 flex flex-wrap items-center gap-2 text-sm" data-testid="tutor-conversations">
+        <span className="text-muted-foreground">Mes conversations en {langFrench} :</span>
+        {sessions.length > 0 ? (
+          <select
+            value={currentSessionId || ''}
+            onChange={(e) => (e.target.value ? openConversation(e.target.value) : startNewConversation())}
+            disabled={busy || loadingConversation}
+            aria-label="Conversation"
+            className="rounded-full bg-muted px-3 py-1 border-0 outline-none cursor-pointer max-w-[260px] disabled:opacity-60"
+            data-testid="tutor-session-select"
+          >
+            {!currentSessionId && <option value="">Nouvelle conversation</option>}
+            {sessions.map((session) => (
+              <option key={session.session_id} value={session.session_id}>{sessionLabel(session)}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-xs text-muted-foreground">aucune pour l’instant, elles sont enregistrées automatiquement</span>
+        )}
+        <button type="button" onClick={startNewConversation} disabled={busy || (!currentSessionId && !messages.length)}
+          className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 hover:text-primary disabled:opacity-50"
+          data-testid="tutor-new-conversation">
+          <Plus className="w-3.5 h-3.5" /> Nouvelle
+        </button>
+        {currentSessionId && (
+          <button type="button" onClick={deleteConversation} disabled={busy}
+            className="p-1.5 rounded-full hover:bg-muted text-muted-foreground hover:text-destructive disabled:opacity-50"
+            aria-label="Supprimer la conversation" data-testid="tutor-delete-conversation">
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
+        {loadingConversation && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+      </div>
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
-        {messages.length === 0 && (
+        {messages.length === 0 && !loadingConversation && (
           <div className="max-w-xl mx-auto text-center mt-12">
             <GraduationCap className="w-12 h-12 text-primary mx-auto mb-4" />
             <h2 className="text-2xl font-bold mb-2">Ton prof particulier 24h/24</h2>
-            <p className="text-muted-foreground mb-4">Apprends le <b>{langNative}</b> par écrit ou en <b>conversation vocale</b>. Le prof corrige tes fautes, t'explique, te fait des exercices et te fait parler.</p>
+            <p className="text-muted-foreground mb-4">Apprends : <b>{langFrench}</b> par écrit ou en <b>conversation vocale</b>. Le prof corrige tes fautes, t'explique, te fait des exercices et te fait parler.</p>
             {savedProgress && <p className="text-sm text-primary mb-3">Reprise disponible · niveau {savedProgress.level}</p>}
             <p className="text-sm text-muted-foreground">Choisis ta langue + ton niveau en haut, puis écris ou clique sur <b>📞 Appeler le prof</b>.</p>
           </div>
@@ -319,18 +490,16 @@ export default function LanguageTutorPage() {
               {m.role === 'assistant' ? (
                 <div className="prose prose-sm dark:prose-invert max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                  {ttsSupported && (
-                    <button onClick={() => speak(m.content)} className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline">
-                      <Volume2 className="w-3 h-3" /> Écouter
-                    </button>
-                  )}
+                  <button onClick={() => speak(m.content)} className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                    <Volume2 className="w-3 h-3" /> Écouter
+                  </button>
                 </div>
               ) : <span className="whitespace-pre-wrap">{m.content}</span>}
             </div>
           </div>
         ))}
         {busy && !streamStarted && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-muted/50 text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Le prof réfléchit…</div></div>}
-        {listening && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Mic className="w-4 h-4 animate-pulse" /> Je t'écoute… parle !</div></div>}
+        {dictation && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary">{dictation === 'listening' ? <><Mic className="w-4 h-4 animate-pulse" /> Je t'écoute… parle, puis touche ■ ou tais-toi pour envoyer.</> : <><Loader2 className="w-4 h-4 animate-spin" /> Je note ce que tu as dit…</>}</div></div>}
         {speaking && <div className="max-w-3xl mx-auto"><div className="inline-flex items-center gap-2 rounded-2xl px-4 py-3 bg-primary/10 text-primary"><Volume2 className="w-4 h-4 animate-pulse" /> Le prof parle… <button onClick={stopSpeaking} className="underline">stop</button></div></div>}
         {voiceNotice && <div className="max-w-3xl mx-auto text-sm text-amber-700 dark:text-amber-400">{voiceNotice}</div>}
         <div ref={bottomRef} />
@@ -348,28 +517,33 @@ export default function LanguageTutorPage() {
 
       {/* Input + voice */}
       <form onSubmit={(e) => { e.preventDefault(); send(); }} className="border-t border-border p-3 md:p-4">
+        {call.active && (
+          <div className="max-w-3xl mx-auto">
+            <VoiceCallPanel call={call} voice={tutorVoice} onVoiceChange={changeTutorVoice} title={`Appel avec ton prof · ${langFrench}`} />
+          </div>
+        )}
+        {!call.active && call.error && <p className="max-w-3xl mx-auto mb-2 text-sm text-amber-600 dark:text-amber-400">{call.error}</p>}
         <div className="max-w-3xl mx-auto flex items-end gap-2">
-          <Button type="button" onClick={toggleCall}
-            className={`rounded-full h-11 px-4 gap-2 ${callMode ? 'bg-destructive hover:bg-destructive/90' : ''}`}
-            data-testid="tutor-call-btn" title="Conversation vocale en temps réel">
-            {callMode ? <><PhoneOff className="w-4 h-4" /> Raccrocher</> : <><Phone className="w-4 h-4" /> Appeler</>}
-          </Button>
-          {sttSupported && (
-            <Button type="button" onClick={() => (listening ? stopListening() : startListening())}
-              variant={listening ? 'default' : 'outline'} className="rounded-full h-11 w-11 p-0" title="Parler (voix)">
-              {listening ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+          {!call.active && (
+            <Button type="button" onClick={toggleCall}
+              className="rounded-full h-11 px-4 gap-2 bg-gradient-to-br from-emerald-400 to-teal-600 text-white shadow-md hover:shadow-lg hover:shadow-emerald-500/30"
+              data-testid="tutor-call-btn" title="Conversation vocale avec le prof">
+              <Phone className="w-4 h-4" /> Appeler
             </Button>
           )}
-          <textarea value={input} onChange={(e) => setInput(e.target.value)}
+          <Button type="button" onClick={dictate} disabled={call.active || (busy && !dictation)}
+            variant={dictation ? 'default' : 'outline'} className="rounded-full h-11 w-11 p-0"
+            title={dictation === 'listening' ? 'Terminer et envoyer' : 'Parler (voix)'} data-testid="tutor-mic-btn">
+            {dictation === 'listening' ? <Square className="w-5 h-5" /> : dictation ? <Loader2 className="w-5 h-5 animate-spin" /> : <Mic className="w-5 h-5" />}
+          </Button>
+          <textarea value={input} onChange={(e) => { lastTypedAtRef.current = Date.now(); setInput(e.target.value); }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder={`Écris en ${langNative} ou en français…`} rows={1}
+            placeholder={`Écris en ${langFrench} ou dans ta langue…`} rows={1}
             className="flex-1 resize-none rounded-2xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary max-h-32" />
           <Button type="submit" disabled={busy || !input.trim()} className="rounded-full h-11 w-11 p-0">
             {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
           </Button>
         </div>
-        {!sttSupported && <p className="text-center text-xs text-muted-foreground mt-2">🎤 La voix nécessite Chrome/Edge. Le chat écrit fonctionne partout.</p>}
-        {ttsSupported && voices.length > 0 && !matchingVoice && <p className="text-center text-xs text-muted-foreground mt-2">Aucune voix native {langNative} n’est installée sur cet appareil. Le chat écrit fonctionne normalement.</p>}
       </form>
     </div>
   );

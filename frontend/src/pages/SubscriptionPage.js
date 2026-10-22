@@ -1,18 +1,19 @@
 import { useState, useEffect } from 'react';
 import { Link, useSearchParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { apiErrorMessage } from '@/utils/apiError';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { toast } from 'sonner';
+import { SUPPORT_EMAIL } from '@/utils/contact';
 import { 
   CreditCard, 
   Check,
   Zap,
   Crown,
-  Code,
   Sun,
   Moon,
   Home,
@@ -24,9 +25,14 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Plans ordered by level: a lower plan is already included in a higher one, so
+// it must not be bought on top of it (that would start a second subscription).
+const PLAN_RANKS = { free: 0, mongo: 1, pro: 2, neura_plus: 3, neura_ultra: 4 };
+const PLAN_NAMES = { mongo: 'Mongo', pro: 'Plus', neura_plus: 'Neura+', neura_ultra: 'Neura Ultra' };
+
 const SubscriptionPage = () => {
   const { theme, toggleTheme } = useTheme();
-  const { user, getAuthHeader, fetchUser } = useAuth();
+  const { user, loading: authLoading, getAuthHeader, fetchUser } = useAuth();
   const { t } = useLanguage();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -35,56 +41,71 @@ const SubscriptionPage = () => {
   const [checkingPayment, setCheckingPayment] = useState(false);
   const [billingPeriod, setBillingPeriod] = useState('monthly');
 
+  const sessionId = searchParams.get('session_id');
+  const userId = user?.id;
   useEffect(() => {
-    const sessionId = searchParams.get('session_id');
-    if (sessionId) {
-      checkPaymentStatus(sessionId);
-    }
-  }, [searchParams]);
-
-  const checkPaymentStatus = async (sessionId) => {
-    if (!user) {
-      toast.error('Veuillez vous connecter');
-      navigate('/auth');
+    if (!sessionId || authLoading) return;
+    if (!userId) {
+      const returnTo = `/subscription?session_id=${encodeURIComponent(sessionId)}`;
+      navigate(`/auth?return_to=${encodeURIComponent(returnTo)}`, { replace: true });
       return;
     }
-
-    setCheckingPayment(true);
+    const controller = new AbortController();
+    let timer;
     let attempts = 0;
-    const maxAttempts = 5;
-
-    const pollStatus = async () => {
+    setCheckingPayment(true);
+    const poll = async () => {
+      let verificationError = null;
       try {
-        const response = await axios.get(`${API}/subscriptions/status/${sessionId}`, {
-          headers: getAuthHeader()
+        const response = await axios.get(`${API}/subscriptions/status/${encodeURIComponent(sessionId)}`, {
+          headers: getAuthHeader(), signal: controller.signal, timeout: 20000
         });
-
+        if (controller.signal.aborted) return;
         if (response.data.payment_status === 'paid') {
-          toast.success('Paiement réussi! Votre abonnement est activé.');
           await fetchUser();
+          if (controller.signal.aborted) return;
+          toast.success('Paiement confirmé. Votre abonnement a été actualisé.');
+          setCheckingPayment(false);
           navigate('/subscription', { replace: true });
-          return true;
-        } else if (response.data.status === 'expired') {
-          toast.error('Session expirée. Veuillez réessayer.');
-          navigate('/subscription', { replace: true });
-          return true;
+          return;
         }
-
-        return false;
+        if (response.data.status === 'expired') {
+          toast.error('Session expirée. Veuillez réessayer.');
+          setCheckingPayment(false);
+          navigate('/subscription', { replace: true });
+          return;
+        }
       } catch (error) {
-        console.error('Error checking payment:', error);
-        return false;
+        if (controller.signal.aborted) return;
+        verificationError = error;
+        if (error.response?.status === 401) {
+          navigate(`/auth?return_to=${encodeURIComponent('/subscription?session_id=' + encodeURIComponent(sessionId))}`, { replace: true });
+          return;
+        }
+        if ([400, 403, 404].includes(error.response?.status)) {
+          setCheckingPayment(false);
+          toast.error(apiErrorMessage(error, 'Impossible de vérifier cette session de paiement.'));
+          return;
+        }
+      }
+      if (++attempts < 5) timer = setTimeout(poll, 2000);
+      else {
+        setCheckingPayment(false);
+        if (verificationError) {
+          toast.error(apiErrorMessage(verificationError, 'Vérification du paiement indisponible. Réessayez plus tard.'));
+        } else {
+          toast.info('Confirmation du paiement en attente. Actualisez cette page pour revérifier.');
+        }
       }
     };
+    poll();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [sessionId, authLoading, userId, getAuthHeader, fetchUser, navigate]);
 
-    while (attempts < maxAttempts) {
-      const done = await pollStatus();
-      if (done) break;
-      attempts++;
-      await new Promise(r => setTimeout(r, 2000));
-    }
-
-    setCheckingPayment(false);
+  const isIncludedInCurrentPlan = (planId) => {
+    const currentRank = PLAN_RANKS[user?.subscription];
+    const planRank = PLAN_RANKS[planId];
+    return currentRank !== undefined && planRank !== undefined && planRank > 0 && planRank < currentRank;
   };
 
   const subscribe = async (planId) => {
@@ -104,10 +125,14 @@ const SubscriptionPage = () => {
         headers: getAuthHeader()
       });
 
-      window.location.href = response.data.url;
+      const checkoutUrl = response.data?.url;
+      if (typeof checkoutUrl !== 'string' || !/^https?:\/\//.test(checkoutUrl)) {
+        throw new Error('missing checkout url');
+      }
+      window.location.href = checkoutUrl;
     } catch (error) {
       console.error('Subscription error:', error);
-      toast.error(error.response?.data?.detail || 'Erreur lors de la souscription');
+      toast.error(apiErrorMessage(error, 'Erreur lors de la souscription'));
     } finally {
       setLoading(false);
     }
@@ -121,15 +146,18 @@ const SubscriptionPage = () => {
       price: { monthly: 0, yearly: 0 },
       description: 'Découvrez ce que l’IA peut faire',
       features: [
-        'Routeur IA multi-fournisseurs',
-        'Messages IA avec quota',
-        'Captures d’écran limitées',
-        '3 créations d’images offertes',
-        'Mémoire développeur limitée',
-        'Coran complet avec audio',
-        'Horaires de prière avec Adhan',
+        'Assistant IA Neura Al Noor',
+        'Réflexion : Instantané',
+        '3 styles de réponse au choix (ChatGPT, Claude, Gemini)',
+        'Messages IA avec quota par conversation',
+        'Mémoire : Neura se souvient de toi',
+        'Création de code avec projet téléchargeable (.zip)',
+        'Coran complet avec audio et Moushaf',
+        'Suivi de mémorisation du Coran',
+        'Horaires de prière avec Adhan, Qibla et mosquées',
         'Invocations',
         'Quiz islamiques',
+        'Académie islamique et tuteur de langues',
         'Module Ramadan et Aïd'
       ],
       highlight: false,
@@ -140,18 +168,13 @@ const SubscriptionPage = () => {
       name: 'Mongo',
       icon: Zap,
       price: { monthly: 8.99, yearly: 89.99 },
-      description: 'Le plus populaire',
+      description: 'Le bon équilibre au quotidien',
       features: [
         'Tout du plan Gratuit',
-        'Quotas IA avancée fortement augmentés',
-        'Conversations plus longues',
-        'Jusqu’à 50 captures d’écran par 24 h',
-        'Analyse d’images prolongée',
-        'Mémoire et contexte étendus',
-        'Historique complet',
-        'Réponses détaillées',
-        'Export de conversations',
-        'Génération d’images avec quota étendu'
+        'Réflexion : Instantané et Moyenne',
+        '2× plus d’IA par jour que l’offre gratuite',
+        'Export des conversations (PDF ou texte)',
+        'Historique complet de tes conversations',
       ],
       highlight: true,
       current: user?.subscription === 'mongo'
@@ -160,37 +183,17 @@ const SubscriptionPage = () => {
       id: 'pro',
       name: 'Plus',
       icon: Crown,
-      price: { monthly: 22, yearly: 89.99 },
+      price: { monthly: 22, yearly: 219.99 },
       description: 'Pour une utilisation intensive',
       features: [
         'Tout du plan Mongo',
-        'Accès maximal aux modèles avancés',
-        'Quotas IA trois fois supérieurs à Mongo',
-        'Jusqu’à 80 captures d’écran toutes les 3 h',
-        'Analyse d’images fortement prolongée',
-        'Jusqu’à 50 générations d’images par 24 h',
-        'Mémoire et contexte maximaux'
+        'Réflexion : jusqu’à Élevée',
+        'Mode Work pour les tâches longues',
+        '4× plus d’IA par jour que l’offre gratuite'
       ],
       highlight: false,
       current: user?.subscription === 'pro',
       actionLabel: 'Choisir Plus'
-    },
-    {
-      id: 'developer',
-      name: 'Développeur',
-      icon: Code,
-      price: { monthly: 19.99, yearly: 119.99 },
-      description: 'Pour les développeurs',
-      features: [
-        'Tout du plan Plus',
-        'Accès API complet',
-        'SDK mobile',
-        'Webhooks prière',
-        'Dashboard multi-projets',
-        'Analytics détaillés'
-      ],
-      highlight: false,
-      current: user?.subscription === 'developer'
     },
     {
       id: 'neura_plus',
@@ -200,18 +203,14 @@ const SubscriptionPage = () => {
       description: 'Pour les usages professionnels et intensifs',
       features: [
         'Tout du plan Plus',
-        'Usage IA quasi illimité sous garde-fous',
-        'Accès maximal aux modèles avancés',
-        'Work et Assistant Développeur quasi illimités sous garde-fous',
-        'Captures, images et fichiers quasi illimités sous garde-fous',
-        'Génération multi-fichiers (jusqu’à 10)',
-        'Analyse approfondie du projet',
-        'Mémoire développeur étendue',
-        'Génération d’images à très haut quota'
+        'Réflexion : les 4 niveaux, jusqu’à Très élevée',
+        'La plus grande réflexion pour le code et les problèmes difficiles',
+        'Code plus long et plus détaillé',
+        '8× plus d’IA par jour que l’offre gratuite',
+        'Support prioritaire par e-mail'
       ],
       highlight: false,
       current: user?.subscription === 'neura_plus',
-      included: user?.subscription === 'neura_ultra',
       actionLabel: 'Choisir Neura+'
     },
     {
@@ -219,15 +218,13 @@ const SubscriptionPage = () => {
       name: 'Neura Ultra',
       icon: Crown,
       price: { monthly: 299.99, yearly: 2999.99 },
-      description: 'Niveau ingénieur logiciel IA',
+      description: 'Pour l’usage le plus intensif',
       features: [
         'Tout Neura+',
-        'Génération quasi illimitée (1000 / heure)',
-        'Génération massive (jusqu\'à 30 fichiers)',
-        'Mémoire projet maximale',
-        'Code le plus long & détaillé',
-        'Analyse complète du projet',
-        'Priorité serveur maximale'
+        'Réflexion : les 4 niveaux, jusqu’à Très élevée',
+        '20× plus d’IA par jour que l’offre gratuite',
+        'Accès en avant-première aux nouvelles fonctions',
+        'Support prioritaire par e-mail'
       ],
       highlight: false,
       current: user?.subscription === 'neura_ultra'
@@ -295,6 +292,37 @@ const SubscriptionPage = () => {
             )}
           </div>
 
+          {user?.has_recurring_subscription && <section className="max-w-xl mx-auto mb-6 border-y py-4 space-y-3" aria-label="Abonnement actuel">
+            <h2 className="font-semibold">Abonnement actuel</h2>
+            <p>État : {user.subscription_status}</p>
+            {user.subscription_expires_at && <p>{user.subscription_cancel_at_period_end ? 'Fin de l’accès' : 'Fin de période'} : {new Date(user.subscription_expires_at).toLocaleString()}</p>}
+            {user.subscription_cancel_at_period_end ? <p>Renouvellement annulé. L’accès reste actif jusqu’à la fin de la période payée.</p> : ['active', 'trialing', 'past_due'].includes(user.subscription_status) && <Button variant="outline" disabled={loading} onClick={async () => {
+              setLoading(true);
+              try {
+                await axios.post(`${API}/subscriptions/cancel`, {}, { headers: getAuthHeader() });
+                await fetchUser();
+                toast.success('Renouvellement annulé');
+              } catch (error) { toast.error(apiErrorMessage(error, 'Annulation impossible')); }
+              finally { setLoading(false); }
+            }}>Annuler le renouvellement</Button>}
+            {user.subscription_cancel_at_period_end && <Button variant="outline" disabled={loading} data-testid="resume-subscription" onClick={async () => {
+              setLoading(true);
+              try {
+                await axios.post(`${API}/subscriptions/resume`, {}, { headers: getAuthHeader() });
+                await fetchUser();
+                toast.success('Abonnement repris');
+              } catch (error) { toast.error(apiErrorMessage(error, 'Reprise impossible')); }
+              finally { setLoading(false); }
+            }}>Reprendre mon abonnement</Button>}
+            <Button variant="ghost" disabled={loading} data-testid="billing-portal" onClick={async () => {
+              setLoading(true);
+              try {
+                const response = await axios.post(`${API}/subscriptions/portal`, { origin_url: window.location.origin }, { headers: getAuthHeader() });
+                window.location.href = response.data.url;
+              } catch (error) { toast.error(apiErrorMessage(error, 'Espace de paiement indisponible')); setLoading(false); }
+            }}>Gérer le paiement et les factures</Button>
+          </section>}
+
           {/* Billing Toggle */}
           <div className="flex items-center justify-center gap-4 mb-8">
             <button
@@ -335,7 +363,7 @@ const SubscriptionPage = () => {
                 {plan.highlight && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
                     <span className="px-3 py-1 rounded-full bg-primary text-primary-foreground text-xs font-medium">
-                      Populaire
+                      Conseillé
                     </span>
                   </div>
                 )}
@@ -390,7 +418,7 @@ const SubscriptionPage = () => {
                   >
                     {plan.current ? 'Votre forfait actuel' : (user ? 'Accéder' : 'Commencer')}
                   </Button>
-                ) : plan.current || plan.included || user?.is_vip ? (
+                ) : plan.current || isIncludedInCurrentPlan(plan.id) || user?.is_vip ? (
                   <Button 
                     variant="outline" 
                     className="w-full rounded-full"
@@ -398,9 +426,9 @@ const SubscriptionPage = () => {
                   >
                     {user?.is_vip
                       ? 'Inclus VIP'
-                      : plan.included
-                        ? 'Inclus avec Neura Ultra'
-                        : 'Offre actuelle'}
+                      : plan.current
+                        ? 'Offre actuelle'
+                        : `Inclus avec ${PLAN_NAMES[user?.subscription] || 'votre offre'}`}
                   </Button>
                 ) : (
                   <Button 
@@ -420,7 +448,7 @@ const SubscriptionPage = () => {
           {/* Info */}
           <div className="text-center mt-12 text-sm text-muted-foreground">
             <p>Paiement sécurisé par Stripe • Remboursement possible sous 14 jours</p>
-            <p className="mt-2">Questions? Contactez-nous à support@neura-alnour.com</p>
+            <p className="mt-2">Questions ? Contactez-nous à {SUPPORT_EMAIL}</p>
           </div>
         </div>
       </main>
